@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 6;
-export const SCHEMA_MIGRATION_ID = "006_project_context";
+export const SCHEMA_VERSION = 7;
+export const SCHEMA_MIGRATION_ID = "007_project_topic_inbox";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -532,8 +532,62 @@ const statements = [
     updated_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_project_context_facts_namespace
-    ON project_context_facts(namespace_id, status, updated_at DESC)`
-];
+    ON project_context_facts(namespace_id, status, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_topics (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    project_id TEXT,
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'archived', 'merged')),
+    version INTEGER NOT NULL,
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_topics_namespace_status_updated ON project_topics(namespace_id, status, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_topic_evidence (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL REFERENCES project_topics(id) ON DELETE CASCADE,
+    namespace_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    UNIQUE(topic_id, memory_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_topic_evidence_topic ON project_topic_evidence(namespace_id, topic_id, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_topic_candidates (
+    id TEXT PRIMARY KEY,
+    topic_id TEXT NOT NULL REFERENCES project_topics(id) ON DELETE CASCADE,
+    namespace_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    conclusion TEXT NOT NULL,
+    proposed_layer TEXT NOT NULL CHECK (proposed_layer IN ('L2', 'L3', 'Skill')),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'deferred', 'superseded')),
+    version INTEGER NOT NULL,
+    supersedes_id TEXT REFERENCES project_topic_candidates(id),
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_topic_candidates_topic_status ON project_topic_candidates(namespace_id, topic_id, status, updated_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS project_topic_analysis_runs (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    topic_id TEXT,
+    status TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(namespace_id, input_hash)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_project_topic_analysis_namespace ON project_topic_analysis_runs(namespace_id, updated_at DESC)`
+ ];
 
 export function migrate(db: Database.Database): void {
   const now = new Date().toISOString();
@@ -542,7 +596,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );

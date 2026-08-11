@@ -418,8 +418,8 @@ describe("repository sqlite schema contract", () => {
 
       const migrated = new MemoryDb({ path: dbPath });
       expect(migrated.schemaVersion()).toEqual({
-        version: 6,
-        lastMigrationId: "006_project_context"
+        version: 7,
+        lastMigrationId: "007_project_topic_inbox"
       });
       expect(memoryLayerCounts(migrated.db)).toEqual(beforeCounts);
       expect(migrated.db.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "old-vector-memory" });
@@ -432,6 +432,12 @@ describe("repository sqlite schema contract", () => {
         "project_context_facts",
         "project_context_goals",
         "project_context_work_items"
+      ]));
+      expect(sqliteNames(migrated, "project_topic%")).toEqual(expect.arrayContaining([
+        "project_topics",
+        "project_topic_evidence",
+        "project_topic_candidates",
+        "project_topic_analysis_runs"
       ]));
       expect((migrated.db.prepare(`PRAGMA index_list(project_context_goals)`).all() as Array<{ name: string }>)
         .map((index) => index.name)).toContain("uq_project_context_active_goal");

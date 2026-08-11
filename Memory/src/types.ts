@@ -102,6 +102,28 @@ export type {
   ProjectWorkItemRecord
 } from "./service/project-context/project-context-types.js";
 
+export type ProjectTopicStatus = "active" | "archived" | "merged";
+export type ProjectTopicCandidateStatus = "pending" | "approved" | "rejected" | "deferred" | "superseded";
+export interface ProjectTopicRecord {
+  id: string; namespaceId: string; projectId?: string; title: string; summary: string;
+  status: ProjectTopicStatus; version: number; sourceMemoryIds: string[];
+  metadata: Record<string, unknown>; createdAt: IsoTime; updatedAt: IsoTime;
+}
+export interface ProjectTopicEvidenceRecord {
+  id: string; topicId: string; namespaceId: string; memoryId: string; role: string;
+  summary: string; metadata: Record<string, unknown>; createdAt: IsoTime;
+}
+export interface ProjectTopicCandidateRecord {
+  id: string; topicId: string; namespaceId: string; title: string; conclusion: string;
+  proposedLayer: "L2" | "L3" | "Skill"; status: ProjectTopicCandidateStatus; version: number;
+  supersedesId?: string; sourceMemoryIds: string[]; metadata: Record<string, unknown>;
+  createdAt: IsoTime; updatedAt: IsoTime;
+}
+export interface ProjectTopicAnalysisRunRecord {
+  id: string; namespaceId: string; inputHash: string; topicId?: string; status: string;
+  result: Record<string, unknown>; createdAt: IsoTime; updatedAt: IsoTime;
+}
+
 export interface ApiErrorBody {
   error: {
     code:

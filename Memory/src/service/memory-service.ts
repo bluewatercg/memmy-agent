@@ -3039,7 +3039,13 @@ function scopeBundleTables(
   const sessionIds = new Set<string>();
   const episodeIds = new Set<string>();
   const rawTurnIds = new Set<string>();
-
+  const topicIds = new Set<string>();
+  for (const row of tables.project_topics ?? []) {
+    if (stringField(row, "namespace_id") === namespaceIdFromContext(normalized)) {
+      const id = stringField(row, "id");
+      if (id) topicIds.add(id);
+    }
+  }
   const memories = tables.memories ?? [];
   for (const row of memories) {
     const sessionId = stringField(row, "session_id");
@@ -3085,8 +3091,8 @@ function scopeBundleTables(
     if (table === "artifacts") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
     if (table === "feedback" || table === "decision_repairs" || table === "evolution_jobs") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, ["l1_memory_id", "target_memory_id"]);
     if (table === "recall_events") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) || rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
-    if (table === "api_logs" || table === "audit_logs") return bundleLogReferencesScope(row, sessionIds, episodeIds, rawTurnIds, memoryIds, normalized);
-    return false;
+    if (table === "project_topics" || table === "project_topic_analysis_runs") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized);
+    if (table === "project_topic_evidence" || table === "project_topic_candidates") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && (table === "project_topic_evidence" ? memoryIds.has(stringField(row, "memory_id") ?? "") || topicIds.has(stringField(row, "topic_id") ?? "") : topicIds.has(stringField(row, "topic_id") ?? ""));
   });
 
   const result: Record<string, Array<Record<string, unknown>>> = {};
