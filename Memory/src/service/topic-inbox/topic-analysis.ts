@@ -6,10 +6,14 @@ import { isRecord } from "../../utils/json.js";
 import type { TopicAnalysisResult, TopicCandidateAnalysis } from "./topic-inbox-types.js";
 
 export function topicAnalysisInputHash(topic: ProjectTopicRecord | undefined, evidence: Array<{ memory: MemoryRow; role: string | string[] }>): string {
-  return stableHash({
-    previous: topic ? { id: topic.id, version: topic.version, title: topic.title, summary: topic.summary } : null,
-    evidence: evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role, vectors: memoryVectorEntries(memory).map((entry) => ({ field: entry.vectorField, vector: entry.vector, model: entry.embeddingModel, provider: entry.embeddingProvider })) })).sort((a, b) => a.id.localeCompare(b.id))
-  });
+  return stableHash(evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role })).sort((a, b) => a.id.localeCompare(b.id)));
+}
+
+export function topicCentroidInputHash(evidence: Array<{ memory: MemoryRow }>): string {
+  return stableHash(evidence.map(({ memory }) => ({
+    id: memory.id,
+    vectors: memoryVectorEntries(memory).map((entry) => ({ field: entry.vectorField, vector: entry.vector, model: entry.embeddingModel, provider: entry.embeddingProvider }))
+  })).sort((a, b) => a.id.localeCompare(b.id)));
 }
 
 export async function analyzeProjectTopic(input: {

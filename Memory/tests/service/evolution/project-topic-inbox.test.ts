@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { EnqueueJobInput } from "../../../src/service/worker/job-handlers.js";
-import { attachMemoryVector } from "../../../src/storage/memory-vector-state.js";
-import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories, type LlmClient } from "../../../src/index.js";
+import type { LlmClient, LlmCompletionOptions, LlmMessage } from "../../../src/model/types.js";
+import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories } from "../../../src/index.js";
 import { ProjectTopicInboxService } from "../../../src/service/topic-inbox/project-topic-inbox.js";
+import { attachMemoryVector } from "../../../src/storage/memory-vector-state.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -101,29 +102,45 @@ describe("ProjectTopicInbox", () => {
     await inbox.processRefresh(namespace);
     expect(inbox.list(namespace).topics.reduce((count, item) => count + item.evidence.length, 0)).toBe(7);
   });
-  it("uses a captured keyset corpus when rows mutate between bounded pages", async () => {
+  it("uses captured rows when a separate connection mutates namespace, layer, eligibility, and content between pages", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const capturedIds = Array.from({ length: 7 }, (_, index) => insertTrace(service, `captured refresh trace ${index}`, `snapshot-${index}`));
+    const capturedValues = new Map(capturedIds.map((id) => [id, repos.memories.get(id)!.memoryValue]));
     const pageMethod = repos.memories.listEligibleL1SnapshotPage.bind(repos.memories);
     let pages = 0;
-    repos.memories.listEligibleL1SnapshotPage = (filter, boundary, afterId, limit) => {
-      const page = pageMethod(filter, boundary, afterId, limit);
+    repos.memories.listEligibleL1SnapshotPage = (filter, snapshotId, afterId, limit) => {
+      const page = pageMethod(filter, snapshotId, afterId, limit);
       pages += 1;
       if (pages === 1) {
+        const concurrentDb = new Repositories(db.db);
         insertTrace(service, "concurrent refresh insert", "snapshot-concurrent");
-        const changed = repos.memories.get(capturedIds[3]!)!;
-        repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nconcurrently updated`, updatedAt: new Date().toISOString() });
+        const namespaceChanged = concurrentDb.memories.get(capturedIds[3]!)!;
+        concurrentDb.memories.update({ ...namespaceChanged, appId: "other-project", info: { ...namespaceChanged.info, project_id: "other-project" }, updatedAt: new Date().toISOString() });
+        const layerChanged = concurrentDb.memories.get(capturedIds[4]!)!;
+        concurrentDb.memories.update({ ...layerChanged, memoryLayer: "L2", properties: { ...layerChanged.properties, internal_info: { ...layerChanged.properties.internal_info, memory_layer: "L2" } }, updatedAt: new Date().toISOString() });
+        const archived = concurrentDb.memories.get(capturedIds[5]!)!;
+        concurrentDb.memories.update({ ...archived, status: "archived", updatedAt: new Date().toISOString() });
+        const contentChanged = concurrentDb.memories.get(capturedIds[6]!)!;
+        concurrentDb.memories.update({ ...contentChanged, memoryValue: "mutated after snapshot", updatedAt: new Date().toISOString() });
       }
       return page;
     };
-    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Snapshot", summary: "Captured corpus" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item), refreshPageSize: 3 });
-
+    const seenValues = new Map<string, string>();
+    const inbox = new ProjectTopicInboxService({ repos, llm: {
+      ...topicLlm([]),
+      completeJson: async <T extends Record<string, unknown>>(_messages: LlmMessage[], _options: LlmCompletionOptions) => {
+        const payload = JSON.parse(_messages[1]!.content) as { evidence: Array<{ id: string; value: string }> };
+        for (const evidence of payload.evidence) seenValues.set(evidence.id, evidence.value);
+        return { topic: { title: "Snapshot", summary: "Captured corpus" }, candidates: [] } as unknown as T;
+      }
+    }, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item), refreshPageSize: 3 });
     await inbox.processRefresh({ source: "codex", profileId: "p", userId: "u", projectId: "project" });
 
     const evidenceIds = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics.flatMap((item) => item.evidence.map((evidence) => evidence.memoryId));
     expect(evidenceIds.sort()).toEqual(capturedIds.sort());
     expect(new Set(evidenceIds).size).toBe(capturedIds.length);
+    expect(seenValues.get(capturedIds[6]!)).toBe(capturedValues.get(capturedIds[6]!));
     expect(pages).toBeGreaterThan(1);
   });
 
@@ -145,14 +162,14 @@ describe("ProjectTopicInbox", () => {
     expect(candidates.filter((item) => item.status === "pending").map((item) => item.metadata.stableKey).sort()).toEqual(["backend", "frontend"]);
     expect(candidates.find((item) => item.metadata.stableKey === "frontend" && item.status === "pending")?.supersedesId).toBeTruthy();
   });
-  it("uses stableKey as the title-independent Unicode candidate slot", async () => {
+  it("uses stableKey as the title-independent Unicode slot while title-only edits supersede lineage", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const memoryId = insertTrace(service, "中文候选槽位", "unicode-stable-key");
     const base = { stableKey: "发布/前端", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] };
     const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([
       { topic: { title: "发布", summary: "中文流程" }, candidates: [{ ...base, title: "检查前端", conclusion: "检查资源。" }] },
-      { topic: { title: "发布", summary: "中文流程更新" }, candidates: [{ ...base, title: "验证前端发布", conclusion: "检查资源和产物。" }] }
+      { topic: { title: "发布", summary: "中文流程" }, candidates: [{ ...base, title: "验证前端发布", conclusion: "检查资源。" }] }
     ]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
     await inbox.ingest(memoryId);
     const changed = repos.memories.get(memoryId)!;
@@ -162,8 +179,26 @@ describe("ProjectTopicInbox", () => {
     const candidates = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics[0]!.candidates;
     const current = candidates.find((item) => item.status === "pending")!;
     expect(current.title).toBe("验证前端发布");
+    expect(current.conclusion).toBe("检查资源。");
     expect(current.supersedesId).toBe(candidates.find((item) => item.title === "检查前端")?.id);
     expect(current.metadata.stableKey).toBe("发布/前端");
+  });
+
+  it("keeps Chinese fallback slots deterministic without stableKey", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "中文回退槽位", "unicode-fallback");
+    const base = { title: "发布检查", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: ["配置"] };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([
+      { topic: { title: "发布", summary: "中文回退" }, candidates: [{ ...base, conclusion: "检查资源。" }] },
+      { topic: { title: "发布", summary: "中文回退" }, candidates: [{ ...base, conclusion: "检查资源和产物。" }] }
+    ]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const changed = repos.memories.get(memoryId)!;
+    repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nchanged`, updatedAt: new Date().toISOString() });
+    await inbox.ingest(memoryId);
+    const candidates = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics[0]!.candidates;
+    expect(candidates.find((item) => item.status === "pending")?.supersedesId).toBe(candidates.find((item) => item.status === "superseded")?.id);
   });
 
   it("rejects duplicate candidate slots before topic, evidence, or candidate writes", async () => {
@@ -179,26 +214,30 @@ describe("ProjectTopicInbox", () => {
     expect(db.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_candidates`).get()).toEqual({ count: 0 });
   });
 
-  it("recomputes centroid for vector-only changes without topic or candidate versions", async () => {
+  it("recomputes centroid for vector-only changes without invoking semantic analysis or lifecycle changes", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);
     const memoryId = insertTrace(service, "vector centroid", "vector-centroid");
-    const firstMemory = attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [1, 0] });
-    repos.memories.updateMaintenance(firstMemory);
-    const response = { topic: { title: "Vectors", summary: "Vector centroid" }, candidates: [{ stableKey: "vector-policy", title: "Vector policy", conclusion: "Keep vectors current.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] };
-    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([response, response]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    repos.memories.updateMaintenance(attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [1, 0] }));
+    let llmCalls = 0;
+    const firstResponse = { topic: { title: "Vectors", summary: "Vector centroid" }, candidates: [{ stableKey: "vector-policy", title: "Vector policy", conclusion: "Keep vectors current.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] };
+    const deliberatelyDifferent = { topic: { title: "Wrong second analysis", summary: "Must not be used" }, candidates: [{ stableKey: "different", title: "Different", conclusion: "Different lifecycle.", proposedLayer: "L3", risk: "high", confidence: "low", verificationStatus: "unverified", verificationEvidence: "", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] };
+    const llm = topicLlm([firstResponse, deliberatelyDifferent]);
+    const completeJson = llm.completeJson.bind(llm);
+    llm.completeJson = async <T extends Record<string, unknown>>(messages: LlmMessage[], options: LlmCompletionOptions) => { llmCalls += 1; return completeJson<T>(messages, options); };
+    const inbox = new ProjectTopicInboxService({ repos, llm, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
     await inbox.ingest(memoryId);
     const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
     const before = inbox.list(namespace).topics[0]!;
-    const vectorOnly = attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [0, 1] });
-    repos.memories.updateMaintenance(vectorOnly);
+    repos.memories.updateMaintenance(attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [0, 1] }));
     await inbox.ingest(memoryId);
     const after = inbox.list(namespace).topics[0]!;
 
+    expect(llmCalls).toBe(1);
     expect(after.topic.metadata.embeddingCentroid).toEqual([0, 1]);
     expect(after.topic.version).toBe(before.topic.version);
-    expect(after.candidates).toHaveLength(before.candidates.length);
-    expect(after.candidates[0]?.version).toBe(before.candidates[0]?.version);
+    expect(after.topic.title).toBe("Vectors");
+    expect(after.candidates).toEqual(before.candidates);
   });
 
 

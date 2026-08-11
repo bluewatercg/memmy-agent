@@ -7,7 +7,7 @@ import { nowIso } from "../../utils/time.js";
 import { namespaceForMemory, namespaceIdFromContext, normalizeNamespace } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { evaluateTopicAutoApproval } from "./auto-approval-policy.js";
-import { analyzeProjectTopic, topicAnalysisInputHash } from "./topic-analysis.js";
+import { analyzeProjectTopic, topicAnalysisInputHash, topicCentroidInputHash } from "./topic-analysis.js";
 import type { ProjectTopicInbox, TopicCandidateDecision, TopicDecisionResult, TopicInboxQuery, TopicInboxView, TopicIngestResult, TopicRefreshResult } from "./topic-inbox-types.js";
 import { matchProjectTopic, topicSignalsForMemory } from "./topic-matcher.js";
 
@@ -27,7 +27,11 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
 
   async ingest(memoryId: string): Promise<TopicIngestResult> {
     const memory = this.deps.repos.memories.get(memoryId);
-    if (!memory || memory.memoryLayer !== "L1" || memory.status !== "activated") return { assigned: false, unchanged: true, candidateIds: [] };
+    return memory ? this.ingestMemory(memory) : { assigned: false, unchanged: true, candidateIds: [] };
+  }
+
+  private async ingestMemory(memory: MemoryRow): Promise<TopicIngestResult> {
+    if (memory.memoryLayer !== "L1" || memory.status !== "activated") return { assigned: false, unchanged: true, candidateIds: [] };
     const namespace = namespaceForMemory(memory);
     const namespaceId = namespaceIdFromContext(namespace);
     const match = matchProjectTopic(memory, this.deps.repos.topics.listTopics(namespaceId, ["active"]));
@@ -41,6 +45,14 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     const claimOwner = newId("topic_analysis_owner");
     const leaseUntil = new Date(Date.parse(at) + (this.deps.analysisLeaseMs ?? 5 * 60_000)).toISOString();
+    const centroidHash = topicCentroidInputHash(evidence);
+    if (match.topic && match.topic.metadata.centroidInputHash !== centroidHash) {
+      const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
+      const centroidMetadata = { ...match.topic.metadata, centroidInputHash: centroidHash, ...(embeddingCentroid.length ? { embeddingCentroid } : {}) };
+      this.deps.repos.topics.updateTopicMetadata(match.topic.id, namespaceId, centroidMetadata, at);
+    }
+    const completed = this.deps.repos.topics.findAnalysisRun(namespaceId, inputHash);
+    if (completed?.status === "succeeded") return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
     if (!this.deps.repos.topics.claimAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, owner: claimOwner, at, leaseUntil })) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
     let analysis;
     try {
@@ -53,13 +65,13 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     try {
       this.deps.repos.transaction(() => {
         if (!match.topic) this.deps.repos.topics.insertTopic(topic);
-        if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
+        if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at }, memory);
         const sourceMemoryIds = evidence.map((item) => item.memory.id);
         const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
         const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
         const centroidChanged = !sameNumbers(numberArray(current.metadata.embeddingCentroid), embeddingCentroid);
         const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
-        const metadata = { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) };
+        const metadata = { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), centroidInputHash: centroidHash, ...(embeddingCentroid.length ? { embeddingCentroid } : {}) };
         if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata, version: current.version + 1, updatedAt: at }, current.version);
         else if (centroidChanged) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
         const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
@@ -68,7 +80,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
         for (const candidate of analysis.candidates) {
           const identity = candidateIdentity(candidate);
           const predecessor = pendingByIdentity.get(identity);
-          if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) { retained.add(predecessor.id); continue; }
+          if (predecessor && predecessor.title === candidate.title && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) { retained.add(predecessor.id); continue; }
           const policy = evaluateTopicAutoApproval(candidate, evidence.map((item) => item.memory));
           const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, candidateIdentity: identity, ...(candidate.stableKey ? { stableKey: candidate.stableKey } : {}), policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
           this.deps.repos.topics.insertCandidate(record);
@@ -124,7 +136,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const memories = this.eligibleCorpus(normalized);
     const cursor = corpusCursor(memories);
     if (this.deps.repos.runtime.getKv(`topic_refresh_cursor:${namespaceId}`)?.value === cursor) return;
-    for (const memory of memories) await this.ingest(memory.id);
+    for (const memory of memories) await this.ingestMemory(memory);
     this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, cursor);
   }
 

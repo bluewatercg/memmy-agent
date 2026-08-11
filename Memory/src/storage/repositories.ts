@@ -586,26 +586,25 @@ export class MemoryRepository {
   eligibleL1SnapshotBoundary(filter: MemoryFilter): string | undefined {
     const built = buildMemoryWhere({ ...filter, memoryLayer: "L1", status: "activated" });
     const snapshotId = newId("topic_refresh_snapshot");
-    this.db.prepare(`CREATE TEMP TABLE IF NOT EXISTS project_topic_refresh_snapshot_ids (
-      snapshot_id TEXT NOT NULL, memory_id TEXT NOT NULL, PRIMARY KEY (snapshot_id, memory_id)
+    this.db.prepare(`CREATE TEMP TABLE IF NOT EXISTS project_topic_refresh_snapshot_rows (
+      snapshot_id TEXT NOT NULL, memory_id TEXT NOT NULL, row_json TEXT NOT NULL,
+      vectors_json TEXT NOT NULL, PRIMARY KEY (snapshot_id, memory_id)
     ) WITHOUT ROWID`).run();
-    this.db.prepare(`INSERT INTO project_topic_refresh_snapshot_ids (snapshot_id, memory_id)
-      SELECT ?, id FROM memories WHERE ${built.where}`).run(snapshotId, ...built.params);
-    const count = this.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_refresh_snapshot_ids WHERE snapshot_id = ?`).get(snapshotId) as { count: number };
-    return count.count > 0 ? snapshotId : undefined;
+    const memories = this.hydrateMany((this.db.prepare(`SELECT * FROM memories WHERE ${built.where}`).all(...built.params) as MemorySqlRow[]).map(memoryFromSql));
+    const insert = this.db.prepare(`INSERT INTO project_topic_refresh_snapshot_rows (snapshot_id, memory_id, row_json, vectors_json) VALUES (?, ?, ?, ?)`);
+    for (const memory of memories) insert.run(snapshotId, memory.id, toJson(memory), toJson(attachedMemoryVectorEntries(memory)));
+    return memories.length > 0 ? snapshotId : undefined;
   }
 
-  listEligibleL1SnapshotPage(filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
-    const built = buildMemoryWhere({ ...filter, memoryLayer: "L1" });
-    const rows = this.db.prepare(`SELECT memories.* FROM memories
-      JOIN project_topic_refresh_snapshot_ids snapshot ON snapshot.memory_id = memories.id
-      WHERE ${built.where} AND snapshot.snapshot_id = ? AND (? IS NULL OR memories.id > ?)
-      ORDER BY memories.id ASC LIMIT ?`).all(...built.params, snapshotId, afterId ?? null, afterId ?? null, limit) as MemorySqlRow[];
-    return this.hydrateMany(rows.map(memoryFromSql));
+  listEligibleL1SnapshotPage(_filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
+    const rows = this.db.prepare(`SELECT row_json, vectors_json FROM project_topic_refresh_snapshot_rows
+      WHERE snapshot_id = ? AND (? IS NULL OR memory_id > ?) ORDER BY memory_id ASC LIMIT ?`)
+      .all(snapshotId, afterId ?? null, afterId ?? null, limit) as Array<{ row_json: string; vectors_json: string }>;
+    return rows.map((row) => attachMemoryVectors(parseJson(row.row_json, {} as MemoryRow), parseJson(row.vectors_json, [] as MemoryVectorValue[])));
   }
 
   releaseEligibleL1Snapshot(snapshotId: string): void {
-    this.db.prepare(`DELETE FROM project_topic_refresh_snapshot_ids WHERE snapshot_id = ?`).run(snapshotId);
+    this.db.prepare(`DELETE FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ?`).run(snapshotId);
   }
 
   listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {
@@ -3677,12 +3676,14 @@ export class ProjectTopicRepository {
     if (!result.changes) throw new Error(`project topic not found: ${id}`);
     return this.getTopic(id, namespaceId)!;
   }
-
-  attachEvidence(evidence: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord {
+  attachEvidence(evidence: ProjectTopicEvidenceRecord, capturedMemory?: MemoryRow): ProjectTopicEvidenceRecord {
     if (!this.getTopic(evidence.topicId, evidence.namespaceId)) throw new Error("project topic namespace mismatch");
-    const memory = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
-    if (!memory || memory.memory_layer !== "L1") throw new Error("project topic evidence must reference an L1 memory");
-    if (namespaceIdFromContext(namespaceForMemory(memoryFromSql(memory))) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
+    const memory = capturedMemory ?? (() => {
+      const row = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
+      return row ? memoryFromSql(row) : undefined;
+    })();
+    if (!memory || memory.id !== evidence.memoryId || memory.memoryLayer !== "L1") throw new Error("project topic evidence must reference an L1 memory");
+    if (namespaceIdFromContext(namespaceForMemory(memory)) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
     this.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic_id, memory_id) DO NOTHING`)
       .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);
     const stored = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND memory_id = ? AND namespace_id = ?`).get(evidence.topicId, evidence.memoryId, evidence.namespaceId) as EvidenceSqlRow | undefined;

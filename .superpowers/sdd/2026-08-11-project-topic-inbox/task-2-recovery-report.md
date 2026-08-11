@@ -42,3 +42,31 @@ $ git diff --check
 ## Concerns
 
 None. The unrelated untracked `docs/superpowers/plans/2026-08-11-project-topic-inbox.md` was not modified or staged.
+
+## Fix Round 1
+
+### Findings Addressed
+
+1. Refresh now snapshots complete serialized `MemoryRow` values and attached vector entries, not only IDs. Keyset pages read only immutable snapshot rows, and `processRefresh` ingests those captured rows. The deterministic boundary test mutates namespace, layer, status, and content after page one and inserts a new row; all and only captured rows are processed once with captured content.
+2. Semantic and centroid hashes are separate. The semantic hash excludes vectors and analysis output; the centroid hash includes vector field/content/model/provider. A vector-only delta updates centroid metadata before analysis claiming and returns through the existing successful semantic run without invoking the LLM or candidate reconciliation.
+3. `stableKey` remains the title-independent slot identity, while title is now material candidate lifecycle content. A title-only edit creates a replacement candidate and supersedes its predecessor. Unicode fallback without `stableKey` remains deterministic.
+
+### Exact Verification
+
+From `Memory`:
+
+```text
+$ npm run typecheck
+> tsc -p tsconfig.json --noEmit
+(exit 0)
+
+$ npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts
+Test Files  7 passed (7)
+Tests  62 passed (62)
+Duration  20.23s
+(exit 0)
+```
+
+### Concerns
+
+None. Snapshot storage is connection-private and released in `finally`; the unrelated untracked plan remains untouched.
