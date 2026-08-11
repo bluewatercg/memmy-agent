@@ -146,16 +146,17 @@ Default connection: `http://127.0.0.1:18960`. Override with `--url`, `--token`, 
 
 ## Supported Agent Sources
 
-| Agent | History Import | Live Skill/Hook | Source Adapter |
+| Agent | History Import | Live Skill/Hook | Source ID |
 |---|---|---|---|
-| Pi / OMP | ✅ `~/.pi/agent/sessions` | ✅ Hook template | `pi` |
+| Pi / OMP | ✅ `~/.pi/agent/sessions` | ✅ Hook template | `omp` |
 | Codex | ✅ `~/.codex/sessions` | ✅ Skill | `codex` |
-| Claude Code | ✅ `~/.claude/transcripts` | ✅ Skill | `claude-code` |
+| Claude Code | ✅ `~/.claude/transcripts` | ✅ Skill | `claude_code` |
 | FreeBuff | ✅ Session history | ✅ `.agents/skills` | `freebuff` |
-| Cursor | ✅ Via upstream import | — | Upstream |
-| OpenCode | ✅ Via upstream import | — | Upstream |
-| OpenClaw | ✅ Via upstream import | — | Upstream |
-| Hermes Agent | ✅ Via upstream import | — | Upstream |
+| Cursor | ✅ `.cursor/` project SQLite | — | `cursor` |
+| OpenCode | ✅ State SQLite | — | `opencode` |
+| OpenClaw | ✅ Conversation + memos SQLite | — | `openclaw` |
+| Hermes Agent | ✅ Rollouts + state DB | — | `hermes` |
+| WorkBuddy | ✅ Projects JSONL sessions | — | `workbuddy` |
 
 ## Core Concepts
 

@@ -146,16 +146,17 @@ memmy-memory namespace current              # 显示当前命名空间
 
 ## 支持的 Agent 源
 
-| Agent | 历史导入 | 实时 Skill/Hook | 源适配器 |
+| Agent | 历史导入 | 实时 Skill/Hook | Source ID |
 |---|---|---|---|
-| Pi / OMP | ✅ `~/.pi/agent/sessions` | ✅ Hook 模板 | `pi` |
+| Pi / OMP | ✅ `~/.pi/agent/sessions` | ✅ Hook 模板 | `omp` |
 | Codex | ✅ `~/.codex/sessions` | ✅ Skill | `codex` |
-| Claude Code | ✅ `~/.claude/transcripts` | ✅ Skill | `claude-code` |
+| Claude Code | ✅ `~/.claude/transcripts` | ✅ Skill | `claude_code` |
 | FreeBuff | ✅ 会话历史 | ✅ `.agents/skills` | `freebuff` |
-| Cursor | ✅ 通过上游导入 | — | 上游 |
-| OpenCode | ✅ 通过上游导入 | — | 上游 |
-| OpenClaw | ✅ 通过上游导入 | — | 上游 |
-| Hermes Agent | ✅ 通过上游导入 | — | 上游 |
+| Cursor | ✅ `.cursor/` 项目 SQLite | — | `cursor` |
+| OpenCode | ✅ State SQLite | — | `opencode` |
+| OpenClaw | ✅ Conversation + memos SQLite | — | `openclaw` |
+| Hermes Agent | ✅ Rollouts + state DB | — | `hermes` |
+| WorkBuddy | ✅ Projects JSONL 会话 | — | `workbuddy` |
 
 ## 核心概念
 
