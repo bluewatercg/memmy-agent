@@ -131,8 +131,31 @@ memmy-memory init --agent claude   # Claude Code skill
 ```
 
 每个 Agent 现在通过 Docker 服务读写记忆。
+### 4. （可选）项目上下文汇总 Skill
 
-### 4. （可选）CLI 访问
+`memmy-project-summarize` skill 将多个 Agent 的项目上下文整合到 Memmy 记忆中：
+
+```bash
+# 复制 skill 到你的 Agent skill 目录
+cp -r skills/memmy-project-summarize ~/.agents/skills/
+
+# 或用于 Claude Code
+cp -r skills/memmy-project-summarize ~/.claude/skills/
+```
+
+使用方式：
+
+```bash
+# 汇总当前项目状态
+memmy-project-summarize
+
+# 用当前工作更新项目上下文
+memmy-project-summarize --update
+```
+
+该 skill 从你的工作区提取决策、经验和验证过的事实，并写入 Memmy 记忆，使项目知识在所有 Agent 间共享。
+
+### 5. （可选）CLI 访问
 
 ```bash
 memmy-memory health                         # 服务健康检查

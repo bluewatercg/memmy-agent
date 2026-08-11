@@ -131,8 +131,31 @@ memmy-memory init --agent claude   # Claude Code skill
 ```
 
 Each agent now reads/writes memory through the Docker service.
+### 4. (Optional) Project context skill
 
-### 4. (Optional) CLI access
+The `memmy-project-summarize` skill consolidates project context from multiple agents into Memmy memory:
+
+```bash
+# Copy skill to your agent's skill directory
+cp -r skills/memmy-project-summarize ~/.agents/skills/
+
+# Or for Claude Code
+cp -r skills/memmy-project-summarize ~/.claude/skills/
+```
+
+Usage:
+
+```bash
+# Summarize current project state
+memmy-project-summarize
+
+# Update project context with current work
+memmy-project-summarize --update
+```
+
+This skill extracts decisions, lessons, and verified facts from your workspace and writes them to Memmy memory, making project knowledge available across all agents.
+
+### 5. (Optional) CLI access
 
 ```bash
 memmy-memory health                         # Service health check
