@@ -90,3 +90,25 @@ npm run typecheck -- --pretty false
 ```
 
 Output: completed successfully.
+
+## Fix Round 3
+
+Added a deterministic two-connection test against one temporary SQLite database. The synchronous better-sqlite3 API cannot overlap calls within one JavaScript thread, so the test exercises independent connection state and sequential competing writes through the same targeted unique-index conflict path. Both repositories return the first canonical row, and the database contains exactly one logical run without a constraint error.
+
+```bash
+cd Memory
+npm test -- --run tests/repository/project-topic-repository.test.ts
+```
+
+```text
+Test Files  1 passed (1)
+Tests       6 passed (6)
+Duration    4.05s
+```
+
+```bash
+cd Memory
+npm run typecheck -- --pretty false
+```
+
+Output: completed successfully.

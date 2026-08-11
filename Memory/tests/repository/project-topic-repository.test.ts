@@ -89,4 +89,26 @@ describe("project topic repository", () => {
     expect(repo.findAnalysisRun("local:project-b", "hash")).toBeUndefined();
     expect(() => repo.recordAnalysisRun({ ...run, namespaceId: "local:project-b", inputHash: "other" })).toThrow();
   }));
+
+  it("converges competing connections on one canonical analysis run", () => {
+    const root = mkdtempSync(join(tmpdir(), "project-topic-analysis-race-"));
+    const path = join(root, "memory.sqlite");
+    const firstDb = new MemoryDb({ path });
+    const secondDb = new MemoryDb({ path });
+    try {
+      const firstRepo = new Repositories(firstDb.db).topics;
+      const secondRepo = new Repositories(secondDb.db).topics;
+      const first = { id: "run-first", namespaceId: "local:project-a", inputHash: "shared-hash", status: "completed", result: { writer: "first" }, createdAt: NOW, updatedAt: NOW };
+      const second = { ...first, id: "run-second", result: { writer: "second" } };
+      expect(firstRepo.recordAnalysisRun(first)).toEqual(first);
+      expect(secondRepo.recordAnalysisRun(second)).toEqual(first);
+      expect(firstRepo.findAnalysisRun(first.namespaceId, first.inputHash)).toEqual(first);
+      expect(secondRepo.findAnalysisRun(first.namespaceId, first.inputHash)).toEqual(first);
+      expect(firstDb.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_analysis_runs WHERE namespace_id = ? AND input_hash = ?`).get(first.namespaceId, first.inputHash)).toEqual({ count: 1 });
+    } finally {
+      secondDb.close();
+      firstDb.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
