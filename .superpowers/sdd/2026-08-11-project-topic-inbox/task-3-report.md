@@ -87,3 +87,6 @@ Concern resolved: merge/split exact topic routes now use an explicit synchronous
 - Added per-key in-process serialization around all idempotent operations (refresh, decision, merge, split and legacy callers). The first request runs and persists; same-key concurrent callers await the lock, reload the durable response, and receive exact or legacy replay semantics without ON CONFLICT overwrite.
 - Added a deterministic `Promise.all` decision replay regression asserting identical response, one mutation/audit, and stable-context exclusion.
 - `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 20 tests; `npm run typecheck` -> PASS.
+
+- Durable claim continuation: idempotency keys now include canonical namespace hash; SQLite `INSERT OR IGNORE` creates an immutable in-flight claim, conflicting hashes fail, matching contenders bounded-wait and reload, completion uses conditional UPDATE, and failures remove only their own in-flight claim. Fixed lock cleanup with stable entry identity.
+- `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts` -> PASS, 2 files / 23 tests; Memory typecheck passed before the compatibility rerun.

@@ -2201,14 +2201,29 @@ export class RuntimeRepository {
     }));
   }
 
+  claimIdempotency(key: string, requestHash: string, createdAt = nowIso()): "claimed" | "inflight" | "complete" | "conflict" {
+    const inserted = this.db.prepare(`INSERT OR IGNORE INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at) VALUES (?, ?, ?, ?, NULL)`).run(key, requestHash, JSON.stringify({ __memmyIdempotencyInflight: true }), createdAt);
+    if (inserted.changes === 1) return "claimed";
+    const row = this.db.prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`).get(key) as { request_hash: string; response_json: string };
+    if (row.request_hash !== requestHash) return "conflict";
+    return (parseJson<Record<string, unknown>>(row.response_json, {}).__memmyIdempotencyInflight === true) ? "inflight" : "complete";
+  }
+
+  completeIdempotency(key: string, requestHash: string, response: unknown): void {
+    const result = this.db.prepare(`UPDATE idempotency_keys SET response_json = ? WHERE key = ? AND request_hash = ? AND json_extract(response_json, '$.__memmyIdempotencyInflight') = 1`).run(toJson(response), key, requestHash);
+    if (result.changes !== 1) throw new Error("idempotency claim lost");
+  }
+
+  abandonIdempotency(key: string, requestHash: string): void {
+    this.db.prepare(`DELETE FROM idempotency_keys WHERE key = ? AND request_hash = ? AND json_extract(response_json, '$.__memmyIdempotencyInflight') = 1`).run(key, requestHash);
+  }
+
   saveIdempotency(key: string, requestHash: string, response: unknown, createdAt = nowIso()): void {
     this.db
       .prepare(
         `INSERT INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at)
          VALUES (?, ?, ?, ?, NULL)
-         ON CONFLICT(key) DO UPDATE SET
-           request_hash = excluded.request_hash,
-           response_json = excluded.response_json`
+         ON CONFLICT(key) DO NOTHING`
       )
       .run(key, requestHash, toJson(response), createdAt);
   }
