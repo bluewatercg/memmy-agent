@@ -329,8 +329,10 @@ export class MemoryService {
           },
           refresh: async (job) => {
             const namespace = job.payload.namespace;
+            const evidenceCursor = job.payload.evidenceCursor;
             if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) throw new Error("topic refresh namespace missing");
-            await this.topicInbox.processRefresh(namespace as RuntimeNamespace);
+            if (typeof evidenceCursor !== "string") throw new Error("topic refresh evidence cursor missing");
+            await this.topicInbox.processRefresh(namespace as RuntimeNamespace, evidenceCursor);
           }
         }
       }

@@ -198,7 +198,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     return { jobId: job.id, unchanged: false };
   }
 
-  async processRefresh(namespace: RuntimeNamespace): Promise<void> {
+  async processRefresh(namespace: RuntimeNamespace, expectedCursor?: string): Promise<void> {
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
     const filter = namespaceFilter(normalized);
@@ -211,9 +211,13 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     }
     try {
       const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
-      const storedProgress = refreshProgress(this.deps.repos.runtime.getKv(progressKey)?.value);
+      if (expectedCursor && expectedCursor !== cursor) {
+        this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
+        throw new Error("topic refresh evidence cursor changed; retry refresh");
+      }
       const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
       const capturedMemory = (id: string) => this.deps.repos.memories.getEligibleL1SnapshotMemory(snapshotId, id);
+      const storedProgress = refreshProgress(this.deps.repos.runtime.getKv(progressKey)?.value);
       let afterId = storedProgress?.cursor === cursor && !storedProgress.completed ? storedProgress.afterId : undefined;
       for (;;) {
         const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);

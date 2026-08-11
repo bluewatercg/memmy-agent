@@ -45,9 +45,10 @@ export function TopicInboxSubPage(props: TopicInboxSubPageProps) {
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
       setState("error");
+      setRefreshQueued(false); setMergeTargets({}); setSplitDrafts({}); setEditing(null);
     }
   }
-
+  useEffect(() => { setTopics([]); setExpanded(new Set()); setEvidence({}); setRefreshQueued(false); setMergeTargets({}); setSplitDrafts({}); setEditing(null); }, [projectId]);
   useEffect(() => { void load(projectId); }, [client, projectId]);
   useEffect(() => { if (!projects.some((project) => project.id === projectId)) setProjectId(projects[0]?.id ?? ""); }, [projects, projectId]);
 
