@@ -3,18 +3,26 @@ import { parentPort, workerData } from "node:worker_threads";
 import { ProjectTopicRepository } from "../../src/storage/repositories.ts";
 
 const barrier = new Int32Array(workerData.barrier);
+const ABORT_INDEX = 3;
 const db = new Database(workerData.path);
 db.pragma("foreign_keys = ON");
 db.pragma("journal_mode = WAL");
 db.pragma("busy_timeout = 5000");
 const repository = new ProjectTopicRepository(db);
 parentPort.postMessage({ ready: true });
-if (Atomics.wait(barrier, 2, 0, 10_000) === "timed-out") {
+const startWait = Atomics.wait(barrier, 2, 0, 10_000);
+if (startWait === "timed-out") {
   throw new Error("analysis writer start barrier timed out");
+}
+if (Atomics.load(barrier, ABORT_INDEX) !== 0) {
+  throw new Error("analysis writer aborted before start");
 }
 const results = [];
 
 function rendezvous(round) {
+  if (Atomics.load(barrier, ABORT_INDEX) !== 0) {
+    throw new Error(`analysis writer aborted in round ${round}`);
+  }
   const phase = Atomics.load(barrier, 1);
   if (Atomics.add(barrier, 0, 1) === 1) {
     Atomics.store(barrier, 0, 0);
@@ -22,8 +30,12 @@ function rendezvous(round) {
     Atomics.notify(barrier, 1);
     return;
   }
-  if (Atomics.wait(barrier, 1, phase, 10_000) === "timed-out") {
+  const phaseWait = Atomics.wait(barrier, 1, phase, 10_000);
+  if (phaseWait === "timed-out") {
     throw new Error(`analysis writer barrier timed out in round ${round}`);
+  }
+  if (Atomics.load(barrier, ABORT_INDEX) !== 0) {
+    throw new Error(`analysis writer aborted in round ${round}`);
   }
 }
 

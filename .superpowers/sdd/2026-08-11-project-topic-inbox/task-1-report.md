@@ -136,3 +136,29 @@ npm run typecheck -- --pretty false
 ```
 
 Output: completed successfully.
+
+## Fix Round 5
+
+Retained both `Worker` handles and added bounded ready, result, and exit promises. Every worker promise has an immediate rejection handler so a startup failure cannot become an unhandled rejection while the peer is still starting. Cleanup now sets and notifies a shared abort flag, terminates every worker, awaits termination and exit settlement, and only then removes the temporary database. The worker checks the abort flag before starting and on both sides of every per-round barrier, so a parent failure releases a peer blocked at startup or rendezvous.
+
+The observable-contract stress was increased from 32 to 64 synchronized rounds; the focused test remained stable at 4.80 seconds. A deterministic transaction arrangement cannot force both old internal read-before-write `SELECT`s to observe absence while preserving the production method's locking behavior: an external deferred transaction that establishes both read snapshots causes the later write upgrade to fail with SQLite `SQLITE_BUSY_SNAPSHOT`, including for the current atomic insert, while `BEGIN IMMEDIATE` serializes the workers before method entry. Intercepting the internal statement would require source inspection or a production test hook. The test therefore makes no false determinism claim: its exact limit is that the barrier synchronizes method entry, not the internal statements, while 64 real two-connection rounds assert the production contract that both calls return one canonical row without unique errors.
+
+```bash
+cd Memory
+npm test -- --run tests/repository/project-topic-repository.test.ts
+```
+
+```text
+Test Files  1 passed (1)
+Tests       6 passed (6)
+Duration    4.80s
+```
+
+```bash
+cd Memory
+npm run typecheck -- --pretty false
+```
+
+```text
+completed successfully (exit 0)
+```

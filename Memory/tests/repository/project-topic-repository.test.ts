@@ -8,6 +8,18 @@ import { ProjectTopicRepository, Repositories } from "../../src/storage/reposito
 import type { ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord } from "../../src/types.js";
 
 const NOW = "2026-08-11T00:00:00.000Z";
+const WORKER_TIMEOUT_MS = 15_000;
+
+function bounded<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    // Worker deadlocks block real threads, so fake timers cannot bound these integration waits.
+    const timeout = setTimeout(() => reject(new Error(`${label} timed out after ${WORKER_TIMEOUT_MS}ms`)), WORKER_TIMEOUT_MS);
+    promise.then(
+      (value) => { clearTimeout(timeout); resolve(value); },
+      (error) => { clearTimeout(timeout); reject(error); }
+    );
+  });
+}
 
 function topic(namespaceId: string, id: string): ProjectTopicRecord {
   return { id, namespaceId, title: id, summary: "summary", status: "active", version: 1, sourceMemoryIds: [], metadata: {}, createdAt: NOW, updatedAt: NOW };
@@ -96,25 +108,54 @@ describe("project topic repository", () => {
     const path = join(root, "memory.sqlite");
     const setupDb = new MemoryDb({ path });
     setupDb.close();
-    const rounds = 32;
-    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+    const rounds = 64;
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 4);
     const barrierState = new Int32Array(barrier);
     const workerUrl = new URL("./project-topic-analysis-writer.mjs", import.meta.url);
-    const runWriter = (writer: string): { ready: Promise<void>; results: Promise<Array<{ id: string; inputHash: string }>> } => {
+    type AnalysisRunResult = { id: string; inputHash: string };
+    type Writer = { worker: Worker; ready: Promise<void>; results: Promise<AnalysisRunResult[]>; exit: Promise<void> };
+    const workers: Writer[] = [];
+    const runWriter = (writerId: string): Writer => {
       let markReady!: () => void;
-      let resolveResults!: (value: Array<{ id: string; inputHash: string }>) => void;
+      let resolveResults!: (value: AnalysisRunResult[]) => void;
+      let rejectReady!: (reason: unknown) => void;
       let rejectResults!: (reason: unknown) => void;
       // Promise executors are required here because this package targets ES2022, before Promise.withResolvers.
-      const ready = new Promise<void>((resolve) => { markReady = resolve; });
-      const results = new Promise<Array<{ id: string; inputHash: string }>>((resolve, reject) => { resolveResults = resolve; rejectResults = reject; });
-      const worker = new Worker(workerUrl, { execArgv: ["--import", "tsx"], workerData: { barrier, now: NOW, path, rounds, writer } });
-      worker.on("message", (message: { error?: string; ready?: boolean; results?: Array<{ id: string; inputHash: string }> }) => {
+      const readySignal = new Promise<void>((resolve, reject) => { markReady = resolve; rejectReady = reject; });
+      const resultSignal = new Promise<AnalysisRunResult[]>((resolve, reject) => { resolveResults = resolve; rejectResults = reject; });
+      const worker = new Worker(workerUrl, { execArgv: ["--import", "tsx"], workerData: { barrier, now: NOW, path, rounds, writer: writerId } });
+      let receivedResults = false;
+      const exitSignal = new Promise<void>((resolve, reject) => {
+        worker.once("exit", (code) => {
+          const error = code === 0
+            ? new Error(`analysis writer ${writerId} exited before completing`)
+            : new Error(`analysis writer ${writerId} exited with code ${code}`);
+          rejectReady(error);
+          if (!receivedResults) rejectResults(error);
+          if (code === 0) resolve();
+          else reject(error);
+        });
+      });
+      worker.on("message", (message: { error?: string; ready?: boolean; results?: AnalysisRunResult[] }) => {
         if (message.ready) markReady();
         else if (message.error) rejectResults(new Error(message.error));
-        else resolveResults(message.results ?? []);
+        else {
+          receivedResults = true;
+          resolveResults(message.results ?? []);
+        }
       });
-      worker.once("error", rejectResults);
-      return { ready, results };
+      worker.once("error", (error) => { rejectReady(error); rejectResults(error); });
+      const writer = {
+        worker,
+        ready: bounded(readySignal, `analysis writer ${writerId} ready`),
+        results: bounded(resultSignal, `analysis writer ${writerId} result`),
+        exit: bounded(exitSignal, `analysis writer ${writerId} exit`)
+      };
+      void writer.ready.catch(() => undefined);
+      void writer.results.catch(() => undefined);
+      void writer.exit.catch(() => undefined);
+      workers.push(writer);
+      return writer;
     };
 
     try {
@@ -136,6 +177,12 @@ describe("project topic repository", () => {
         verificationDb.close();
       }
     } finally {
+      Atomics.store(barrierState, 3, 1);
+      Atomics.notify(barrierState, 1);
+      Atomics.notify(barrierState, 2);
+      const exits = workers.map(({ exit }) => exit.catch(() => undefined));
+      await bounded(Promise.all(workers.map(({ worker }) => worker.terminate())), "analysis writer termination");
+      await bounded(Promise.all(exits), "analysis writer exit cleanup");
       rmSync(root, { recursive: true, force: true });
     }
   });
