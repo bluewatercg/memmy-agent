@@ -100,6 +100,7 @@ export function MemoryPage(props: MemoryPageProps) {
   const { track, ready: analyticsReady } = useAnalytics();
   const prevSubPageRef = useRef<MemorySubPageId | null>(null);
   const [activePage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? readInitialMemorySubPage());
+  const [topicPendingCount, setTopicPendingCount] = useState(0);
   const client = clients?.memoryRuntime ?? null;
 
   function handleSubPageChange(page: MemorySubPageId) {
@@ -122,7 +123,7 @@ export function MemoryPage(props: MemoryPageProps) {
 
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
-      "topic-inbox": <TopicInboxSubPage client={client} projects={state.agent.projects.map((project) => ({ id: project.id, name: project.name }))} />,
+      "topic-inbox": <TopicInboxSubPage client={client} projects={state.agent.projects.map((project) => ({ id: project.id, name: project.name }))} onPendingCountChange={setTopicPendingCount} />,
       overview: <OverviewSubPage client={client} />,
       memories: <MemoriesSubPage client={client} onOpenSettings={() => dispatch(appActions.navigate("/settings"))} />,
       tasks: <TasksSubPage client={client} />,
@@ -151,6 +152,7 @@ export function MemoryPage(props: MemoryPageProps) {
     <MemoryPageView
       activePage={activePage}
       onActivePageChange={handleSubPageChange}
+      topicPendingCount={topicPendingCount}
       onBack={() => dispatch(appActions.navigate("/main"))}
       childByPage={childByPage}
     />
@@ -183,6 +185,7 @@ export interface MemoryPageViewProps {
   activePage: MemorySubPageId;
   onActivePageChange: (page: MemorySubPageId) => void;
   onBack?: () => void;
+  topicPendingCount?: number;
   childByPage?: Record<MemorySubPageId, ReactNode>;
 }
 
@@ -249,6 +252,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
                     >
                       <span className="shrink-0">{item.icon}</span>
                       <span className="flex-1 text-left">{t(item.labelKey)}</span>
+                      {item.id === "topic-inbox" && Boolean(props.topicPendingCount) && <span aria-label={`${props.topicPendingCount} pending`} className="rounded-full bg-text-ink px-1.5 text-xs text-content-bg">{props.topicPendingCount}</span>}
                     </button>
                   </div>
                 );

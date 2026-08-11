@@ -203,23 +203,28 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const namespaceId = namespaceIdFromContext(normalized);
     const filter = namespaceFilter(normalized);
     const snapshotId = this.deps.repos.memories.eligibleL1SnapshotBoundary(filter);
+    const progressKey = `topic_refresh_progress:${namespaceId}`;
     if (!snapshotId) {
       this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, stableHash([]));
+      this.deps.repos.runtime.setKv(progressKey, { cursor: stableHash([]), completed: true });
       return;
     }
     try {
       const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
+      const storedProgress = refreshProgress(this.deps.repos.runtime.getKv(progressKey)?.value);
       const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
       const capturedMemory = (id: string) => this.deps.repos.memories.getEligibleL1SnapshotMemory(snapshotId, id);
-      let afterId: string | undefined;
+      let afterId = storedProgress?.cursor === cursor && !storedProgress.completed ? storedProgress.afterId : undefined;
       for (;;) {
         const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);
         if (page.length === 0) break;
         for (const memory of page) await this.ingestMemory(memory, capturedMemory);
-        if (page.length < pageSize) break;
         afterId = page[page.length - 1]!.id;
+        this.deps.repos.runtime.setKv(progressKey, { cursor, afterId, completed: false });
+        if (page.length < pageSize) break;
       }
       this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, cursor);
+      this.deps.repos.runtime.setKv(progressKey, { cursor, afterId, completed: true });
     } finally {
       this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
     }
@@ -293,6 +298,12 @@ function corpusCursor(memories: MemoryRow[]): string {
 }
 function isRefreshRequest(value: unknown): value is { cursor: string; jobId: string } {
   return Boolean(value && typeof value === "object" && "cursor" in value && typeof value.cursor === "string" && "jobId" in value && typeof value.jobId === "string");
+}
+function refreshProgress(value: unknown): { cursor: string; afterId?: string; completed: boolean } | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const progress = value as Record<string, unknown>;
+  if (typeof progress.cursor !== "string" || typeof progress.completed !== "boolean") return undefined;
+  return { cursor: progress.cursor, completed: progress.completed, ...(typeof progress.afterId === "string" ? { afterId: progress.afterId } : {}) };
 }
 function candidateIdentity(candidate: { proposedLayer: string; title: string; stableKey?: string; sourceEvidenceIds?: string[]; sensitiveCategories: string[] }): string {
   if (candidate.stableKey) return stableHash({ layer: candidate.proposedLayer, stableKey: candidate.stableKey.normalize("NFKC").toLocaleLowerCase() }).slice(0, 32);

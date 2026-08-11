@@ -236,6 +236,8 @@ function renderRoute(path: AppRoutePath) {
       return <ToolsPage />;
     case "/memory":
       return <MemoryPage />;
+    case "/memory/topic-inbox":
+      return <MemoryPage initialSubPage="topic-inbox" />;
     case "/memory-sources":
       return <MemoryPage initialSubPage="sources" />;
     case "/settings":

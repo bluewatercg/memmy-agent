@@ -558,6 +558,7 @@ export function isAgentRuntimeBridgeRoute(path: AppRoutePath): boolean {
     || path === "/tools"
     || path === "/settings"
     || path === "/memory"
+    || path === "/memory/topic-inbox"
     || path === "/memory-sources";
 }
 

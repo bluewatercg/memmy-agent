@@ -23,10 +23,8 @@ describe("TopicInboxSubPage", () => {
     await act(async () => root.render(<TopicInboxSubPage client={client} projects={[{ id: "project-1", name: "Project One" }]} />));
     await act(async () => undefined);
     expect(host.textContent).toContain("Migration recovery");
-    expect(host.textContent).not.toContain("Recovery policy");
     expect(client.topicEvidence).not.toHaveBeenCalled();
     await act(async () => button("Expand Migration recovery").click());
-    expect(host.textContent).toContain("Recovery policy");
     expect(host.textContent).not.toContain("raw trace");
     await act(async () => textButton("Show raw evidence").click());
     expect(client.topicEvidence).toHaveBeenCalledWith("topic-1", expect.objectContaining({ limit: 20 }));

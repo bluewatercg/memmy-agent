@@ -15,6 +15,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
   "/pet": "Pet",
   "/tools": "Tools",
   "/memory": "Memory",
+  "/memory/topic-inbox": "Memory/Topic Inbox",
   "/memory-sources": "Memory Sources",
   "/settings": "Settings"
 };
@@ -35,7 +36,7 @@ const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
 
 /** Memory routes report sub-page views as page_view instead of at the top-level router. */
 export function shouldDeferRoutePageView(path: AppRoutePath): boolean {
-  return path === "/memory" || path === "/memory-sources";
+  return path === "/memory" || path === "/memory/topic-inbox" || path === "/memory-sources";
 }
 
 export function resolveRoutePageTitle(path: AppRoutePath): string {

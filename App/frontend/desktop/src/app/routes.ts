@@ -17,6 +17,7 @@ export type AppRoutePath =
   | "/pet"
   | "/tools"
   | "/memory"
+  | "/memory/topic-inbox"
   | "/memory-sources"
   | "/settings";
 
@@ -53,6 +54,7 @@ export const routeTable: Record<AppRoutePath, AppRouteDefinition> = {
   "/pet": { path: "/pet", navKey: "nav.pet", requiresBootstrap: true },
   "/tools": { path: "/tools", navKey: "nav.tools", requiresBootstrap: true },
   "/memory": { path: "/memory", navKey: "nav.memory", requiresBootstrap: true },
+  "/memory/topic-inbox": { path: "/memory/topic-inbox", navKey: "nav.memory", requiresBootstrap: true },
   "/memory-sources": { path: "/memory-sources", navKey: "nav.memory", requiresBootstrap: true },
   "/settings": { path: "/settings", navKey: "nav.settings", requiresBootstrap: true }
 };
@@ -628,7 +630,7 @@ function isAppRoutePath(value: string | null): value is AppRoutePath {
 }
 
 function isRestorableRoute(path: AppRoutePath): boolean {
-  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory-sources" || path === "/settings";
+  return path === "/main" || path === "/pet" || path === "/tools" || path === "/memory" || path === "/memory/topic-inbox" || path === "/memory-sources" || path === "/settings";
 }
 
 function isPostOnboardingRoute(path: AppRoutePath): boolean {
