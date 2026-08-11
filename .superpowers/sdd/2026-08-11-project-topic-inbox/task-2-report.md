@@ -52,3 +52,21 @@ Result: TypeScript completed successfully with no diagnostics.
 ## Concerns
 
 - None within Task 2 scope. API, UI, and backfill were intentionally not implemented.
+
+## Review Fix Round 1
+
+- Grounded automatic approval in explicit cited L1 evidence IDs and persisted successful verification facts; failed, negated, mixed, security, destructive, release, credential, access-control, and migration evidence fails closed.
+- Required canonical runtime namespace for candidate decisions and namespace-scoped lookup.
+- Added correct manual L3/Skill materialization, deterministic multi-candidate pairing, authoritative-memory supersession, embedding/structured matcher signals, multi-role evidence metadata, and quality-rating ingest triggers.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts`
+
+Result: 2 files passed, 12 tests passed.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts`
+
+Result: 4 files passed, 26 tests passed.
+
+`cd Memory && npm run typecheck`
+
+Result: TypeScript completed successfully with no diagnostics.

@@ -35,8 +35,8 @@ describe("ProjectTopicInbox", () => {
     const inbox = new ProjectTopicInboxService({
       repos,
       llm: topicLlm([
-        { topic: { title: "SQLite migration", summary: "An error, fix, and verification chain." }, candidates: [{ title: "Verify migrations", conclusion: "Run the focused migration test after the fix.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "focused migration test passed", conflicts: [], sensitiveCategories: [] }] },
-        { topic: { title: "SQLite migration", summary: "An error, fix, and verification chain." }, candidates: [{ title: "Verify migrations", conclusion: "Run the focused migration test after every schema change.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "focused migration test passed", conflicts: [], sensitiveCategories: [] }] }
+        { topic: { title: "SQLite migration", summary: "An error, fix, and verification chain." }, candidates: [{ title: "Verify migrations", conclusion: "Run the focused migration test after the fix.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "focused migration test passed", sourceEvidenceIds: [firstId], conflicts: [], sensitiveCategories: [] }] },
+        { topic: { title: "SQLite migration", summary: "An error, fix, and verification chain." }, candidates: [{ title: "Verify migrations", conclusion: "Run the focused migration test after every schema change.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "focused migration test passed", sourceEvidenceIds: [firstId, secondId], conflicts: [], sensitiveCategories: [] }] }
       ]),
       buildMemory: () => { throw new Error("automatic approval is tested separately"); },
       upsertMemory: (memory) => repos.memories.upsertByKey(memory)

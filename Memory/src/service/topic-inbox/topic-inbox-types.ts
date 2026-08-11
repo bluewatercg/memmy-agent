@@ -18,6 +18,7 @@ export interface TopicCandidateAnalysis {
   confidence: TopicConfidence;
   verificationStatus: TopicVerificationStatus;
   verificationEvidence: string;
+  sourceEvidenceIds: string[];
   conflicts: string[];
   sensitiveCategories: string[];
 }
@@ -29,7 +30,7 @@ export interface TopicAnalysisResult {
 
 export interface TopicMatch {
   topic?: ProjectTopicRecord;
-  role: "error" | "fix" | "verification" | "evidence";
+  roles: Array<"error" | "fix" | "verification" | "evidence">;
   confidence: "assigned" | "ambiguous" | "new";
 }
 
@@ -52,6 +53,6 @@ export interface TopicDecisionResult { candidate: ProjectTopicCandidateRecord; m
 export interface ProjectTopicInbox {
   ingest(memoryId: string): Promise<TopicIngestResult>;
   list(namespace: RuntimeNamespace, query?: TopicInboxQuery): TopicInboxView;
-  decide(candidateId: string, decision: TopicCandidateDecision): Promise<TopicDecisionResult>;
+  decide(namespace: RuntimeNamespace, candidateId: string, decision: TopicCandidateDecision): Promise<TopicDecisionResult>;
   refresh(namespace: RuntimeNamespace): Promise<TopicRefreshResult>;
 }

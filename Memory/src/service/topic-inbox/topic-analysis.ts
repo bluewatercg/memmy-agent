@@ -40,7 +40,7 @@ function validateCandidate(value: unknown): TopicCandidateAnalysis {
   const confidence = enumValue(value.confidence, ["low", "medium", "high"] as const, "confidence");
   const verificationStatus = enumValue(value.verificationStatus, ["unverified", "failed", "verified"] as const, "verificationStatus");
   if (typeof value.title !== "string" || !value.title.trim() || typeof value.conclusion !== "string" || !value.conclusion.trim() || typeof value.verificationEvidence !== "string") throw new Error("invalid topic candidate fields");
-  return { title: value.title.trim(), conclusion: value.conclusion.trim(), proposedLayer, risk, confidence, verificationStatus, verificationEvidence: value.verificationEvidence.trim(), conflicts: stringArray(value.conflicts), sensitiveCategories: stringArray(value.sensitiveCategories) };
+  return { title: value.title.trim(), conclusion: value.conclusion.trim(), proposedLayer, risk, confidence, verificationStatus, verificationEvidence: value.verificationEvidence.trim(), sourceEvidenceIds: stringArray(value.sourceEvidenceIds), conflicts: stringArray(value.conflicts), sensitiveCategories: stringArray(value.sensitiveCategories) };
 }
 
 function enumValue<const T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {

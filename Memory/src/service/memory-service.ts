@@ -1805,8 +1805,8 @@ export class MemoryService {
     return this.topicInbox.list(namespace, query);
   }
 
-  decideProjectTopicCandidate(candidateId: string, decision: TopicCandidateDecision) {
-    return this.topicInbox.decide(candidateId, decision);
+  decideProjectTopicCandidate(namespace: RuntimeNamespace, candidateId: string, decision: TopicCandidateDecision) {
+    return this.topicInbox.decide(namespace, candidateId, decision);
   }
 
   refreshProjectTopicInbox(namespace: RuntimeNamespace) {
@@ -2002,6 +2002,7 @@ export class MemoryService {
       action: useful ? "mark_useful" : "mark_not_useful", targetKind: kindFromMemory(updated), targetId: updated.id,
       before, after: updated, meta: { reason: request.reason }, createdAt: at
     });
+    if (updated.memoryLayer === "L1") this.workerHandlers.enqueueJob({ jobType: "topic_ingest", userId: updated.userId, sessionId: updated.sessionId, targetMemoryId: updated.id, payload: { reason: "quality.updated", contentHash: updated.contentHash ?? "current", version: updated.version }, createdAt: at });
     return { ok: true, id: updated.id, useful, changeSeq, auditId: audit.id, serverTime: at };
   }
 

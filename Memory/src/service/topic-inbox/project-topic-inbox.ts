@@ -32,28 +32,30 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const topic = match.topic ?? this.newTopic(memory, namespaceId, at);
     const existingEvidence = this.deps.repos.topics.listEvidence(topic.id, namespaceId);
     const alreadyAttached = existingEvidence.some((item) => item.memoryId === memory.id);
-    const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: item.role })), ...(!alreadyAttached ? [{ memory, role: match.role }] : [])]
-      .filter((item) => Boolean(item.memory));
+    const primaryRole = match.roles[0] ?? "evidence";
+    const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: item.role })), ...(!alreadyAttached ? [{ memory, role: primaryRole }] : [])].filter((item) => Boolean(item.memory));
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     if (this.deps.repos.topics.findAnalysisRun(namespaceId, inputHash)) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
     const analysis = await analyzeProjectTopic({ llm: this.deps.llm, topic: match.topic, evidence });
     const createdCandidates: ProjectTopicCandidateRecord[] = [];
     this.deps.repos.transaction(() => {
       if (!match.topic) this.deps.repos.topics.insertTopic(topic);
-      if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: match.role, summary: memory.memoryValue.slice(0, 500), metadata: { contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
+      if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
       const sourceMemoryIds = evidence.map((item) => item.memory.id);
       const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
       const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
       if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]) }, version: current.version + 1, updatedAt: at }, current.version);
-      const previousPending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).find((candidate) => candidate.status === "pending");
-      for (const candidate of analysis.candidates) {
-        if (previousPending && previousPending.conclusion === candidate.conclusion && previousPending.proposedLayer === candidate.proposedLayer) continue;
-        const policy = evaluateTopicAutoApproval(candidate);
-        const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: previousPending?.id, sourceMemoryIds, metadata: { ...candidate, policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
+      const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending").sort((a, b) => a.id.localeCompare(b.id));
+      for (const [index, candidate] of analysis.candidates.entries()) {
+        const predecessor = pending[index];
+        if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) continue;
+        const policy = evaluateTopicAutoApproval(candidate, evidence.map((item) => item.memory));
+        const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
         this.deps.repos.topics.insertCandidate(record);
         createdCandidates.push(record);
         if (policy.approved && !this.hasDuplicateMemory(record, namespace)) this.approve(record, true);
       }
+      for (const obsolete of pending.slice(analysis.candidates.length)) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
       this.deps.repos.topics.recordAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, topicId: topic.id, status: "succeeded", result: { topic: analysis.topic, candidates: analysis.candidates }, createdAt: at, updatedAt: at });
     });
     return { assigned: true, unchanged: false, topicId: topic.id, candidateIds: createdCandidates.map((item) => item.id) };
@@ -64,9 +66,10 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     return { topics: this.deps.repos.topics.listTopics(namespaceId).map((topic) => ({ topic, evidence: this.deps.repos.topics.listEvidence(topic.id, namespaceId), candidates: this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => !query.statuses?.length || query.statuses.includes(candidate.status)) })) };
   }
 
-  async decide(candidateId: string, decision: TopicCandidateDecision): Promise<TopicDecisionResult> {
-    const candidate = this.findCandidate(candidateId);
-    if (!candidate) throw new Error(`topic candidate not found: ${candidateId}`);
+  async decide(namespace: RuntimeNamespace, candidateId: string, decision: TopicCandidateDecision): Promise<TopicDecisionResult> {
+    const namespaceId = namespaceIdFromContext(namespace);
+    const candidate = this.findCandidate(namespaceId, candidateId);
+    if (!candidate) throw new Error(`topic candidate not found in namespace: ${candidateId}`);
     if (candidate.status !== "pending" && candidate.status !== "deferred") throw new Error(`topic candidate is not decidable: ${candidateId}`);
     if (decision.decision === "approve") return this.approve(candidate, false);
     const at = nowIso();
@@ -99,22 +102,25 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     if (!topic) throw new Error(`topic not found: ${candidate.topicId}`);
     const source = this.deps.repos.memories.get(candidate.sourceMemoryIds[0]!);
     if (!source) throw new Error("topic candidate source memory missing");
+    const layer = candidate.proposedLayer;
+    const kind = layer === "L2" ? "policy" : layer === "L3" ? "world_model" : "skill";
     const policyVersion = stringField(candidate.metadata, "policyVersion") ?? "manual";
-    const memory = this.deps.buildMemory({ userId: source.userId, sessionId: source.sessionId, agentId: source.agentId, appId: source.appId, tenantId: source.info.tenant_id, projectId: topic.projectId, layer: "L2", kind: "policy", lifecycleStatus: "active", memoryType: "LongTermMemory", key: `topic:${topic.id}:candidate:${stableHash(candidate.conclusion).slice(0, 20)}`, value: candidate.conclusion, tags: ["project-topic", "topic-approved"], provenance: { sourceMemoryIds: candidate.sourceMemoryIds }, info: { title: candidate.title, source_memory_ids: candidate.sourceMemoryIds }, internal: { source_memory_ids: candidate.sourceMemoryIds, source_l1_memory_ids: candidate.sourceMemoryIds, topic_approval: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic } } });
-    const saved = this.deps.upsertMemory(memory).memory;
+    const memory = this.deps.buildMemory({ userId: source.userId, sessionId: source.sessionId, agentId: source.agentId, appId: source.appId, tenantId: source.info.tenant_id, projectId: topic.projectId, layer, kind, lifecycleStatus: "active", memoryType: layer === "Skill" ? "SkillMemory" : "LongTermMemory", key: `topic:${topic.id}:${layer}`, value: candidate.conclusion, tags: ["project-topic", "topic-approved"], provenance: { sourceMemoryIds: candidate.sourceMemoryIds }, info: { title: candidate.title, source_memory_ids: candidate.sourceMemoryIds }, internal: { source_memory_ids: candidate.sourceMemoryIds, source_l1_memory_ids: candidate.sourceMemoryIds, topic_approval: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic } } });
+    const persisted = this.deps.upsertMemory(memory);
+    let saved = persisted.memory;
+    const priorApproved = this.deps.repos.topics.listCandidates(candidate.topicId, candidate.namespaceId).filter((item) => item.status === "approved" && item.id !== candidate.id && item.proposedLayer === candidate.proposedLayer).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+    const priorMemoryId = priorApproved ? stringField(priorApproved.metadata, "approvedMemoryId") : undefined;
+    const priorMemory = priorMemoryId ? this.deps.repos.memories.get(priorMemoryId) : undefined;
+    if (priorMemory && priorMemory.id !== saved.id && priorMemory.status === "activated") saved = this.deps.repos.memories.supersede({ oldMemory: priorMemory, newMemory: saved, projectId: topic.projectId, reason: `topic candidate ${candidate.id} supersedes ${priorApproved!.id}`, actor: { type: automatic ? "system" : "user" } }).newMemory;
     const at = nowIso();
     const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: "approved", version: candidate.version + 1, metadata: { ...candidate.metadata, approvedMemoryId: saved.id, automatic }, updatedAt: at }, candidate.version);
     this.deps.repos.runtime.insertAudit({ userId: source.userId, sessionId: source.sessionId, actor: { type: automatic ? "system" : "user" }, action: "topic_candidate_approved", targetKind: "memory", targetId: saved.id, after: saved, meta: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic }, createdAt: at });
     return { candidate: updated, memory: saved };
   }
 
-  private findCandidate(candidateId: string): ProjectTopicCandidateRecord | undefined {
-    for (const topic of this.deps.repos.topics.listTopics("local:unscoped")) {
-      const found = this.deps.repos.topics.listCandidates(topic.id, topic.namespaceId).find((candidate) => candidate.id === candidateId);
-      if (found) return found;
-    }
-    const row = this.deps.repos.db.prepare("SELECT namespace_id, topic_id FROM project_topic_candidates WHERE id = ?").get(candidateId) as { namespace_id: string; topic_id: string } | undefined;
-    return row ? this.deps.repos.topics.listCandidates(row.topic_id, row.namespace_id).find((candidate) => candidate.id === candidateId) : undefined;
+  private findCandidate(namespaceId: string, candidateId: string): ProjectTopicCandidateRecord | undefined {
+    const row = this.deps.repos.db.prepare("SELECT topic_id FROM project_topic_candidates WHERE id = ? AND namespace_id = ?").get(candidateId, namespaceId) as { topic_id: string } | undefined;
+    return row ? this.deps.repos.topics.listCandidates(row.topic_id, namespaceId).find((candidate) => candidate.id === candidateId) : undefined;
   }
 
   private hasDuplicateMemory(candidate: ProjectTopicCandidateRecord, namespace: RuntimeNamespace): boolean {
