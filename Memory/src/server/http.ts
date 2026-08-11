@@ -11,6 +11,7 @@ import type {
 } from "../service/project-context/project-context-service.js";
 import type { ProjectContextProposeGoalRequest } from "../service/project-context/project-context-types.js";
 import type { TopicCandidateDecision, TopicInboxItem, TopicInboxView } from "../service/topic-inbox/topic-inbox-types.js";
+import { TopicCandidateDecisionInputSchema, TopicInboxEvidenceInputSchema, TopicInboxListInputSchema, TopicInboxMergeInputSchema, TopicInboxRefreshInputSchema, TopicInboxSplitInputSchema } from "@memmy/local-api-contracts";
 import type {
   MemoryAddRequest,
   MemoryGovernanceRequest,
@@ -751,50 +752,64 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/topic-inbox") {
     requirePanelRead(principal);
     const namespace = projectContextNamespace(url, principal);
-    const statuses = url.searchParams.get("statuses")?.split(",").filter(Boolean) as Array<"pending" | "approved" | "rejected" | "deferred" | "superseded"> | undefined;
-    const view = service.listProjectTopicInbox(namespace, { statuses });
-    return topicInboxListResponse(namespace, view);
+    const parsed = parseShared(TopicInboxListInputSchema, { namespace, statuses: url.searchParams.get("statuses")?.split(",").filter(Boolean) });
+    return topicInboxListResponse(namespace, service.listProjectTopicInbox(namespace, { statuses: parsed.statuses }));
   }
   if (method === "POST" && path === "/api/v1/topic-inbox/refresh") {
     requirePanelWrite(principal);
-    const request = topicInboxMutation(body, "topic-inbox.refresh", principal);
-    return service.refreshProjectTopicInbox(request.namespace);
+    const request = parseShared(TopicInboxRefreshInputSchema, body);
+    assertNamespaceScope(request.namespace, principal.namespace);
+    return service.idempotent("topic-inbox.refresh", request, request, () => service.refreshProjectTopicInbox(request.namespace));
   }
   const topicDecision = match(path, /^\/api\/v1\/topic-inbox\/candidates\/([^/]+)\/decision$/);
   if (method === "POST" && topicDecision) {
     requirePanelWrite(principal);
-    const request = topicInboxMutation(body, "topic-inbox.candidate.decision", principal);
+    const request = parseShared(TopicCandidateDecisionInputSchema, body);
+    assertNamespaceScope(request.namespace, principal.namespace);
     const candidateId = decodeMatchSegment(topicDecision, 1);
-    const decision = topicDecisionInput(request);
+    const decision = { ...request, actor: decisionActor(request) } as TopicCandidateDecision;
     try {
-      const result = await service.decideProjectTopicCandidate(request.namespace, candidateId, { ...decision, actor: decisionActor(request) } as TopicCandidateDecision);
+      const result = await service.idempotent("topic-inbox.candidate.decision", request, { candidateId, request }, () => service.decideProjectTopicCandidate(request.namespace, candidateId, decision));
       return { candidate: topicCandidateCard(result.candidate), memoryId: result.memory?.id, auditId: result.auditId, serverTime: new Date().toISOString() };
     } catch (error) {
-      if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", JSON.stringify({ candidateId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus }));
+      if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic candidate version conflict", 409, undefined, { candidateId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;
     }
   }
   const topicMerge = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/merge$/);
   if (method === "POST" && topicMerge) {
     requirePanelWrite(principal);
-    const request = topicInboxMutation(body, "topic-inbox.topic.merge", principal);
-    const result = service.mergeProjectTopics(request.namespace, decodeMatchSegment(topicMerge, 1), { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
-    return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
+    const request = parseShared(TopicInboxMergeInputSchema, body);
+    assertNamespaceScope(request.namespace, principal.namespace);
+    try {
+      const result = service.mergeProjectTopics(request.namespace, decodeMatchSegment(topicMerge, 1), { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
+      return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
+      throw error;
+    }
   }
   const topicSplit = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/split$/);
   if (method === "POST" && topicSplit) {
     requirePanelWrite(principal);
-    const request = topicInboxMutation(body, "topic-inbox.topic.split", principal);
-    const result = service.splitProjectTopic(request.namespace, decodeMatchSegment(topicSplit, 1), { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
-    const view = service.listProjectTopicInbox(request.namespace);
-    return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
+    const request = parseShared(TopicInboxSplitInputSchema, body);
+    assertNamespaceScope(request.namespace, principal.namespace);
+    try {
+      const result = service.splitProjectTopic(request.namespace, decodeMatchSegment(topicSplit, 1), { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
+      const view = service.listProjectTopicInbox(request.namespace);
+      return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
+      throw error;
+    }
   }
   const topicEvidence = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/evidence$/);
   if (method === "GET" && topicEvidence) {
     requirePanelRead(principal);
     const namespace = projectContextNamespace(url, principal);
-    const limit = Math.min(100, Math.max(1, parseNumber(url.searchParams.get("limit")) ?? 20));
-    return { ...service.projectTopicEvidence(namespace, decodeMatchSegment(topicEvidence, 1), limit), serverTime: new Date().toISOString() };
+    const rawLimit = url.searchParams.get("limit");
+    const input = parseShared(TopicInboxEvidenceInputSchema, { namespace, limit: rawLimit === null ? undefined : Number(rawLimit) });
+    return { ...service.projectTopicEvidence(namespace, decodeMatchSegment(topicEvidence, 1), input.limit ?? 20), serverTime: new Date().toISOString() };
   }
   if (method === "GET" && path === "/api/v1/panel/context-pack") {
     requirePanelRead(principal);
@@ -1317,7 +1332,8 @@ function writeError(response: ServerResponse, error: unknown, requestId?: string
         code: error.code,
         message: error.message,
         requestId: error.requestId ?? requestId
-      }
+      },
+      ...(error.details === undefined ? {} : { details: error.details })
     });
     return;
   }
@@ -1627,6 +1643,12 @@ function topicInboxListResponse(namespace: RuntimeNamespace, view: TopicInboxVie
 function stringList(value: unknown, routeName: string): string[] | undefined { return parseOptionalStringArray(value, routeName); }
 function nullableStringList(value: unknown, routeName: string): string[] | null | undefined { return value === null ? null : stringList(value, routeName); }
 function optionalString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
+
+function parseShared<T>(schema: { safeParse(value: unknown): { success: true; data: T } | { success: false; error: { message: string } } }, value: unknown): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new MemoryServiceError("invalid_argument", parsed.error.message);
+  return parsed.data;
+}
 function nullableString(value: unknown, routeName: string): string | null | undefined { if (value === undefined || value === null || typeof value === "string") return value; throw new MemoryServiceError("invalid_argument", `${routeName} field must be a string or null`); }
 function workItemStatus(value: unknown, routeName: string): ProjectWorkItemCreateRequest["status"] | undefined {
   if (value === undefined) return undefined;

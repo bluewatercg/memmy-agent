@@ -31,3 +31,15 @@
 
 - The embedded SQLite backend adapter exposes the new interface as explicitly unavailable because topic inbox requires the Memory service topic repository; the HTTP adapter is the supported path.
 - No UI or historical backfill was implemented, per Task 3 scope.
+
+## Fix Round 1
+
+- Added transactional repository evidence movement. Split removes selected rows from the source and moves them exactly once to the new topic; merge moves all source evidence and leaves the merged source empty/status `merged`. Invalid split rolls back without creating a topic.
+- Memory REST now consumes `@memmy/local-api-contracts` as a workspace dependency and validates all topic request/query inputs with the shared strict schemas. Refresh and candidate decision use existing idempotency storage.
+- Candidate and topic optimistic conflicts now return HTTP 409 with structured `details` containing entity ID, current version, and current status.
+- Memory REST client now exposes the shared HTTP DTO inputs/outputs rather than internal topic domain result types. Backend panel mutations merge runtime request/adapter/source fields before forwarding.
+
+Exact fresh verification:
+
+- `cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/contract/memory-rest-service.test.ts` -> PASS, 2 files / 35 tests.
+- `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts && npm run typecheck` -> PASS, 3 files / 84 tests; backend typecheck and prerequisite Memory/contracts builds passed.

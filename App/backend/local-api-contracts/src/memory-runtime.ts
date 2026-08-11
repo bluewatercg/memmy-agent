@@ -964,6 +964,8 @@ export const TopicCandidateConflictOutputSchema = z.object({ candidateId: NonEmp
 export type TopicCandidateConflictOutput = z.infer<typeof TopicCandidateConflictOutputSchema>;
 
 export const TopicInboxRefreshOutputSchema = z.object({ jobId: NonEmptyStringSchema, unchanged: z.boolean() }).strict();
+export const TopicVersionConflictOutputSchema = z.object({ topicId: NonEmptyStringSchema, currentVersion: PositiveVersionSchema, currentStatus: z.enum(["active", "archived", "merged"]) }).strict();
+export type TopicVersionConflictOutput = z.infer<typeof TopicVersionConflictOutputSchema>;
 export type TopicInboxRefreshOutput = z.infer<typeof TopicInboxRefreshOutputSchema>;
 export const TopicInboxMergeInputSchema = TopicInboxRequestSchema.extend({ targetTopicId: NonEmptyStringSchema, expectedVersion: PositiveVersionSchema, targetExpectedVersion: PositiveVersionSchema, requestId: NonEmptyStringSchema.optional() }).strict();
 export type TopicInboxMergeInput = z.infer<typeof TopicInboxMergeInputSchema>;

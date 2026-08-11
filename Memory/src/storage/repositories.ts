@@ -3744,6 +3744,18 @@ export class ProjectTopicRepository {
     return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? ORDER BY created_at`).all(topicId, namespaceId) as EvidenceSqlRow[]).map(evidenceFromSql);
   }
 
+  moveEvidence(sourceTopicId: string, targetTopicId: string, namespaceId: string, memoryIds?: string[]): void {
+    if (!this.getTopic(sourceTopicId, namespaceId) || !this.getTopic(targetTopicId, namespaceId)) throw new Error("project topic namespace mismatch");
+    const selected = memoryIds ?? this.listEvidence(sourceTopicId, namespaceId).map((item) => item.memoryId);
+    for (const memoryId of [...new Set(selected)]) {
+      const source = this.db.prepare(`SELECT id FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? AND memory_id = ?`).get(sourceTopicId, namespaceId, memoryId) as { id: string } | undefined;
+      if (!source) throw new Error(`project topic evidence not found in source: ${memoryId}`);
+      const duplicate = this.db.prepare(`SELECT id FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? AND memory_id = ?`).get(targetTopicId, namespaceId, memoryId) as { id: string } | undefined;
+      if (duplicate) this.db.prepare(`DELETE FROM project_topic_evidence WHERE id = ? AND topic_id = ? AND namespace_id = ?`).run(source.id, sourceTopicId, namespaceId);
+      else this.db.prepare(`UPDATE project_topic_evidence SET topic_id = ? WHERE id = ? AND topic_id = ? AND namespace_id = ?`).run(targetTopicId, source.id, sourceTopicId, namespaceId);
+    }
+  }
+
   insertCandidate(candidate: ProjectTopicCandidateRecord): ProjectTopicCandidateRecord {
     return this.db.transaction(() => {
       if (!this.getTopic(candidate.topicId, candidate.namespaceId)) throw new Error("project topic namespace mismatch");

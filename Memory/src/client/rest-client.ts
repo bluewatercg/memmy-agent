@@ -1,19 +1,13 @@
 import type {
-  HealthResponse,
-  MemoryAddRequest,
-  MemoryGovernanceRequest,
-  MemoryMarkdownImportRequest,
-  MemoryReloadConfigRequest,
-  MemoryReloadConfigResponse,
-  MemorySearchRequest,
-  RequestEnvelope,
-  RuntimeNamespace,
-  SessionCheckpointRequest,
-  SessionOpenRequest,
-  TurnCompleteRequest,
-  TurnStartRequest
+  HealthResponse, MemoryAddRequest, MemoryGovernanceRequest, MemoryMarkdownImportRequest, MemoryReloadConfigRequest,
+  MemoryReloadConfigResponse, MemorySearchRequest, RequestEnvelope, SessionCheckpointRequest, SessionOpenRequest,
+  TurnCompleteRequest, TurnStartRequest
 } from "../types.js";
-import type { TopicCandidateDecision, TopicDecisionResult, TopicEvidenceResult, TopicInboxQuery, TopicInboxView, TopicMergeResult, TopicRefreshResult, TopicSplitResult } from "../service/topic-inbox/topic-inbox-types.js";
+import type {
+  TopicCandidateDecisionInput, TopicCandidateDecisionOutput, TopicInboxEvidenceInput, TopicInboxEvidenceOutput,
+  TopicInboxListInput, TopicInboxListOutput, TopicInboxMergeInput, TopicInboxMergeOutput, TopicInboxRefreshInput,
+  TopicInboxRefreshOutput, TopicInboxSplitInput, TopicInboxSplitOutput
+} from "@memmy/local-api-contracts";
 
 export type MemoryRestQueryValue =
   | string
@@ -105,28 +99,28 @@ export class MemoryRestClient {
     return this.request("GET", `/api/v1/panel/items${queryString(query)}`);
   }
 
-  listTopicInbox(namespace: RuntimeNamespace, query: TopicInboxQuery = {}): Promise<TopicInboxView> {
-    return this.request("GET", `/api/v1/topic-inbox${queryString({ namespace: JSON.stringify(namespace), statuses: query.statuses })}`) as Promise<TopicInboxView>;
+  listTopicInbox(input: TopicInboxListInput): Promise<TopicInboxListOutput> {
+    return this.request("GET", `/api/v1/topic-inbox${queryString({ namespace: JSON.stringify(input.namespace), statuses: input.statuses })}`) as Promise<TopicInboxListOutput>;
   }
 
-  refreshTopicInbox(namespace: RuntimeNamespace, requestId?: string): Promise<TopicRefreshResult> {
-    return this.request("POST", "/api/v1/topic-inbox/refresh", { namespace, requestId }) as Promise<TopicRefreshResult>;
+  refreshTopicInbox(input: TopicInboxRefreshInput): Promise<TopicInboxRefreshOutput> {
+    return this.request("POST", "/api/v1/topic-inbox/refresh", input) as Promise<TopicInboxRefreshOutput>;
   }
 
-  decideTopicCandidate(candidateId: string, namespace: RuntimeNamespace, decision: TopicCandidateDecision): Promise<TopicDecisionResult> {
-    return this.request("POST", `/api/v1/topic-inbox/candidates/${encodeURIComponent(candidateId)}/decision`, { namespace, ...decision }) as Promise<TopicDecisionResult>;
+  decideTopicCandidate(candidateId: string, input: TopicCandidateDecisionInput): Promise<TopicCandidateDecisionOutput> {
+    return this.request("POST", `/api/v1/topic-inbox/candidates/${encodeURIComponent(candidateId)}/decision`, input) as Promise<TopicCandidateDecisionOutput>;
   }
 
-  mergeTopics(topicId: string, namespace: RuntimeNamespace, input: { targetTopicId: string; expectedVersion: number; targetExpectedVersion: number }): Promise<TopicMergeResult> {
-    return this.request("POST", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/merge`, { namespace, ...input }) as Promise<TopicMergeResult>;
+  mergeTopics(topicId: string, input: TopicInboxMergeInput): Promise<TopicInboxMergeOutput> {
+    return this.request("POST", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/merge`, input) as Promise<TopicInboxMergeOutput>;
   }
 
-  splitTopic(topicId: string, namespace: RuntimeNamespace, input: { expectedVersion: number; title: string; summary: string; evidenceMemoryIds: string[] }): Promise<TopicSplitResult> {
-    return this.request("POST", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/split`, { namespace, ...input }) as Promise<TopicSplitResult>;
+  splitTopic(topicId: string, input: TopicInboxSplitInput): Promise<TopicInboxSplitOutput> {
+    return this.request("POST", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/split`, input) as Promise<TopicInboxSplitOutput>;
   }
 
-  topicEvidence(topicId: string, namespace: RuntimeNamespace, limit = 20): Promise<TopicEvidenceResult> {
-    return this.request("GET", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/evidence${queryString({ namespace: JSON.stringify(namespace), limit })}`) as Promise<TopicEvidenceResult>;
+  topicEvidence(topicId: string, input: TopicInboxEvidenceInput): Promise<TopicInboxEvidenceOutput> {
+    return this.request("GET", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/evidence${queryString({ namespace: JSON.stringify(input.namespace), limit: input.limit })}`) as Promise<TopicInboxEvidenceOutput>;
   }
 
   private async request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<unknown> {

@@ -144,7 +144,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       if (source.version !== input.expectedVersion) throw new TopicVersionConflictError(source.id, source.version, source.status);
       if (target.version !== input.targetExpectedVersion) throw new TopicVersionConflictError(target.id, target.version, target.status);
       const at = this.now();
-      for (const evidence of this.deps.repos.topics.listEvidence(source.id, namespaceId)) this.deps.repos.topics.attachEvidence({ ...evidence, id: newId("topic_evidence"), topicId: target.id });
+      this.deps.repos.topics.moveEvidence(source.id, target.id, namespaceId);
       const updatedTarget = this.deps.repos.topics.updateTopic({ ...target, sourceMemoryIds: unique([...target.sourceMemoryIds, ...source.sourceMemoryIds]), version: target.version + 1, updatedAt: at }, target.version);
       this.deps.repos.topics.updateTopic({ ...source, status: "merged", version: source.version + 1, metadata: { ...source.metadata, mergedIntoTopicId: target.id }, updatedAt: at }, source.version);
       const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_merged", targetKind: "project_topic", targetId: target.id, before: { source, target }, after: updatedTarget, meta: { sourceTopicId: source.id, targetTopicId: target.id }, createdAt: at });
@@ -163,7 +163,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       const at = this.now();
       const topic: ProjectTopicRecord = { id: newId("topic"), namespaceId, projectId: source.projectId, title: input.title, summary: input.summary, status: "active", version: 1, sourceMemoryIds: [...selected], metadata: { splitFromTopicId: source.id }, createdAt: at, updatedAt: at };
       this.deps.repos.topics.insertTopic(topic);
-      for (const item of evidence.filter((entry) => selected.has(entry.memoryId))) this.deps.repos.topics.attachEvidence({ ...item, id: newId("topic_evidence"), topicId: topic.id });
+      this.deps.repos.topics.moveEvidence(source.id, topic.id, namespaceId, [...selected]);
       const updatedSource = this.deps.repos.topics.updateTopic({ ...source, sourceMemoryIds: source.sourceMemoryIds.filter((id) => !selected.has(id)), version: source.version + 1, updatedAt: at }, source.version);
       const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_split", targetKind: "project_topic", targetId: source.id, before: source, after: { source: updatedSource, topic }, meta: { sourceTopicId: source.id, newTopicId: topic.id, evidenceMemoryIds: [...selected] }, createdAt: at });
       return { topic, sourceTopic: updatedSource, auditId: audit.id };

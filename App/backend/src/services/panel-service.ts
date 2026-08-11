@@ -104,10 +104,10 @@ export function createPanelService(deps: { memoryClient: MemoryClient }): PanelS
     },
 
     async listTopicInbox(input, _ctx) { return deps.memoryClient.listTopicInbox(input); },
-    async refreshTopicInbox(input, _ctx) { return deps.memoryClient.refreshTopicInbox(input); },
-    async decideTopicCandidate(id, input, _ctx) { return deps.memoryClient.decideTopicCandidate(id, input); },
-    async mergeTopics(id, input, _ctx) { return deps.memoryClient.mergeTopics(id, input); },
-    async splitTopic(id, input, _ctx) { return deps.memoryClient.splitTopic(id, input); },
+    async refreshTopicInbox(input, ctx) { return deps.memoryClient.refreshTopicInbox(withTopicRuntime(input, ctx)); },
+    async decideTopicCandidate(id, input, ctx) { return deps.memoryClient.decideTopicCandidate(id, withTopicRuntime(input, ctx)); },
+    async mergeTopics(id, input, ctx) { return deps.memoryClient.mergeTopics(id, withTopicRuntime(input, ctx)); },
+    async splitTopic(id, input, ctx) { return deps.memoryClient.splitTopic(id, withTopicRuntime(input, ctx)); },
     async topicEvidence(id, input, _ctx) { return deps.memoryClient.topicEvidence(id, input); },
 
     async items(input, _ctx) {
@@ -149,6 +149,10 @@ function isMissingMemoryLogsRoute(error: unknown): boolean {
     error.code === "not_found" &&
     error.message.toLowerCase().includes("logs")
   );
+}
+
+function withTopicRuntime<T extends { requestId?: string; adapterId?: string; source?: string }>(input: T, ctx: RuntimeContext): T {
+  return { ...input, adapterId: ctx.adapterId, requestId: ctx.requestId ?? input.requestId, source: input.source ?? "memmy-agent" };
 }
 
 function withRuntimeProvenance<T extends { adapterId: string; requestId: string; provenance: object }>(input: T, ctx: RuntimeContext): T {
