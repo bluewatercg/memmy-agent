@@ -54,6 +54,9 @@ describe("memory runtime contracts", () => {
       jobType: "span_big_turn"
     })).not.toThrow();
   });
+  it.each(["topic_ingest", "topic_refresh"])("parses %s job references", (jobType) => {
+    expect(() => JobRefSchema.parse({ ...jobRef(), jobType })).not.toThrow();
+  });
 
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [
     { name: "InjectedContext", schema: InjectedContextSchema, valid: injectedContext(), invalid: { markdown: "", sections: [{ id: "sec-1", kind: "bad" }] } },
