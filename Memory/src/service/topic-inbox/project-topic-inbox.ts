@@ -33,7 +33,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const existingEvidence = this.deps.repos.topics.listEvidence(topic.id, namespaceId);
     const alreadyAttached = existingEvidence.some((item) => item.memoryId === memory.id);
     const primaryRole = match.roles[0] ?? "evidence";
-    const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: item.role })), ...(!alreadyAttached ? [{ memory, role: primaryRole }] : [])].filter((item) => Boolean(item.memory));
+    const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: rolesFromEvidence(item) })), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])].filter((item) => Boolean(item.memory));
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     if (this.deps.repos.topics.findAnalysisRun(namespaceId, inputHash)) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
     const analysis = await analyzeProjectTopic({ llm: this.deps.llm, topic: match.topic, evidence });
@@ -45,17 +45,21 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
       const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
       if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]) }, version: current.version + 1, updatedAt: at }, current.version);
-      const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending").sort((a, b) => a.id.localeCompare(b.id));
-      for (const [index, candidate] of analysis.candidates.entries()) {
-        const predecessor = pending[index];
-        if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) continue;
+      const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
+      const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
+      const retained = new Set<string>();
+      for (const candidate of analysis.candidates) {
+        const identity = candidateIdentity(candidate);
+        const predecessor = pendingByIdentity.get(identity);
+        if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) { retained.add(predecessor.id); continue; }
         const policy = evaluateTopicAutoApproval(candidate, evidence.map((item) => item.memory));
-        const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
+        const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, candidateIdentity: identity, policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
         this.deps.repos.topics.insertCandidate(record);
         createdCandidates.push(record);
+        retained.add(record.id);
         if (policy.approved && !this.hasDuplicateMemory(record, namespace)) this.approve(record, true);
       }
-      for (const obsolete of pending.slice(analysis.candidates.length)) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
+      for (const obsolete of pending.filter((item) => !retained.has(item.id) && item.status === "pending")) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
       this.deps.repos.topics.recordAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, topicId: topic.id, status: "succeeded", result: { topic: analysis.topic, candidates: analysis.candidates }, createdAt: at, updatedAt: at });
     });
     return { assigned: true, unchanged: false, topicId: topic.id, candidateIds: createdCandidates.map((item) => item.id) };
@@ -81,16 +85,28 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     if (!this.deps.enqueueJob) throw new Error("topic refresh requires a durable job queue");
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
-    const cursor = stableHash(this.deps.repos.topics.listTopics(namespaceId).map((topic) => ({ id: topic.id, version: topic.version, evidence: topic.sourceMemoryIds }))).slice(0, 24);
-    const job = this.deps.enqueueJob({ jobType: "topic_refresh", userId: normalized.userId, payload: { namespace, namespaceId, evidenceCursor: cursor } });
-    return { jobId: job.id, unchanged: job.status !== "queued" };
+    const corpus = this.eligibleCorpus(normalized);
+    const cursor = corpusCursor(corpus);
+    const requestKey = `topic_refresh_request:${namespaceId}`;
+    const prior = this.deps.repos.runtime.getKv(requestKey)?.value;
+    if (isRefreshRequest(prior) && prior.cursor === cursor) return { jobId: prior.jobId, unchanged: true };
+    const job = this.deps.enqueueJob({ jobType: "topic_refresh", userId: normalized.userId, payload: { namespace: normalized, namespaceId, evidenceCursor: cursor } });
+    this.deps.repos.runtime.setKv(requestKey, { cursor, jobId: job.id });
+    return { jobId: job.id, unchanged: false };
   }
 
   async processRefresh(namespace: RuntimeNamespace): Promise<void> {
-    const namespaceId = namespaceIdFromContext(namespace);
-    const memories = this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated", ...namespaceFilter(namespace) }, 10_000);
+    const normalized = normalizeNamespace(namespace);
+    const namespaceId = namespaceIdFromContext(normalized);
+    const memories = this.eligibleCorpus(normalized);
+    const cursor = corpusCursor(memories);
+    if (this.deps.repos.runtime.getKv(`topic_refresh_cursor:${namespaceId}`)?.value === cursor) return;
     for (const memory of memories) await this.ingest(memory.id);
-    this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, stableHash(memories.map((memory) => [memory.id, memory.version, memory.contentHash])));
+    this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, cursor);
+  }
+
+  private eligibleCorpus(namespace: RuntimeNamespace): MemoryRow[] {
+    return this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated", ...namespaceFilter(namespace) }, 10_000).sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private newTopic(memory: MemoryRow, namespaceId: string, at: string): ProjectTopicRecord {
@@ -98,24 +114,25 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
   }
 
   private approve(candidate: ProjectTopicCandidateRecord, automatic: boolean): TopicDecisionResult {
-    const topic = this.deps.repos.topics.getTopic(candidate.topicId, candidate.namespaceId);
-    if (!topic) throw new Error(`topic not found: ${candidate.topicId}`);
-    const source = this.deps.repos.memories.get(candidate.sourceMemoryIds[0]!);
-    if (!source) throw new Error("topic candidate source memory missing");
-    const layer = candidate.proposedLayer;
-    const kind = layer === "L2" ? "policy" : layer === "L3" ? "world_model" : "skill";
-    const policyVersion = stringField(candidate.metadata, "policyVersion") ?? "manual";
-    const memory = this.deps.buildMemory({ userId: source.userId, sessionId: source.sessionId, agentId: source.agentId, appId: source.appId, tenantId: source.info.tenant_id, projectId: topic.projectId, layer, kind, lifecycleStatus: "active", memoryType: layer === "Skill" ? "SkillMemory" : "LongTermMemory", key: `topic:${topic.id}:${layer}`, value: candidate.conclusion, tags: ["project-topic", "topic-approved"], provenance: { sourceMemoryIds: candidate.sourceMemoryIds }, info: { title: candidate.title, source_memory_ids: candidate.sourceMemoryIds }, internal: { source_memory_ids: candidate.sourceMemoryIds, source_l1_memory_ids: candidate.sourceMemoryIds, topic_approval: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic } } });
-    const persisted = this.deps.upsertMemory(memory);
-    let saved = persisted.memory;
-    const priorApproved = this.deps.repos.topics.listCandidates(candidate.topicId, candidate.namespaceId).filter((item) => item.status === "approved" && item.id !== candidate.id && item.proposedLayer === candidate.proposedLayer).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-    const priorMemoryId = priorApproved ? stringField(priorApproved.metadata, "approvedMemoryId") : undefined;
-    const priorMemory = priorMemoryId ? this.deps.repos.memories.get(priorMemoryId) : undefined;
-    if (priorMemory && priorMemory.id !== saved.id && priorMemory.status === "activated") saved = this.deps.repos.memories.supersede({ oldMemory: priorMemory, newMemory: saved, projectId: topic.projectId, reason: `topic candidate ${candidate.id} supersedes ${priorApproved!.id}`, actor: { type: automatic ? "system" : "user" } }).newMemory;
-    const at = nowIso();
-    const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: "approved", version: candidate.version + 1, metadata: { ...candidate.metadata, approvedMemoryId: saved.id, automatic }, updatedAt: at }, candidate.version);
-    this.deps.repos.runtime.insertAudit({ userId: source.userId, sessionId: source.sessionId, actor: { type: automatic ? "system" : "user" }, action: "topic_candidate_approved", targetKind: "memory", targetId: saved.id, after: saved, meta: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic }, createdAt: at });
-    return { candidate: updated, memory: saved };
+    return this.deps.repos.transaction(() => {
+      const topic = this.deps.repos.topics.getTopic(candidate.topicId, candidate.namespaceId);
+      if (!topic) throw new Error(`topic not found: ${candidate.topicId}`);
+      const source = this.deps.repos.memories.get(candidate.sourceMemoryIds[0]!);
+      if (!source || namespaceIdFromContext(namespaceForMemory(source)) !== candidate.namespaceId) throw new Error("topic candidate source memory missing or cross-namespace");
+      const layer = candidate.proposedLayer;
+      const kind = layer === "L2" ? "policy" : layer === "L3" ? "world_model" : "skill";
+      const policyVersion = stringField(candidate.metadata, "policyVersion") ?? "manual";
+      const memory = this.deps.buildMemory({ userId: source.userId, sessionId: source.sessionId, agentId: source.agentId, appId: source.appId, tenantId: source.info.tenant_id, projectId: topic.projectId, layer, kind, lifecycleStatus: "active", memoryType: layer === "Skill" ? "SkillMemory" : "LongTermMemory", key: `topic:${topic.id}:${layer}:${candidateIdentityFromRecord(candidate)}`, value: candidate.conclusion, tags: ["project-topic", "topic-approved"], provenance: { sourceMemoryIds: candidate.sourceMemoryIds }, info: { title: candidate.title, source_memory_ids: candidate.sourceMemoryIds }, internal: { source_memory_ids: candidate.sourceMemoryIds, source_l1_memory_ids: candidate.sourceMemoryIds, topic_approval: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic } } });
+      let saved = this.deps.upsertMemory(memory).memory;
+      const priorApproved = this.deps.repos.topics.listCandidates(candidate.topicId, candidate.namespaceId).filter((item) => item.status === "approved" && item.id !== candidate.id && item.proposedLayer === candidate.proposedLayer).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+      const priorMemoryId = priorApproved ? stringField(priorApproved.metadata, "approvedMemoryId") : undefined;
+      const priorMemory = priorMemoryId ? this.deps.repos.memories.get(priorMemoryId) : undefined;
+      if (priorMemory && priorMemory.id !== saved.id && priorMemory.status === "activated") saved = this.deps.repos.memories.supersede({ oldMemory: priorMemory, newMemory: saved, projectId: topic.projectId, reason: `topic candidate ${candidate.id} supersedes ${priorApproved!.id}`, actor: { type: automatic ? "system" : "user" } }).newMemory;
+      const at = nowIso();
+      const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: "approved", version: candidate.version + 1, metadata: { ...candidate.metadata, approvedMemoryId: saved.id, automatic }, updatedAt: at }, candidate.version);
+      this.deps.repos.runtime.insertAudit({ userId: source.userId, sessionId: source.sessionId, actor: { type: automatic ? "system" : "user" }, action: "topic_candidate_approved", targetKind: "memory", targetId: saved.id, after: saved, meta: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic }, createdAt: at });
+      return { candidate: updated, memory: saved };
+    });
   }
 
   private findCandidate(namespaceId: string, candidateId: string): ProjectTopicCandidateRecord | undefined {
@@ -136,4 +153,21 @@ function namespaceFilter(namespace: RuntimeNamespace): { tenantId: string; proje
 function stringField(value: Record<string, unknown>, key: string): string | undefined { const item = value[key]; return typeof item === "string" && item.trim() ? item.trim() : undefined; }
 function stringArray(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; }
 function unique(values: string[]): string[] { return [...new Set(values)]; }
+function rolesFromEvidence(evidence: { role: string; metadata: Record<string, unknown> }): string[] {
+  const roles = stringArray(evidence.metadata.roles);
+  return roles.length ? roles : [evidence.role];
+}
 function sameStrings(left: string[], right: string[]): boolean { return left.length === right.length && left.every((value, index) => value === right[index]); }
+function corpusCursor(memories: MemoryRow[]): string {
+  return stableHash(memories.map((memory) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verificationStatus: memory.info.verification_status, verificationPassed: memory.info.verification_passed })));
+}
+function isRefreshRequest(value: unknown): value is { cursor: string; jobId: string } {
+  return Boolean(value && typeof value === "object" && "cursor" in value && typeof value.cursor === "string" && "jobId" in value && typeof value.jobId === "string");
+}
+function candidateIdentity(candidate: { proposedLayer: string; title: string; conclusion: string; sensitiveCategories: string[] }): string {
+  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return stableHash({ layer: candidate.proposedLayer, title: normalize(candidate.title), conclusion: normalize(candidate.conclusion), category: [...candidate.sensitiveCategories].sort() }).slice(0, 32);
+}
+function candidateIdentityFromRecord(candidate: ProjectTopicCandidateRecord): string {
+  return stringField(candidate.metadata, "candidateIdentity") ?? candidateIdentity({ proposedLayer: candidate.proposedLayer, title: candidate.title, conclusion: candidate.conclusion, sensitiveCategories: stringArray(candidate.metadata.sensitiveCategories) });
+}

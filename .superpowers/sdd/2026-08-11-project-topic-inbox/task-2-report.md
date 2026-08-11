@@ -70,3 +70,21 @@ Result: 4 files passed, 26 tests passed.
 `cd Memory && npm run typecheck`
 
 Result: TypeScript completed successfully with no diagnostics.
+
+## Review Fix Round 2
+
+- Restored the strict model `verified` gate alongside persisted cited verification evidence and added failed/unverified regressions.
+- Refresh dedupe now hashes the canonical namespace's eligible L1 corpus, including content/version/quality/verification, and performs a true unchanged no-op.
+- Propagated every evidence role to analysis, added embedding centroid consumption, stable semantic candidate identities, reorder-independent supersession, atomic approval transactions, and cross-namespace decision rejection.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts`
+
+Result: 2 files passed, 15 tests passed.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts`
+
+Result: 4 files passed, 29 tests passed.
+
+`cd Memory && npm run typecheck`
+
+Result: TypeScript completed successfully with no diagnostics.

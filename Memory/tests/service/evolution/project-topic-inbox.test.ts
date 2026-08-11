@@ -56,6 +56,16 @@ describe("ProjectTopicInbox", () => {
     expect(candidates.some((candidate) => candidate.status === "pending")).toBe(true);
   });
 
+  it("fails closed when deciding a candidate from another namespace", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "formatter workflow", "namespace-decision");
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Formatter", summary: "Formatting workflow" }, candidates: [{ title: "Run formatter", conclusion: "Run formatter check.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const candidate = inbox.list({ source: "codex", profileId: "p", projectId: "project" }).topics[0]!.candidates[0]!;
+    await expect(inbox.decide({ source: "codex", profileId: "p", projectId: "other" }, candidate.id, { decision: "reject" })).rejects.toThrow("not found in namespace");
+  });
+
   it("preserves the prior topic version when model output is invalid", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);

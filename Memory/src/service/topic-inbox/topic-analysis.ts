@@ -4,17 +4,17 @@ import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import type { TopicAnalysisResult, TopicCandidateAnalysis } from "./topic-inbox-types.js";
 
-export function topicAnalysisInputHash(topic: ProjectTopicRecord | undefined, evidence: Array<{ memory: MemoryRow; role: string }>): string {
+export function topicAnalysisInputHash(topic: ProjectTopicRecord | undefined, evidence: Array<{ memory: MemoryRow; role: string | string[] }>): string {
   return stableHash({
     previous: topic ? { id: topic.id, version: topic.version, title: topic.title, summary: topic.summary } : null,
-    evidence: evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, role })).sort((a, b) => a.id.localeCompare(b.id))
+    evidence: evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role })).sort((a, b) => a.id.localeCompare(b.id))
   });
 }
 
 export async function analyzeProjectTopic(input: {
   llm: LlmClient;
   topic?: ProjectTopicRecord;
-  evidence: Array<{ memory: MemoryRow; role: ProjectTopicEvidenceRecord["role"] }>;
+  evidence: Array<{ memory: MemoryRow; role: string | string[] }>;
 }): Promise<TopicAnalysisResult> {
   const result = await input.llm.completeJson<Record<string, unknown>>([
     { role: "system", content: "Aggregate project L1 evidence into one topic and zero or more governed candidates. Preserve error, fix, and verification order. Return JSON only." },

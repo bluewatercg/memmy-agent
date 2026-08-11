@@ -18,6 +18,7 @@ export function evaluateTopicAutoApproval(candidate: TopicCandidateAnalysis, evi
   if (candidate.proposedLayer !== "L2") rejectionReasons.push("layer_not_l2");
   if (candidate.risk !== "low") rejectionReasons.push("risk_not_low");
   if (candidate.confidence !== "high") rejectionReasons.push("confidence_not_high");
+  if (candidate.verificationStatus !== "verified") rejectionReasons.push("model_verification_not_verified");
   if (candidate.conflicts.length) rejectionReasons.push("model_conflicts_present");
   if (candidate.sensitiveCategories.length) rejectionReasons.push("model_sensitive_category");
 

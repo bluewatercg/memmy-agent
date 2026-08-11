@@ -27,6 +27,8 @@ describe("project topic worker policy", () => {
     ["risk", { ...eligible, risk: "medium" as const }, [evidence()], false],
     ["confidence", { ...eligible, confidence: "medium" as const }, [evidence()], false],
     ["uncited", { ...eligible, sourceEvidenceIds: [] }, [evidence()], false],
+    ["unverified", { ...eligible, verificationStatus: "unverified" as const }, [evidence()], false],
+    ["verification failed", { ...eligible, verificationStatus: "failed" as const }, [evidence()], false],
     ["failed", eligible, [evidence("formatter check did not pass")], false],
     ["migration", eligible, [evidence("migration check passed")], false],
     ["conflict", { ...eligible, conflicts: ["contradiction"] }, [evidence()], false],
