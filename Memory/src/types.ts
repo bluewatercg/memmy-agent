@@ -71,7 +71,9 @@ export type JobType =
   | "l2_induction"
   | "l3_abstraction"
   | "skill_crystallization"
-  | "skill_trial_resolve";
+  | "skill_trial_resolve"
+  | "topic_ingest"
+  | "topic_refresh";
 
 export interface RuntimeNamespace {
   source: string;

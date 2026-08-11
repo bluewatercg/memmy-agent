@@ -73,6 +73,10 @@ export interface WorkerJobProcessors {
   embedding: {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
   };
+  topic: {
+    ingest(job: EvolutionJobRecord): MaybePromise<void>;
+    refresh(job: EvolutionJobRecord): MaybePromise<void>;
+  };
 }
 
 export interface WorkerJobHandlerDeps {
@@ -250,6 +254,12 @@ export async function processJob(
       return;
     case "l2_association":
       await deps.processors.evolution.associateL2(job);
+      return;
+    case "topic_ingest":
+      await deps.processors.topic.ingest(job);
+      return;
+    case "topic_refresh":
+      await deps.processors.topic.refresh(job);
       return;
     default:
       throw new Error(`unsupported job type: ${job.jobType}`);
@@ -516,6 +526,13 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
     case "skill_trial_resolve": {
       const trial = payloadString("trialId") ?? target;
       return trial ? `skill_trial_resolve:${trial}` : input.episodeId ? `skill_trial_resolve:${input.episodeId}` : undefined;
+    }
+    case "topic_ingest":
+      return target ? `topic_ingest:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
+    case "topic_refresh": {
+      const namespaceId = payloadString("namespaceId");
+      const cursor = payloadString("evidenceCursor");
+      return namespaceId && cursor ? `topic_refresh:${namespaceId}:${cursor}` : undefined;
     }
   }
 }

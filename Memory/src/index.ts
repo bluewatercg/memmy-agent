@@ -54,3 +54,4 @@ export type * from "./config/index.js";
 export type * from "./model/types.js";
 
 export type * from "./service/project-context/project-context-types.js";
+export type * from "./service/topic-inbox/topic-inbox-types.js";

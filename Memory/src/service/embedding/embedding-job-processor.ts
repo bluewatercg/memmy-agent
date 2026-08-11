@@ -191,6 +191,16 @@ export class EmbeddingJobProcessor {
       }
       this.appendMemoryChange(saved, current, input.source, at);
       input.finalize?.(saved, hadProcessing, at);
+      if (saved.memoryLayer === "L1") {
+        this.deps.enqueueJob({
+          jobType: "topic_ingest",
+          userId: saved.userId,
+          sessionId: saved.sessionId,
+          targetMemoryId: saved.id,
+          payload: { reason: "l1.ready", contentHash: saved.contentHash ?? "current" },
+          createdAt: at
+        });
+      }
     });
     return saved;
   }
@@ -313,6 +323,14 @@ export class EmbeddingJobProcessor {
       state: "ready_text_only", stage: null, activeJobId: null, attemptCount, retryAction: "retry",
       errorCode: null, errorMessage: null, failedAt: null, updatedAt: at
     }, allowedStates);
+    this.deps.enqueueJob({
+      jobType: "topic_ingest",
+      userId: memory.userId,
+      sessionId: memory.sessionId,
+      targetMemoryId: memory.id,
+      payload: { reason: "l1.ready_text_only", contentHash: memory.contentHash ?? "current" },
+      createdAt: at
+    });
   }
 
   private markEmbeddingPending(memory: MemoryRow, activeJobId: string, at: string, allowedStates?: MemoryProcessingState[]): void {

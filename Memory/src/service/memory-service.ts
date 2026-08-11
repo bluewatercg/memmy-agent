@@ -172,6 +172,8 @@ import {
   type EnqueueJobInput
 } from "./worker/job-handlers.js";
 import { WorkerRunner } from "./worker/worker-runner.js";
+import { ProjectTopicInboxService } from "./topic-inbox/project-topic-inbox.js";
+import type { TopicCandidateDecision, TopicInboxQuery } from "./topic-inbox/topic-inbox-types.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
 
@@ -267,6 +269,7 @@ export class MemoryService {
   private readonly retrieval: RetrievalService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
+  private readonly topicInbox: ProjectTopicInboxService;
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
   private readonly repos: Repositories;
@@ -318,6 +321,16 @@ export class MemoryService {
         },
         embedding: {
           embedMemory: this.embedMemory.bind(this)
+        },
+        topic: {
+          ingest: async (job) => {
+            if (job.targetMemoryId) await this.topicInbox.ingest(job.targetMemoryId);
+          },
+          refresh: async (job) => {
+            const namespace = job.payload.namespace;
+            if (!namespace || typeof namespace !== "object" || Array.isArray(namespace)) throw new Error("topic refresh namespace missing");
+            await this.topicInbox.processRefresh(namespace as RuntimeNamespace);
+          }
         }
       }
     });
@@ -341,6 +354,13 @@ export class MemoryService {
       }),
       scheduleEmbeddingAfterTextUpdate: (input) => this.embeddingJobs.scheduleEmbeddingAfterTextUpdate(input),
       repairEvidenceValueDiff: sessionRepairEvidenceValueDiff
+    });
+    this.topicInbox = new ProjectTopicInboxService({
+      repos: this.repos,
+      get llm() { return evolutionOwner.skillLlm; },
+      buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
+      upsertMemory: (memory) => this.evolutionJobs.upsertEvolutionMemory(memory),
+      enqueueJob: this.workerHandlers.enqueueJob
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -1780,6 +1800,17 @@ export class MemoryService {
   approveProjectGoal(input: { namespace: RuntimeNamespace; candidateId: string }): ProjectGoalRecord {
     this.assertProjectContextScope(input.namespace);
     return this.projectContext.approveGoal(input);
+  }
+  listProjectTopicInbox(namespace: RuntimeNamespace, query?: TopicInboxQuery) {
+    return this.topicInbox.list(namespace, query);
+  }
+
+  decideProjectTopicCandidate(candidateId: string, decision: TopicCandidateDecision) {
+    return this.topicInbox.decide(candidateId, decision);
+  }
+
+  refreshProjectTopicInbox(namespace: RuntimeNamespace) {
+    return this.topicInbox.refresh(namespace);
   }
 
   rejectProjectGoal(input: { namespace: RuntimeNamespace; candidateId: string }): ProjectGoalRecord {

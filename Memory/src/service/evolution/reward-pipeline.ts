@@ -295,6 +295,15 @@ export class RewardPipeline {
           createdAt: at
         });
       }
+      this.deps.enqueueJob({
+        jobType: "topic_ingest",
+        userId: saved.userId,
+        sessionId: saved.sessionId,
+        episodeId: trace.episodeId,
+        targetMemoryId: saved.id,
+        payload: { reason: "reward.updated", contentHash: saved.contentHash ?? "current", version: saved.version },
+        createdAt: at
+      });
       await this.maybeCreateValueDistributionRepair(saved, at);
     }
     const inductionSeed = l2Eligible[0];
