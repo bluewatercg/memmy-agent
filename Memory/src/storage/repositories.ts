@@ -2208,6 +2208,13 @@ export class RuntimeRepository {
     if (row.request_hash !== requestHash) return "conflict";
     return (parseJson<Record<string, unknown>>(row.response_json, {}).__memmyIdempotencyInflight === true) ? "inflight" : "complete";
   }
+  claimLegacyIdempotency(legacyKey: string, newKey: string, requestHash: string): "inflight" | "complete" | "conflict" | "missing" {
+    const row = this.db.prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`).get(legacyKey) as { request_hash: string; response_json: string } | undefined;
+    if (!row) return "missing";
+    if (row.request_hash !== requestHash) return "conflict";
+    this.db.prepare(`INSERT OR IGNORE INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at) SELECT ?, request_hash, response_json, created_at, expires_at FROM idempotency_keys WHERE key = ?`).run(newKey, legacyKey);
+    return parseJson<Record<string, unknown>>(row.response_json, {}).__memmyIdempotencyInflight === true ? "inflight" : "complete";
+  }
 
   completeIdempotency(key: string, requestHash: string, response: unknown): void {
     const result = this.db.prepare(`UPDATE idempotency_keys SET response_json = ? WHERE key = ? AND request_hash = ? AND json_extract(response_json, '$.__memmyIdempotencyInflight') = 1`).run(toJson(response), key, requestHash);

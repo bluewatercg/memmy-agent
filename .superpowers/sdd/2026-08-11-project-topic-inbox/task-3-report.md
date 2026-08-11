@@ -98,3 +98,8 @@ Concern resolved: merge/split exact topic routes now use an explicit synchronous
 - Fresh `cd Memory && npm run typecheck` -> PASS; `npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 2 files / 36 tests.
 
 Residual risk: the durable lease marker currently has no explicit owner/expiry columns and no independent two-connection crash-recovery test; bounded wait returns a deterministic in-progress conflict after timeout. Cross-process exactly-once for async completion therefore remains limited by the existing SQLite schema and is not claimed.
+
+## Compatibility Fix
+
+- Namespace-scoped idempotency now checks the pre-upgrade `${operation}:${adapterId}:${requestId}` key when the new scoped key is absent, validates the request hash, and aliases the completed/in-flight row without rerunning side effects. New writes remain immutable first-writer claims; mismatched legacy payloads conflict.
+- `cd Memory && npm run typecheck && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts` -> PASS, 2 files / 23 tests.
