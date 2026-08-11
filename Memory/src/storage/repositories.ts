@@ -616,11 +616,26 @@ export class MemoryRepository {
     })();
   }
 
+  eligibleL1SnapshotCursor(snapshotId: string): string {
+    const rows = this.db.prepare(`SELECT memory_id, row_json, vectors_json FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ? ORDER BY memory_id`)
+      .all(snapshotId) as Array<{ memory_id: string; row_json: string; vectors_json: string }>;
+    return stableHash(rows.map((row) => {
+      const memory = parseJson(row.row_json, {} as MemoryRow);
+      return { id: row.memory_id, version: memory.version, contentHash: memory.contentHash, updatedAt: memory.updatedAt, vectors: parseJson(row.vectors_json, [] as MemoryVectorValue[]) };
+    }));
+  }
+
   listEligibleL1SnapshotPage(_filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
     const rows = this.db.prepare(`SELECT row_json, vectors_json FROM project_topic_refresh_snapshot_rows
       WHERE snapshot_id = ? AND (? IS NULL OR memory_id > ?) ORDER BY memory_id ASC LIMIT ?`)
       .all(snapshotId, afterId ?? null, afterId ?? null, limit) as Array<{ row_json: string; vectors_json: string }>;
     return rows.map((row) => attachMemoryVectors(parseJson(row.row_json, {} as MemoryRow), parseJson(row.vectors_json, [] as MemoryVectorValue[])));
+  }
+
+  getEligibleL1SnapshotMemory(snapshotId: string, memoryId: string): MemoryRow | undefined {
+    const row = this.db.prepare(`SELECT row_json, vectors_json FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ? AND memory_id = ?`)
+      .get(snapshotId, memoryId) as { row_json: string; vectors_json: string } | undefined;
+    return row ? attachMemoryVectors(parseJson(row.row_json, {} as MemoryRow), parseJson(row.vectors_json, [] as MemoryVectorValue[])) : undefined;
   }
 
   releaseEligibleL1Snapshot(snapshotId: string): void {

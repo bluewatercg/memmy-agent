@@ -100,3 +100,32 @@ Duration  21.31s
 ### Concerns
 
 None. The unrelated untracked plan remains untouched.
+
+## Fix Round 3
+
+### Findings Addressed
+
+1. Every existing evidence row is live-revalidated for existence, canonical namespace, L1 layer, and activated status before hash/model input. Persistence revalidates every evidence row in the transaction, and repository attachment requires activated status in addition to L1/namespace.
+2. Refresh no longer materializes a corpus-sized array or map. Cursor is derived from the captured snapshot, then bounded pages are read and processed one at a time; only the current page is retained.
+3. Snapshot rows and vectors are captured in one bounded SQL transaction. Vector rows are copied in bounded 250-ID keyset batches.
+4. Successful semantic transactions always persist `centroidInputHash`, including hash-only changes without a topic version bump. Centroid removal deletes stale `embeddingCentroid` metadata.
+
+### Exact Verification
+
+From `Memory`:
+
+```text
+$ npm run typecheck
+> tsc -p tsconfig.json --noEmit
+(exit 0)
+
+$ npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts
+Test Files  7 passed (7)
+Tests  64 passed (64)
+Duration  22.87s
+(exit 0)
+```
+
+### Concerns
+
+None. The unrelated untracked plan remains untouched.

@@ -30,7 +30,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     return memory ? this.ingestMemory(memory) : { assigned: false, unchanged: true, candidateIds: [] };
   }
 
-  private async ingestMemory(memory: MemoryRow, capturedById?: ReadonlyMap<string, MemoryRow>): Promise<TopicIngestResult> {
+  private async ingestMemory(memory: MemoryRow, capturedMemory?: (id: string) => MemoryRow | undefined): Promise<TopicIngestResult> {
     const live = this.deps.repos.memories.get(memory.id);
     if (!live || live.memoryLayer !== "L1" || live.status !== "activated" || namespaceIdFromContext(namespaceForMemory(live)) !== namespaceIdFromContext(namespaceForMemory(memory))) return { assigned: false, unchanged: true, candidateIds: [] };
     const namespace = namespaceForMemory(memory);
@@ -42,7 +42,11 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const existingEvidence = this.deps.repos.topics.listEvidence(topic.id, namespaceId);
     const alreadyAttached = existingEvidence.some((item) => item.memoryId === memory.id);
     const primaryRole = match.roles[0] ?? "evidence";
-    const evidence = [...existingEvidence.map((item) => ({ memory: capturedById?.get(item.memoryId) ?? this.deps.repos.memories.get(item.memoryId)!, role: rolesFromEvidence(item) })), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])].filter((item) => Boolean(item.memory));
+    const evidence = [...existingEvidence.flatMap((item) => {
+      const liveEvidence = this.deps.repos.memories.get(item.memoryId);
+      if (!liveEvidence || liveEvidence.memoryLayer !== "L1" || liveEvidence.status !== "activated" || namespaceIdFromContext(namespaceForMemory(liveEvidence)) !== namespaceId) return [];
+      return [{ memory: capturedMemory?.(item.memoryId) ?? liveEvidence, role: rolesFromEvidence(item) }];
+    }), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])];
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     const claimOwner = newId("topic_analysis_owner");
     const leaseUntil = new Date(Date.parse(at) + (this.deps.analysisLeaseMs ?? 5 * 60_000)).toISOString();
@@ -69,6 +73,10 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const createdCandidates: ProjectTopicCandidateRecord[] = [];
     try {
       this.deps.repos.transaction(() => {
+        for (const item of evidence) {
+          const currentEvidence = this.deps.repos.memories.get(item.memory.id);
+          if (!currentEvidence || currentEvidence.memoryLayer !== "L1" || currentEvidence.status !== "activated" || namespaceIdFromContext(namespaceForMemory(currentEvidence)) !== namespaceId) throw new Error("project topic evidence no longer eligible");
+        }
         if (!match.topic) this.deps.repos.topics.insertTopic(topic);
         if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
         const sourceMemoryIds = evidence.map((item) => item.memory.id);
@@ -80,7 +88,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
         if (embeddingCentroid.length) metadata.embeddingCentroid = embeddingCentroid;
         else delete metadata.embeddingCentroid;
         if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata, version: current.version + 1, updatedAt: at }, current.version);
-        else if (centroidChanged) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
+        else if (centroidChanged || current.metadata.centroidInputHash !== centroidHash) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
         const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
         const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
         const retained = new Set<string>();
@@ -125,7 +133,9 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     if (!this.deps.enqueueJob) throw new Error("topic refresh requires a durable job queue");
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
-    const cursor = corpusCursor(this.eligibleCorpus(normalized));
+    const snapshotId = this.deps.repos.memories.eligibleL1SnapshotBoundary(namespaceFilter(normalized));
+    const cursor = snapshotId ? this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId) : stableHash([]);
+    if (snapshotId) this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
     const requestKey = `topic_refresh_request:${namespaceId}`;
     const prior = this.deps.repos.runtime.getKv(requestKey)?.value;
     if (isRefreshRequest(prior) && prior.cursor === cursor) {
@@ -140,28 +150,25 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
   async processRefresh(namespace: RuntimeNamespace): Promise<void> {
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
-    const memories = this.eligibleCorpus(normalized);
-    const cursor = corpusCursor(memories);
-    const capturedById = new Map(memories.map((memory) => [memory.id, memory]));
-    for (const memory of memories) await this.ingestMemory(memory, capturedById);
-    this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, cursor);
-  }
-
-  private eligibleCorpus(namespace: RuntimeNamespace): MemoryRow[] {
-    const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
-    const filter = namespaceFilter(namespace);
+    const filter = namespaceFilter(normalized);
     const snapshotId = this.deps.repos.memories.eligibleL1SnapshotBoundary(filter);
-    if (!snapshotId) return [];
-    const result: MemoryRow[] = [];
+    if (!snapshotId) {
+      this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, stableHash([]));
+      return;
+    }
+    const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
+    const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
+    const capturedMemory = (id: string) => this.deps.repos.memories.getEligibleL1SnapshotMemory(snapshotId, id);
     let afterId: string | undefined;
     try {
       for (;;) {
         const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);
-        result.push(...page);
+        if (page.length === 0) break;
+        for (const memory of page) await this.ingestMemory(memory, capturedMemory);
         if (page.length < pageSize) break;
         afterId = page[page.length - 1]!.id;
       }
-      return result;
+      this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, cursor);
     } finally {
       this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
     }
