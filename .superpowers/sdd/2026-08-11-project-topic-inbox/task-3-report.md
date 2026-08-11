@@ -90,3 +90,11 @@ Concern resolved: merge/split exact topic routes now use an explicit synchronous
 
 - Durable claim continuation: idempotency keys now include canonical namespace hash; SQLite `INSERT OR IGNORE` creates an immutable in-flight claim, conflicting hashes fail, matching contenders bounded-wait and reload, completion uses conditional UPDATE, and failures remove only their own in-flight claim. Fixed lock cleanup with stable entry identity.
 - `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts` -> PASS, 2 files / 23 tests; Memory typecheck passed before the compatibility rerun.
+
+## Fix Round 6
+
+- Atomic merge/split replay now retains the durable in-flight claim throughout the same SQLite transaction as domain mutation, audit, and conditional completion; the prior pre-run abandon path was removed. Any callback or completion failure rolls back the savepoint, then failure cleanup removes only the matching claim.
+- Completed-claim reload now validates the row exists instead of relying on a non-null assertion.
+- Fresh `cd Memory && npm run typecheck` -> PASS; `npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 2 files / 36 tests.
+
+Residual risk: the durable lease marker currently has no explicit owner/expiry columns and no independent two-connection crash-recovery test; bounded wait returns a deterministic in-progress conflict after timeout. Cross-process exactly-once for async completion therefore remains limited by the existing SQLite schema and is not claimed.

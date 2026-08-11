@@ -723,12 +723,11 @@ export class MemoryService {
       let claim = this.repos.runtime.claimIdempotency(idempotencyKey, requestHash);
       for (let attempt = 0; claim === "inflight" && attempt < 200; attempt += 1) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); claim = this.repos.runtime.claimIdempotency(idempotencyKey, requestHash); }
       if (claim === "conflict") throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
-      if (claim === "complete") { const existing = this.repos.runtime.getIdempotency(idempotencyKey)!; return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T; }
+      if (claim === "complete") { const existing = this.repos.runtime.getIdempotency(idempotencyKey); if (!existing) throw new MemoryServiceError("internal", "idempotency response disappeared"); return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T; }
       if (claim !== "claimed") throw new MemoryServiceError("conflict", "idempotency request is still in progress");
       try {
         if (options.atomicReplay) {
-          this.repos.runtime.abandonIdempotency(idempotencyKey, requestHash);
-          return this.repos.transaction(() => { const value = run(); if (value && typeof (value as Promise<unknown>).then === "function") throw new MemoryServiceError("internal", "atomic idempotency requires a synchronous operation"); this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, value); return value as T; });
+          return this.repos.transaction(() => { const value = run(); if (value && typeof (value as Promise<unknown>).then === "function") throw new MemoryServiceError("internal", "atomic idempotency requires a synchronous operation"); this.repos.runtime.completeIdempotency(idempotencyKey, requestHash, value); return value as T; });
         }
         const response = await run(); this.repos.runtime.completeIdempotency(idempotencyKey, requestHash, response); return response;
       } catch (error) { this.repos.runtime.abandonIdempotency(idempotencyKey, requestHash); throw error; }
