@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import { namespaceForMemory, namespaceIdFromContext } from "../service/namespace/namespace-scope.js";
 import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus } from "../types.js";
@@ -616,13 +617,26 @@ export class MemoryRepository {
     })();
   }
 
-  eligibleL1SnapshotCursor(snapshotId: string): string {
-    const rows = this.db.prepare(`SELECT memory_id, row_json, vectors_json FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ? ORDER BY memory_id`)
-      .all(snapshotId) as Array<{ memory_id: string; row_json: string; vectors_json: string }>;
-    return stableHash(rows.map((row) => {
-      const memory = parseJson(row.row_json, {} as MemoryRow);
-      return { id: row.memory_id, version: memory.version, contentHash: memory.contentHash, updatedAt: memory.updatedAt, vectors: parseJson(row.vectors_json, [] as MemoryVectorValue[]) };
-    }));
+  eligibleL1SnapshotCursor(snapshotId: string, pageSize = 250): string {
+    const hash = createHash("sha256");
+    let afterId: string | undefined;
+    for (;;) {
+      const rows = this.db.prepare(`SELECT memory_id, row_json, vectors_json FROM project_topic_refresh_snapshot_rows
+        WHERE snapshot_id = ? AND (? IS NULL OR memory_id > ?) ORDER BY memory_id LIMIT ?`)
+        .all(snapshotId, afterId ?? null, afterId ?? null, Math.max(1, pageSize)) as Array<{ memory_id: string; row_json: string; vectors_json: string }>;
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const memory = parseJson(row.row_json, {} as MemoryRow);
+        hash.update(stableHash({ id: row.memory_id, version: memory.version, contentHash: memory.contentHash, updatedAt: memory.updatedAt, vectors: parseJson(row.vectors_json, [] as MemoryVectorValue[]) }));
+      }
+      afterId = rows[rows.length - 1]!.memory_id;
+    }
+    return hash.digest("hex");
+  }
+
+  countEligibleL1SnapshotRows(snapshotId: string): number {
+    const row = this.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ?`).get(snapshotId) as { count: number };
+    return row.count;
   }
 
   listEligibleL1SnapshotPage(_filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
@@ -3717,7 +3731,7 @@ export class ProjectTopicRepository {
       const row = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
       return row ? memoryFromSql(row) : undefined;
     })();
-    if (!memory || memory.id !== evidence.memoryId || memory.memoryLayer !== "L1") throw new Error("project topic evidence must reference an L1 memory");
+    if (!memory || memory.id !== evidence.memoryId || memory.memoryLayer !== "L1" || memory.status !== "activated") throw new Error("project topic evidence must reference an activated L1 memory");
     if (namespaceIdFromContext(namespaceForMemory(memory)) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
     this.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic_id, memory_id) DO NOTHING`)
       .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);

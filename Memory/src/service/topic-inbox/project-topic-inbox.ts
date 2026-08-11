@@ -45,7 +45,8 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const evidence = [...existingEvidence.flatMap((item) => {
       const liveEvidence = this.deps.repos.memories.get(item.memoryId);
       if (!liveEvidence || liveEvidence.memoryLayer !== "L1" || liveEvidence.status !== "activated" || namespaceIdFromContext(namespaceForMemory(liveEvidence)) !== namespaceId) return [];
-      return [{ memory: capturedMemory?.(item.memoryId) ?? liveEvidence, role: rolesFromEvidence(item) }];
+      const captured = capturedMemory ? capturedMemory(item.memoryId) : liveEvidence;
+      return captured ? [{ memory: captured, role: rolesFromEvidence(item) }] : [];
     }), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])];
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     const claimOwner = newId("topic_analysis_owner");
@@ -134,8 +135,11 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
     const snapshotId = this.deps.repos.memories.eligibleL1SnapshotBoundary(namespaceFilter(normalized));
-    const cursor = snapshotId ? this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId) : stableHash([]);
-    if (snapshotId) this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
+    let cursor = stableHash([]);
+    if (snapshotId) {
+      try { cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId); }
+      finally { this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId); }
+    }
     const requestKey = `topic_refresh_request:${namespaceId}`;
     const prior = this.deps.repos.runtime.getKv(requestKey)?.value;
     if (isRefreshRequest(prior) && prior.cursor === cursor) {
@@ -156,11 +160,11 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       this.deps.repos.runtime.setKv(`topic_refresh_cursor:${namespaceId}`, stableHash([]));
       return;
     }
-    const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
-    const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
-    const capturedMemory = (id: string) => this.deps.repos.memories.getEligibleL1SnapshotMemory(snapshotId, id);
-    let afterId: string | undefined;
     try {
+      const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
+      const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
+      const capturedMemory = (id: string) => this.deps.repos.memories.getEligibleL1SnapshotMemory(snapshotId, id);
+      let afterId: string | undefined;
       for (;;) {
         const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);
         if (page.length === 0) break;

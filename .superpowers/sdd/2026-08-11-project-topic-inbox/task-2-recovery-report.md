@@ -129,3 +129,32 @@ Duration  22.87s
 ### Concerns
 
 None. The unrelated untracked plan remains untouched.
+
+## Fix Round 4
+
+### Findings Addressed
+
+1. Refresh snapshot membership is authoritative: existing evidence absent from the captured snapshot is excluded even if currently live. Direct ingest continues to use live repository evidence.
+2. Repository evidence attachment now rejects non-activated L1 rows inside its transaction guard; a direct repository test covers archived evidence.
+3. Snapshot cursor computation uses bounded keyset pages and an incremental SHA-256 state rather than corpus-sized `all().map()` materialization.
+4. Snapshot cleanup is enclosed in `finally` immediately after acquisition for both refresh enqueue cursor computation and refresh processing, including cursor failures.
+
+### Exact Verification
+
+From `Memory`:
+
+```text
+$ npm run typecheck
+> tsc -p tsconfig.json --noEmit
+(exit 0)
+
+$ npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts
+Test Files  7 passed (7)
+Tests  65 passed (65)
+Duration  20.89s
+(exit 0)
+```
+
+### Concerns
+
+None. The unrelated untracked plan remains untouched.

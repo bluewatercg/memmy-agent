@@ -73,6 +73,14 @@ describe("project topic repository", () => {
     expect(() => repo.attachEvidence({ ...evidence, memoryId: "l1-second" })).toThrow();
   }));
 
+  it("rejects archived L1 evidence inside repository attachment", () => withRepo((repo, db) => {
+    repo.insertTopic(topic("local:project-a", "topic-archived"));
+    insertMemory(db.db, "archived-l1", "project-a", "L1");
+    db.db.prepare(`UPDATE memories SET status = 'archived' WHERE id = ?`).run("archived-l1");
+    expect(() => repo.attachEvidence({ id: "archived-evidence", topicId: "topic-archived", namespaceId: "local:project-a", memoryId: "archived-l1", role: "source", summary: "archived", metadata: {}, createdAt: NOW })).toThrow(/activated L1/);
+  }));
+
+
   it("supersedes only a candidate from the same topic and keeps insertion atomic", () => withRepo((repo) => {
     repo.insertTopic(topic("local:project-a", "topic-a"));
     repo.insertTopic(topic("local:project-a", "topic-b"));
