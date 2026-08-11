@@ -1,0 +1,4 @@
+interface:
+  display_name: "Memmy Project Summarize"
+  short_description: "Summarize or update project context from Git, tools, and Memmy"
+  default_prompt: "Use $memmy-project-summarize to update the current project context from verified Git/tool evidence and explicit memories, or produce reviewable L2, L3, and Skill candidates."
