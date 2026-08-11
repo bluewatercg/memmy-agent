@@ -119,3 +119,20 @@ Result: TypeScript completed successfully with no diagnostics.
 Result: TypeScript completed successfully with no diagnostics. 6 test files passed, 46 tests passed.
 
 Dedicated WorkerRunner retry/dead-letter tests and an injected approval rollback test remain to be added; existing production worker failure handling and transaction behavior are unchanged and the focused suites pass.
+
+## Fix Round 5
+
+- Recovered legacy v7 claimed analysis rows with null leases without changing terminal results, and covered migration plus expired-claim recovery.
+- Captured refresh corpora through stable keyset boundaries so concurrent inserts and updates cannot skip or duplicate the original corpus.
+- Included vector identity and content in analysis hashing, recomputed centroids after vector-only updates without unnecessary topic or candidate versions, and covered vector-only changes.
+- Made validated `stableKey` the primary candidate slot identity, added deterministic category/evidence fallback slots, and rejected duplicate model slots before persistence.
+- Exercised real `WorkerRunner` dispatch for `topic_ingest` and `topic_refresh` failures through persisted retry, restart reconciliation, and dead-letter transitions.
+- Injected a post-upsert approval failure and verified memory, supersession, candidate, and audit writes roll back together.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-worker.test.ts`
+
+Result: 1 test file passed, 14 tests passed.
+
+`cd Memory && npm run typecheck && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts`
+
+Result: TypeScript completed successfully with no diagnostics. 7 test files passed, 54 tests passed.
