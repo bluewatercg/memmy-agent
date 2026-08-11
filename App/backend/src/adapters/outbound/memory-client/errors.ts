@@ -6,7 +6,8 @@ export class MemoryLayerError extends Error {
     public readonly code: string,
     public readonly status: number,
     message: string,
-    public readonly cause?: unknown
+    public readonly cause?: unknown,
+    public readonly details?: unknown
   ) {
     super(message);
     this.name = "MemoryLayerError";

@@ -732,7 +732,7 @@ export class MemoryService {
       if (existing.requestHash !== requestHash) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
-      return withDuplicateFlag(existing.response) as T;
+      return existing.response as T;
     }
     const response = await run();
     this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);

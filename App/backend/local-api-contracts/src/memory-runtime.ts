@@ -925,12 +925,11 @@ const PositiveVersionSchema = z.number().int().positive();
 export const TopicCandidateStatusSchema = z.enum(["pending", "approved", "rejected", "deferred", "superseded"]);
 export type TopicCandidateStatus = z.infer<typeof TopicCandidateStatusSchema>;
 export const TopicCandidateLayerSchema = z.enum(["L2", "L3", "Skill"]);
-export type TopicCandidateLayer = z.infer<typeof TopicCandidateLayerSchema>;
-
 const TopicInboxRequestSchema = z.object({ namespace: ProjectScopedRuntimeNamespaceSchema }).strict();
+const TopicMutationMetadataSchema = z.object({ requestId: NonEmptyStringSchema.optional(), adapterId: NonEmptyStringSchema.optional(), source: NonEmptyStringSchema.optional() });
 export const TopicInboxListInputSchema = TopicInboxRequestSchema.extend({ statuses: z.array(TopicCandidateStatusSchema).optional() }).strict();
 export type TopicInboxListInput = z.infer<typeof TopicInboxListInputSchema>;
-export const TopicInboxRefreshInputSchema = TopicInboxRequestSchema.extend({ requestId: NonEmptyStringSchema.optional() }).strict();
+export const TopicInboxRefreshInputSchema = TopicInboxRequestSchema.merge(TopicMutationMetadataSchema).strict();
 export type TopicInboxRefreshInput = z.infer<typeof TopicInboxRefreshInputSchema>;
 
 export const TopicInboxCandidateSchema = z.object({
@@ -949,8 +948,7 @@ export type TopicInboxTopic = z.infer<typeof TopicInboxTopicSchema>;
 export const TopicInboxProjectGroupSchema = z.object({ namespace: ProjectScopedRuntimeNamespaceSchema, projectId: NonEmptyStringSchema.optional(), topics: z.array(TopicInboxTopicSchema) }).strict();
 export const TopicInboxListOutputSchema = z.object({ projects: z.array(TopicInboxProjectGroupSchema), serverTime: IsoTimeSchema }).strict();
 export type TopicInboxListOutput = z.infer<typeof TopicInboxListOutputSchema>;
-
-const TopicDecisionBaseSchema = TopicInboxRequestSchema.extend({ expectedVersion: PositiveVersionSchema, requestId: NonEmptyStringSchema.optional(), adapterId: NonEmptyStringSchema.optional(), source: NonEmptyStringSchema.optional() });
+const TopicDecisionBaseSchema = TopicInboxRequestSchema.merge(TopicMutationMetadataSchema).extend({ expectedVersion: PositiveVersionSchema });
 export const TopicCandidateDecisionInputSchema = z.discriminatedUnion("action", [
   TopicDecisionBaseSchema.extend({ action: z.literal("approve") }).strict(),
   TopicDecisionBaseSchema.extend({ action: z.literal("edit_and_approve"), title: NonEmptyStringSchema, conclusion: NonEmptyStringSchema, proposedLayer: TopicCandidateLayerSchema }).strict(),
@@ -967,11 +965,11 @@ export const TopicInboxRefreshOutputSchema = z.object({ jobId: NonEmptyStringSch
 export const TopicVersionConflictOutputSchema = z.object({ topicId: NonEmptyStringSchema, currentVersion: PositiveVersionSchema, currentStatus: z.enum(["active", "archived", "merged"]) }).strict();
 export type TopicVersionConflictOutput = z.infer<typeof TopicVersionConflictOutputSchema>;
 export type TopicInboxRefreshOutput = z.infer<typeof TopicInboxRefreshOutputSchema>;
-export const TopicInboxMergeInputSchema = TopicInboxRequestSchema.extend({ targetTopicId: NonEmptyStringSchema, expectedVersion: PositiveVersionSchema, targetExpectedVersion: PositiveVersionSchema, requestId: NonEmptyStringSchema.optional() }).strict();
+export const TopicInboxMergeInputSchema = TopicInboxRequestSchema.merge(TopicMutationMetadataSchema).extend({ targetTopicId: NonEmptyStringSchema, expectedVersion: PositiveVersionSchema, targetExpectedVersion: PositiveVersionSchema }).strict();
 export type TopicInboxMergeInput = z.infer<typeof TopicInboxMergeInputSchema>;
 export const TopicInboxMergeOutputSchema = z.object({ topic: TopicInboxTopicSchema, mergedTopicId: NonEmptyStringSchema, auditId: NonEmptyStringSchema, serverTime: IsoTimeSchema }).strict();
 export type TopicInboxMergeOutput = z.infer<typeof TopicInboxMergeOutputSchema>;
-export const TopicInboxSplitInputSchema = TopicInboxRequestSchema.extend({ expectedVersion: PositiveVersionSchema, title: NonEmptyStringSchema, summary: z.string(), evidenceMemoryIds: z.array(NonEmptyStringSchema).min(1), requestId: NonEmptyStringSchema.optional() }).strict();
+export const TopicInboxSplitInputSchema = TopicInboxRequestSchema.merge(TopicMutationMetadataSchema).extend({ expectedVersion: PositiveVersionSchema, title: NonEmptyStringSchema, summary: z.string(), evidenceMemoryIds: z.array(NonEmptyStringSchema).min(1) }).strict();
 export type TopicInboxSplitInput = z.infer<typeof TopicInboxSplitInputSchema>;
 export const TopicInboxSplitOutputSchema = z.object({ topic: TopicInboxTopicSchema, sourceTopic: TopicInboxTopicSchema, auditId: NonEmptyStringSchema, serverTime: IsoTimeSchema }).strict();
 export type TopicInboxSplitOutput = z.infer<typeof TopicInboxSplitOutputSchema>;
@@ -1126,6 +1124,7 @@ export const ApiErrorBodySchema = z.object({
     code: ApiErrorCodeSchema,
     message: z.string(),
     requestId: NonEmptyStringSchema
-  })
-});
+  }),
+  details: z.union([TopicCandidateConflictOutputSchema, TopicVersionConflictOutputSchema, z.record(z.string(), z.unknown())]).optional()
+}).strict();
 export type ApiErrorBody = z.infer<typeof ApiErrorBodySchema>;

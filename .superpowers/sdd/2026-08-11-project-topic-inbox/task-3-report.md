@@ -45,3 +45,12 @@ Exact fresh verification:
 - `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts && npm run typecheck` -> PASS, 3 files / 84 tests; backend typecheck and prerequisite Memory/contracts builds passed.
 
 - Exact REST regression extension: strict unknown fields and invalid statuses return 400; evidence limit above 100 returns 400; identical refresh `requestId` replays the same response. `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 19 tests.
+
+## Fix Round 2
+
+- Unified topic mutation actor metadata (`source`, `adapterId`, `requestId`) across refresh/decision/merge/split strict schemas; PanelService runtime enrichment is accepted by Memory.
+- Shared API errors retain typed conflict `details`; backend `MemoryLayerError` exposes them. Idempotent replay now returns the exact stored response without adding undeclared fields.
+- Merge clears the merged source's `sourceMemoryIds`; shared contracts build before Memory in the verified command and dependency graph remains acyclic.
+- `cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/contract/memory-rest-service.test.ts` -> PASS, 2 files / 35 tests.
+- `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts` -> PASS, 3 files / 84 tests.
+- `npm run build -w @memmy/local-api-contracts && npm --prefix Memory run typecheck && npm --prefix App/backend run typecheck` -> PASS.

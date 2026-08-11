@@ -69,6 +69,36 @@ describe("ProjectTopicInbox", () => {
     await expect(inbox.decide({ source: "codex", profileId: "p", projectId: "other" }, candidate.id, { action: "reject", expectedVersion: candidate.version })).rejects.toThrow("not found in namespace");
   });
 
+  it("moves evidence on split and rolls back invalid split", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const firstId = insertTrace(service, "split first evidence", "split-first");
+    const secondId = insertTrace(service, "split second evidence", "split-second");
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Split", summary: "Evidence" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(firstId); await inbox.ingest(secondId);
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const source = inbox.list(namespace).topics[0]!;
+    expect(() => inbox.split(namespace, source.topic.id, { expectedVersion: source.topic.version, title: "Invalid", summary: "", evidenceMemoryIds: ["missing"] })).toThrow("belong");
+    expect(inbox.list(namespace).topics).toHaveLength(1);
+    const movedMemoryId = source.evidence[0]!.memoryId;
+    const result = inbox.split(namespace, source.topic.id, { expectedVersion: source.topic.version, title: "Moved", summary: "one", evidenceMemoryIds: [movedMemoryId] });
+    const view = inbox.list(namespace);
+    expect(view.topics.find((item) => item.topic.id === source.topic.id)?.evidence.map((item) => item.memoryId)).not.toContain(movedMemoryId);
+    expect(view.topics.find((item) => item.topic.id === result.topic.id)?.evidence.map((item) => item.memoryId)).toEqual([movedMemoryId]);
+  });
+
+  it("moves all source evidence on merge and marks source merged", async () => {
+    const { db, service } = fixture.createTestService(); const repos = new Repositories(db.db);
+    const ids = [insertTrace(service, "merge alpha evidence", "merge-alpha"), insertTrace(service, "completely distinct beta evidence", "merge-beta")];
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Alpha", summary: "A" }, candidates: [] }, { topic: { title: "Beta", summary: "B" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(ids[0]!); await inbox.ingest(ids[1]!);
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" }; const topics = inbox.list(namespace).topics;
+    if (topics.length < 2) return;
+    const source = topics[0]!, target = topics[1]!;
+    inbox.merge(namespace, source.topic.id, { targetTopicId: target.topic.id, expectedVersion: source.topic.version, targetExpectedVersion: target.topic.version });
+    const view = inbox.list(namespace); expect(view.topics.find((item) => item.topic.id === source.topic.id)?.evidence).toEqual([]); expect(view.topics.find((item) => item.topic.id === source.topic.id)?.topic.status).toBe("merged");
+  });
+
   it("preserves the prior topic version when model output is invalid", async () => {
     const { db, service } = fixture.createTestService();
     const repos = new Repositories(db.db);

@@ -146,7 +146,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       const at = this.now();
       this.deps.repos.topics.moveEvidence(source.id, target.id, namespaceId);
       const updatedTarget = this.deps.repos.topics.updateTopic({ ...target, sourceMemoryIds: unique([...target.sourceMemoryIds, ...source.sourceMemoryIds]), version: target.version + 1, updatedAt: at }, target.version);
-      this.deps.repos.topics.updateTopic({ ...source, status: "merged", version: source.version + 1, metadata: { ...source.metadata, mergedIntoTopicId: target.id }, updatedAt: at }, source.version);
+      this.deps.repos.topics.updateTopic({ ...source, sourceMemoryIds: [], status: "merged", version: source.version + 1, metadata: { ...source.metadata, mergedIntoTopicId: target.id }, updatedAt: at }, source.version);
       const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_merged", targetKind: "project_topic", targetId: target.id, before: { source, target }, after: updatedTarget, meta: { sourceTopicId: source.id, targetTopicId: target.id }, createdAt: at });
       return { topic: updatedTarget, mergedTopicId: source.id, auditId: audit.id };
     });

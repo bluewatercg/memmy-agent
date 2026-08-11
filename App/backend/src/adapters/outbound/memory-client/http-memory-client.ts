@@ -99,14 +99,13 @@ export function createHttpMemoryClient(
           return response.json();
         }
 
-        if (response.status >= 500) {
-          throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx");
-        }
-
         const rawBody = await response.json().catch(() => undefined);
         const parsed = ApiErrorBodySchema.safeParse(rawBody);
         if (parsed.success) {
-          throw new MemoryLayerError(parsed.data.error.code, response.status, parsed.data.error.message);
+          throw new MemoryLayerError(parsed.data.error.code, response.status, parsed.data.error.message, undefined, parsed.data.details);
+        }
+        if (response.status >= 500) {
+          throw new MemoryLayerError("memory_layer_unavailable", 503, "memory layer 5xx", rawBody);
         }
         throw new MemoryLayerError(
           response.status >= 500 ? "memory_layer_unavailable" : "internal",
