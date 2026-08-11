@@ -68,3 +68,25 @@ npm run typecheck -- --pretty false
 ```
 
 Output: completed successfully.
+
+## Fix Round 2
+
+Changed idempotent inserts to targeted SQLite conflict clauses so primary-key collisions remain errors, added explicit non-optional readback checks, proved candidate supersession rollback on insert failure, restored separate v5-to-current migration coverage, and retained v6-to-v7 index coverage. SQLite serializes the targeted unique-index insert, so the single-statement `ON CONFLICT(namespace_id, input_hash) DO NOTHING` closes the analysis-run competing-writer race without a read-before-write window.
+
+```bash
+cd Memory
+npm test -- --run tests/repository/sqlite-schema.test.ts tests/repository/project-topic-repository.test.ts tests/service/bundle/bundle.test.ts
+```
+
+```text
+Test Files  3 passed (3)
+Tests       14 passed (14)
+Duration    12.68s
+```
+
+```bash
+cd Memory
+npm run typecheck -- --pretty false
+```
+
+Output: completed successfully.

@@ -56,6 +56,8 @@ describe("project topic repository", () => {
     expect(() => repo.attachEvidence({ ...evidence, id: "missing", memoryId: "missing" })).toThrow(/L1 memory/);
     expect(() => repo.attachEvidence({ ...evidence, id: "wrong-ns", memoryId: "l1-b" })).toThrow(/namespace mismatch/);
     expect(() => repo.attachEvidence({ ...evidence, id: "not-l1", memoryId: "l2-a" })).toThrow(/L1 memory/);
+    insertMemory(db.db, "l1-second", "project-a", "L1");
+    expect(() => repo.attachEvidence({ ...evidence, memoryId: "l1-second" })).toThrow();
   }));
 
   it("supersedes only a candidate from the same topic and keeps insertion atomic", () => withRepo((repo) => {
@@ -65,6 +67,9 @@ describe("project topic repository", () => {
     repo.insertCandidate(candidate("topic-b", "c-other"));
     expect(() => repo.insertCandidate(candidate("topic-a", "invalid", { supersedesId: "c-other" }))).toThrow(/predecessor mismatch/);
     expect(repo.listCandidates("topic-a", "local:project-a").map((item) => item.id)).toEqual(["c1"]);
+    repo.insertCandidate(candidate("topic-a", "collision"));
+    expect(() => repo.insertCandidate(candidate("topic-a", "collision", { supersedesId: "c1" }))).toThrow();
+    expect(repo.listCandidates("topic-a", "local:project-a").find((item) => item.id === "c1")?.status).toBe("pending");
     repo.insertCandidate(candidate("topic-a", "c2", { supersedesId: "c1" }));
     expect(repo.listCandidates("topic-a", "local:project-a").find((item) => item.id === "c1")?.status).toBe("superseded");
   }));
@@ -82,5 +87,6 @@ describe("project topic repository", () => {
     expect(repo.recordAnalysisRun(run)).toEqual(run);
     expect(repo.recordAnalysisRun({ ...run, id: "run-2", result: { ok: false } })).toEqual(run);
     expect(repo.findAnalysisRun("local:project-b", "hash")).toBeUndefined();
+    expect(() => repo.recordAnalysisRun({ ...run, namespaceId: "local:project-b", inputHash: "other" })).toThrow();
   }));
 });

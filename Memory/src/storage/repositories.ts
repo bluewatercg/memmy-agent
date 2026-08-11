@@ -3651,9 +3651,10 @@ export class ProjectTopicRepository {
     const memory = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
     if (!memory || memory.memory_layer !== "L1") throw new Error("project topic evidence must reference an L1 memory");
     if (namespaceIdFromContext(namespaceForMemory(memoryFromSql(memory))) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
-    this.db.prepare(`INSERT OR IGNORE INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    this.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic_id, memory_id) DO NOTHING`)
       .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);
-    const stored = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND memory_id = ? AND namespace_id = ?`).get(evidence.topicId, evidence.memoryId, evidence.namespaceId) as EvidenceSqlRow;
+    const stored = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND memory_id = ? AND namespace_id = ?`).get(evidence.topicId, evidence.memoryId, evidence.namespaceId) as EvidenceSqlRow | undefined;
+    if (!stored) throw new Error("project topic evidence persistence failed");
     return evidenceFromSql(stored);
   }
 
@@ -3688,9 +3689,11 @@ export class ProjectTopicRepository {
   }
 
   recordAnalysisRun(run: ProjectTopicAnalysisRunRecord): ProjectTopicAnalysisRunRecord {
-    this.db.prepare(`INSERT OR IGNORE INTO project_topic_analysis_runs (id, namespace_id, input_hash, topic_id, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    this.db.prepare(`INSERT INTO project_topic_analysis_runs (id, namespace_id, input_hash, topic_id, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(namespace_id, input_hash) DO NOTHING`)
       .run(run.id, run.namespaceId, run.inputHash, run.topicId ?? null, run.status, toJson(run.result), run.createdAt, run.updatedAt);
-    return this.findAnalysisRun(run.namespaceId, run.inputHash)!;
+    const stored = this.findAnalysisRun(run.namespaceId, run.inputHash);
+    if (!stored) throw new Error("project topic analysis run persistence failed");
+    return stored;
   }
 
   findAnalysisRun(namespaceId: string, inputHash: string): ProjectTopicAnalysisRunRecord | undefined {

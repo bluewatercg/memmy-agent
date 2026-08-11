@@ -382,6 +382,50 @@ describe("repository sqlite schema contract", () => {
     }
   });
 
+  it("migrates schema v5 to current while preserving runtime data and backup", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v5-project-context-migration-"));
+    const dbPath = join(root, "memory.sqlite");
+    const backupPath = `${dbPath}.pre-v${SCHEMA_VERSION}.bak`;
+    try {
+      const seeded = new MemoryDb({ path: dbPath });
+      const repos = new Repositories(seeded.db);
+      repos.memories.insert(schemaVectorMemory());
+      repos.runtime.createSession({ id: "v5-session-preserved", userId: "v5-user", source: "codex", profileId: "default", status: "open", meta: {}, openedAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" });
+      seeded.db.prepare(`INSERT INTO memory_processing_state (memory_id, state, stage, attempt_count, manual_retry_count, retry_action, updated_at) VALUES (?, 'ready', NULL, 0, 0, 'retry', ?)`)
+        .run("old-vector-memory", "2026-01-01T00:00:00.000Z");
+      const beforeCounts = memoryLayerCounts(seeded.db);
+      seeded.db.exec(`
+        DROP TABLE project_topic_analysis_runs;
+        DROP TABLE project_topic_candidates;
+        DROP TABLE project_topic_evidence;
+        DROP TABLE project_topics;
+        DROP TABLE project_context_facts;
+        DROP TABLE project_context_work_items;
+        DROP TABLE project_context_goals;
+        DELETE FROM schema_migrations;
+        INSERT INTO schema_migrations (id, version, applied_at, checksum) VALUES ('005_processing_state', 5, '2026-01-01T00:00:00.000Z', 'v5');
+      `);
+      seeded.close();
+      const migrated = new MemoryDb({ path: dbPath });
+      expect(migrated.schemaVersion()).toEqual({ version: SCHEMA_VERSION, lastMigrationId: SCHEMA_MIGRATION_ID });
+      expect(memoryLayerCounts(migrated.db)).toEqual(beforeCounts);
+      expect(migrated.db.prepare(`SELECT id FROM sessions`).get()).toEqual({ id: "v5-session-preserved" });
+      expect(sqliteNames(migrated, "project_context_%")).toEqual(expect.arrayContaining(["project_context_facts", "project_context_goals", "project_context_work_items"]));
+      expect(sqliteNames(migrated, "project_topic%")).toEqual(expect.arrayContaining(["project_topics", "project_topic_evidence", "project_topic_candidates", "project_topic_analysis_runs"]));
+      expect(migrated.db.pragma("integrity_check", { simple: true })).toBe("ok");
+      expect(existsSync(backupPath)).toBe(true);
+      migrated.close();
+      const backup = new Database(backupPath, { readonly: true });
+      expect(backup.prepare(`SELECT id, version FROM schema_migrations`).get()).toEqual({ id: "005_processing_state", version: 5 });
+      expect(backup.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "old-vector-memory" });
+      expect((backup.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'project_context_%' OR name LIKE 'project_topic%')`).all() as Array<{ name: string }>)).toEqual([]);
+      expect(backup.pragma("integrity_check", { simple: true })).toBe("ok");
+      backup.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("migrates schema v6 to v7 while preserving runtime data and backup", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-v6-project-topic-migration-"));
     const dbPath = join(root, "memory.sqlite");
