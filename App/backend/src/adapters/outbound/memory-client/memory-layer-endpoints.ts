@@ -28,6 +28,12 @@ export const MEMORY_LAYER_PATHS = Object.freeze({
   createProjectWorkItem: "/api/v1/project-context/work-items",
   updateProjectWorkItem: "/api/v1/project-context/work-items/:id",
   setProjectFocus: "/api/v1/project-context/focus",
+  listTopicInbox: "/api/v1/topic-inbox",
+  refreshTopicInbox: "/api/v1/topic-inbox/refresh",
+  decideTopicCandidate: "/api/v1/topic-inbox/candidates/:id/decision",
+  mergeTopics: "/api/v1/topic-inbox/topics/:id/merge",
+  splitTopic: "/api/v1/topic-inbox/topics/:id/split",
+  topicEvidence: "/api/v1/topic-inbox/topics/:id/evidence",
   panelItems: "/api/v1/panel/items",
   panelTasks: "/api/v1/panel/tasks",
   deletePanelTask: "/api/v1/panel/tasks/:id"

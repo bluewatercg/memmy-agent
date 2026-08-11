@@ -48,8 +48,14 @@ export interface TopicInboxItem {
 export interface TopicInboxView { topics: TopicInboxItem[] }
 export interface TopicIngestResult { assigned: boolean; unchanged: boolean; topicId?: string; candidateIds: string[] }
 export interface TopicRefreshResult { jobId: string; unchanged: boolean }
-export interface TopicCandidateDecision { decision: "approve" | "reject" | "defer"; reason?: string }
-export interface TopicDecisionResult { candidate: ProjectTopicCandidateRecord; memory?: MemoryRow }
+export type TopicCandidateDecision =
+  | { action: "approve"; expectedVersion: number; actor?: Record<string, unknown> }
+  | { action: "edit_and_approve"; expectedVersion: number; title: string; conclusion: string; proposedLayer: "L2" | "L3" | "Skill"; actor?: Record<string, unknown> }
+  | { action: "reject" | "defer"; expectedVersion: number; reason?: string; actor?: Record<string, unknown> };
+export interface TopicDecisionResult { candidate: ProjectTopicCandidateRecord; memory?: MemoryRow; auditId: string }
+export interface TopicMergeResult { topic: ProjectTopicRecord; mergedTopicId: string; auditId: string }
+export interface TopicSplitResult { topic: ProjectTopicRecord; sourceTopic: ProjectTopicRecord; auditId: string }
+export interface TopicEvidenceResult { topicId: string; items: Array<ProjectTopicEvidenceRecord & { rawText: string }>; total: number; limit: number }
 
 export interface ProjectTopicInbox {
   ingest(memoryId: string): Promise<TopicIngestResult>;

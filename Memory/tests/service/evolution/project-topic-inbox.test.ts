@@ -66,7 +66,7 @@ describe("ProjectTopicInbox", () => {
     const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Formatter", summary: "Formatting workflow" }, candidates: [{ title: "Run formatter", conclusion: "Run formatter check.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
     await inbox.ingest(memoryId);
     const candidate = inbox.list({ source: "codex", profileId: "p", projectId: "project" }).topics[0]!.candidates[0]!;
-    await expect(inbox.decide({ source: "codex", profileId: "p", projectId: "other" }, candidate.id, { decision: "reject" })).rejects.toThrow("not found in namespace");
+    await expect(inbox.decide({ source: "codex", profileId: "p", projectId: "other" }, candidate.id, { action: "reject", expectedVersion: candidate.version })).rejects.toThrow("not found in namespace");
   });
 
   it("preserves the prior topic version when model output is invalid", async () => {
@@ -295,7 +295,7 @@ describe("ProjectTopicInbox", () => {
     });
     await inbox.ingest(memoryId);
     const candidate = inbox.list(namespace).topics[0]!.candidates[0]!;
-    await expect(inbox.decide(namespace, candidate.id, { decision: "approve" })).rejects.toThrow("injected approval persistence failure");
+    await expect(inbox.decide(namespace, candidate.id, { action: "approve", expectedVersion: candidate.version })).rejects.toThrow("injected approval persistence failure");
     expect(repos.memories.get("rollback-l2")).toBeUndefined();
     expect(inbox.list(namespace).topics[0]!.candidates.find((item) => item.id === candidate.id)?.status).toBe("pending");
   });
@@ -321,7 +321,7 @@ describe("ProjectTopicInbox", () => {
     });
     await inbox.ingest(memoryId);
     const firstCandidate = inbox.list(namespace).topics[0]!.candidates.find((item) => item.status === "pending")!;
-    const firstDecision = await inbox.decide(namespace, firstCandidate.id, { decision: "approve" });
+    const firstDecision = await inbox.decide(namespace, firstCandidate.id, { action: "approve", expectedVersion: firstCandidate.version });
     const firstMemory = firstDecision.memory!;
     const changed = repos.memories.get(memoryId)!;
     repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nreplacement`, updatedAt: new Date().toISOString() });
@@ -331,7 +331,7 @@ describe("ProjectTopicInbox", () => {
     const originalInsertAudit = repos.runtime.insertAudit.bind(repos.runtime);
     repos.runtime.insertAudit = () => { throw new Error("injected post-upsert approval failure"); };
 
-    await expect(inbox.decide(namespace, replacement.id, { decision: "approve" })).rejects.toThrow("injected post-upsert approval failure");
+    await expect(inbox.decide(namespace, replacement.id, { action: "approve", expectedVersion: replacement.version })).rejects.toThrow("injected post-upsert approval failure");
 
     repos.runtime.insertAudit = originalInsertAudit;
     expect(repos.memories.get(firstMemory.id)?.status).toBe("activated");

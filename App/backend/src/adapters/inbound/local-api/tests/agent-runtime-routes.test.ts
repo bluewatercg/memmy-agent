@@ -347,6 +347,30 @@ describe("agent runtime local api routes", () => {
     expect(hasRuntimeProvenance(calls[0]?.context, "runtime", "route-request")).toBe(true);
     expect(calls.slice(1).every(({ context }) => hasRuntimeProvenance(context, "runtime", "client-request"))).toBe(true);
   });
+
+  it("proxies authenticated topic inbox routes with shared method names", async () => {
+    const calls: string[] = [];
+    const namespace = projectNamespace();
+    app = createServer({ panel: {
+      async listTopicInbox() { calls.push("listTopicInbox"); return topicListOutput(); },
+      async refreshTopicInbox() { calls.push("refreshTopicInbox"); return { jobId: "job-1", unchanged: true }; },
+      async decideTopicCandidate() { calls.push("decideTopicCandidate"); return { candidate: topicCandidate(), auditId: "audit-1", serverTime: now() }; },
+      async mergeTopics() { calls.push("mergeTopics"); return { topic: topicSummary(), mergedTopicId: "topic-2", auditId: "audit-2", serverTime: now() }; },
+      async splitTopic() { calls.push("splitTopic"); return { topic: topicSummary("topic-3"), sourceTopic: topicSummary(), auditId: "audit-3", serverTime: now() }; },
+      async topicEvidence() { calls.push("topicEvidence"); return { topicId: "topic-1", items: [], total: 0, limit: 20, serverTime: now() }; }
+    } });
+    const headers = { "x-memmy-local-token": "test-token" };
+    const requests = [
+      { method: "GET", url: `/api/v1/topic-inbox?namespace=${encodeURIComponent(JSON.stringify(namespace))}&statuses=pending` },
+      { method: "POST", url: "/api/v1/topic-inbox/refresh", payload: { namespace } },
+      { method: "POST", url: "/api/v1/topic-inbox/candidates/candidate-1/decision", payload: { namespace, action: "reject", expectedVersion: 1 } },
+      { method: "POST", url: "/api/v1/topic-inbox/topics/topic-1/merge", payload: { namespace, targetTopicId: "topic-2", expectedVersion: 1, targetExpectedVersion: 1 } },
+      { method: "POST", url: "/api/v1/topic-inbox/topics/topic-1/split", payload: { namespace, expectedVersion: 1, title: "Split", summary: "", evidenceMemoryIds: ["memory-1"] } },
+      { method: "GET", url: `/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encodeURIComponent(JSON.stringify(namespace))}&limit=20` }
+    ];
+    for (const request of requests) expect((await app.inject({ ...request, headers })).statusCode).toBe(200);
+    expect(calls).toEqual(["listTopicInbox", "refreshTopicInbox", "decideTopicCandidate", "mergeTopics", "splitTopic", "topicEvidence"]);
+  });
 });
 
 function createServer(overrides: Record<string, unknown> = {}): FastifyInstance {
@@ -740,6 +764,7 @@ function panelTasksOutput() {
     tasks: [],
     page: 1,
     pageSize: 20 as const,
+
     total: 0,
     totalPages: 1,
     hasNext: false,
@@ -747,6 +772,10 @@ function panelTasksOutput() {
     serverTime: now()
   };
 }
+
+function topicCandidate() { return { id: "candidate-1", topicId: "topic-1", title: "Use Zod", conclusion: "Share schemas", proposedLayer: "L2", status: "pending", version: 1, evidenceCount: 1, updatedAt: now() }; }
+function topicSummary(id = "topic-1") { return { id, title: "Boundary", summary: "HTTP", status: "active", version: 1, evidenceCount: 1, candidateCounts: { pending: 1, approved: 0, rejected: 0, deferred: 0, superseded: 0 }, candidates: [topicCandidate()], updatedAt: now() }; }
+function topicListOutput() { return { projects: [{ namespace: projectNamespace(), projectId: "project-1", topics: [topicSummary()] }], serverTime: now() }; }
 
 function now() {
   return "2026-05-29T10:00:00.000Z";

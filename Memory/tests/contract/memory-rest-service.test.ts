@@ -77,8 +77,8 @@ describe("MemoryService / REST contract", () => {
     expect(body.storage.backendId).toBe("sqlite-local");
     expect(body.storage.fullText).toBe("fts5");
     expect(body.storage.vector).toBe("native");
-    expect(body.storage.schemaVersion).toBe("6");
-    expect(body.storage.lastMigrationId).toBe("006_project_context");
+    expect(body.storage.schemaVersion).toBe("7");
+    expect(body.storage.lastMigrationId).toBe("007_project_topic_inbox");
     const client = new MemoryRestClient({
       endpoint: `http://127.0.0.1:${address.port}`
     });
@@ -152,6 +152,31 @@ describe("MemoryService / REST contract", () => {
         expect(response.status, field).toBe(400);
       }
       expect(unauthorized.status).toBe(401);
+    });
+    db.close();
+  });
+
+  it("enforces topic inbox namespace, scopes, idempotency, and bounded evidence", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "rest-user", projectId: "topic-project" };
+    service.listProjectTopicInbox = () => ({ topics: [{ topic: { id: "topic-1", namespaceId: "ns", projectId: "topic-project", title: "Boundary", summary: "HTTP", status: "active", version: 1, sourceMemoryIds: ["memory-1"], metadata: {}, createdAt: "2026-08-11T00:00:00.000Z", updatedAt: "2026-08-11T00:00:00.000Z" }, evidence: [{ id: "evidence-1", topicId: "topic-1", namespaceId: "ns", memoryId: "memory-1", role: "verification", summary: "passed", metadata: {}, createdAt: "2026-08-11T00:00:00.000Z" }], candidates: [{ id: "candidate-1", topicId: "topic-1", namespaceId: "ns", title: "Use contracts", conclusion: "Share schemas", proposedLayer: "L2", status: "pending", version: 2, sourceMemoryIds: ["memory-1"], metadata: {}, createdAt: "2026-08-11T00:00:00.000Z", updatedAt: "2026-08-11T00:00:00.000Z" }] }] });
+    service.refreshProjectTopicInbox = async () => ({ jobId: "job-1", unchanged: true });
+    service.projectTopicEvidence = (_namespace, topicId, limit) => ({ topicId, limit, total: 101, items: Array.from({ length: limit }, (_, index) => ({ id: `e-${index}`, topicId, namespaceId: "ns", memoryId: `m-${index}`, role: "evidence", summary: "summary", metadata: {}, createdAt: "2026-08-11T00:00:00.000Z", rawText: `raw-${index}` })) });
+    const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { reader: { namespace, scopes: ["panel:read"] }, writer: { namespace, scopes: ["panel:write"] } } } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address(); if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const base = `http://127.0.0.1:${address.port}`;
+      const encoded = encodeURIComponent(JSON.stringify(namespace));
+      const list = await fetch(`${base}/api/v1/topic-inbox?namespace=${encoded}`, { headers: { authorization: "Bearer reader" } });
+      const listed = await list.json() as { projects: Array<{ topics: Array<Record<string, unknown>> }> };
+      expect(list.status).toBe(200); expect(listed.projects[0]!.topics[0]).not.toHaveProperty("rawText");
+      expect((await fetch(`${base}/api/v1/topic-inbox`, { headers: { authorization: "Bearer reader" } })).status).toBe(200);
+      expect((await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify({ namespace }) })).status).toBe(403);
+      const refresh = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace }) });
+      expect(await refresh.json()).toEqual({ jobId: "job-1", unchanged: true });
+      const evidence = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=500`, { headers: { authorization: "Bearer reader" } });
+      const expanded = await evidence.json() as { items: unknown[]; limit: number }; expect(expanded.limit).toBe(100); expect(expanded.items).toHaveLength(100);
     });
     db.close();
   });

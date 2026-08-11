@@ -1802,15 +1802,33 @@ export class MemoryService {
     return this.projectContext.approveGoal(input);
   }
   listProjectTopicInbox(namespace: RuntimeNamespace, query?: TopicInboxQuery) {
+    this.assertProjectContextScope(namespace);
     return this.topicInbox.list(namespace, query);
   }
 
   decideProjectTopicCandidate(namespace: RuntimeNamespace, candidateId: string, decision: TopicCandidateDecision) {
+    this.assertProjectContextScope(namespace);
     return this.topicInbox.decide(namespace, candidateId, decision);
   }
 
   refreshProjectTopicInbox(namespace: RuntimeNamespace) {
+    this.assertProjectContextScope(namespace);
     return this.topicInbox.refresh(namespace);
+  }
+
+  mergeProjectTopics(namespace: RuntimeNamespace, sourceTopicId: string, input: Parameters<ProjectTopicInboxService["merge"]>[2]) {
+    this.assertProjectContextScope(namespace);
+    return this.topicInbox.merge(namespace, sourceTopicId, input);
+  }
+
+  splitProjectTopic(namespace: RuntimeNamespace, sourceTopicId: string, input: Parameters<ProjectTopicInboxService["split"]>[2]) {
+    this.assertProjectContextScope(namespace);
+    return this.topicInbox.split(namespace, sourceTopicId, input);
+  }
+
+  projectTopicEvidence(namespace: RuntimeNamespace, topicId: string, limit: number) {
+    this.assertProjectContextScope(namespace);
+    return this.topicInbox.evidence(namespace, topicId, limit);
   }
 
   rejectProjectGoal(input: { namespace: RuntimeNamespace; candidateId: string }): ProjectGoalRecord {

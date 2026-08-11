@@ -29,7 +29,14 @@ import {
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
-  StartTurnOutputSchema
+  StartTurnOutputSchema,
+  TopicCandidateDecisionInputSchema,
+  TopicInboxEvidenceOutputSchema,
+  TopicInboxListInputSchema,
+  TopicInboxListOutputSchema,
+  TopicInboxMergeInputSchema,
+  TopicInboxRefreshOutputSchema,
+  TopicInboxSplitInputSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
 
@@ -109,6 +116,31 @@ describe("memory runtime contracts", () => {
       });
     }
   }
+
+  it("validates topic inbox contracts and excludes raw evidence from list cards", () => {
+    const namespace = { source: "codex", profileId: "default", projectId: "project-1" };
+    const topic = {
+      id: "topic-1", title: "HTTP boundary", summary: "Shared contracts", status: "active", version: 2,
+      evidenceCount: 3, candidateCounts: { pending: 1, approved: 0, rejected: 0, deferred: 0, superseded: 0 },
+      candidates: [{ id: "candidate-1", topicId: "topic-1", title: "Use Zod", conclusion: "Share schemas.", proposedLayer: "L2", status: "pending", version: 1, evidenceCount: 2, updatedAt: ISO }],
+      updatedAt: ISO
+    };
+    const output = { projects: [{ namespace, projectId: "project-1", topics: [topic] }], serverTime: ISO };
+    expect(TopicInboxListInputSchema.parse({ namespace, statuses: ["pending"] })).toEqual({ namespace, statuses: ["pending"] });
+    expect(TopicInboxListOutputSchema.parse(output)).toEqual(output);
+    expect(TopicInboxListOutputSchema.safeParse({ ...output, projects: [{ ...output.projects[0], topics: [{ ...topic, rawText: "must not leak" }] }] }).success).toBe(false);
+    expect(TopicInboxRefreshOutputSchema.parse({ jobId: "job-1", unchanged: true })).toEqual({ jobId: "job-1", unchanged: true });
+    expect(TopicInboxEvidenceOutputSchema.parse({ topicId: "topic-1", items: [{ id: "evidence-1", memoryId: "memory-1", role: "verification", summary: "Passed", rawText: "full trace", createdAt: ISO }], total: 1, limit: 20, serverTime: ISO }).items[0]?.rawText).toBe("full trace");
+  });
+
+  it("rejects malformed topic inbox enum, version, and non-project namespace inputs", () => {
+    const namespace = { source: "codex", profileId: "default", projectId: "project-1" };
+    expect(TopicInboxListInputSchema.safeParse({ namespace: { source: "codex", profileId: "default" } }).success).toBe(false);
+    expect(TopicCandidateDecisionInputSchema.safeParse({ namespace, action: "approve", expectedVersion: -1 }).success).toBe(false);
+    expect(TopicCandidateDecisionInputSchema.safeParse({ namespace, action: "publish", expectedVersion: 1 }).success).toBe(false);
+    expect(TopicInboxMergeInputSchema.safeParse({ namespace, targetTopicId: "topic-2", expectedVersion: 0, targetExpectedVersion: 1 }).success).toBe(false);
+    expect(TopicInboxSplitInputSchema.safeParse({ namespace, expectedVersion: 1, title: "", summary: "x", evidenceMemoryIds: [] }).success).toBe(false);
+  });
 });
 
 /**

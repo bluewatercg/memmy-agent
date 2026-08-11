@@ -8,7 +8,7 @@ import { namespaceForMemory, namespaceIdFromContext, normalizeNamespace } from "
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { evaluateTopicAutoApproval } from "./auto-approval-policy.js";
 import { analyzeProjectTopic, topicAnalysisInputHash, topicCentroidInputHash } from "./topic-analysis.js";
-import type { ProjectTopicInbox, TopicCandidateDecision, TopicDecisionResult, TopicInboxQuery, TopicInboxView, TopicIngestResult, TopicRefreshResult } from "./topic-inbox-types.js";
+import type { ProjectTopicInbox, TopicCandidateDecision, TopicDecisionResult, TopicEvidenceResult, TopicInboxQuery, TopicInboxView, TopicIngestResult, TopicMergeResult, TopicRefreshResult, TopicSplitResult } from "./topic-inbox-types.js";
 import { matchProjectTopic, topicSignalsForMemory } from "./topic-matcher.js";
 
 export interface ProjectTopicInboxDeps {
@@ -123,11 +123,58 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const namespaceId = namespaceIdFromContext(namespace);
     const candidate = this.findCandidate(namespaceId, candidateId);
     if (!candidate) throw new Error(`topic candidate not found in namespace: ${candidateId}`);
+    if (candidate.version !== decision.expectedVersion) throw new TopicVersionConflictError(candidate.id, candidate.version, candidate.status);
     if (candidate.status !== "pending" && candidate.status !== "deferred") throw new Error(`topic candidate is not decidable: ${candidateId}`);
-    if (decision.decision === "approve") return this.approve(candidate, false);
+    const edited = decision.action === "edit_and_approve"
+      ? { ...candidate, title: decision.title, conclusion: decision.conclusion, proposedLayer: decision.proposedLayer }
+      : candidate;
+    if (decision.action === "approve" || decision.action === "edit_and_approve") return this.approve(edited, false, decision.actor);
     const at = nowIso();
-    const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: decision.decision === "reject" ? "rejected" : "deferred", version: candidate.version + 1, metadata: { ...candidate.metadata, decisionReason: decision.reason }, updatedAt: at }, candidate.version);
-    return { candidate: updated };
+    const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: decision.action === "reject" ? "rejected" : "deferred", version: candidate.version + 1, metadata: { ...candidate.metadata, decisionReason: decision.reason }, updatedAt: at }, candidate.version);
+    const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: decision.actor ?? { type: "user" }, action: `topic_candidate_${decision.action}`, targetKind: "topic_candidate", targetId: candidate.id, before: candidate, after: updated, meta: { topicId: candidate.topicId, candidateId: candidate.id, reason: decision.reason }, createdAt: at });
+    return { candidate: updated, auditId: audit.id };
+  }
+
+  merge(namespace: RuntimeNamespace, sourceTopicId: string, input: { targetTopicId: string; expectedVersion: number; targetExpectedVersion: number; actor?: Record<string, unknown> }): TopicMergeResult {
+    const namespaceId = namespaceIdFromContext(namespace);
+    return this.deps.repos.transaction(() => {
+      const source = this.requireTopic(sourceTopicId, namespaceId);
+      const target = this.requireTopic(input.targetTopicId, namespaceId);
+      if (source.id === target.id) throw new Error("topic cannot be merged into itself");
+      if (source.version !== input.expectedVersion) throw new TopicVersionConflictError(source.id, source.version, source.status);
+      if (target.version !== input.targetExpectedVersion) throw new TopicVersionConflictError(target.id, target.version, target.status);
+      const at = this.now();
+      for (const evidence of this.deps.repos.topics.listEvidence(source.id, namespaceId)) this.deps.repos.topics.attachEvidence({ ...evidence, id: newId("topic_evidence"), topicId: target.id });
+      const updatedTarget = this.deps.repos.topics.updateTopic({ ...target, sourceMemoryIds: unique([...target.sourceMemoryIds, ...source.sourceMemoryIds]), version: target.version + 1, updatedAt: at }, target.version);
+      this.deps.repos.topics.updateTopic({ ...source, status: "merged", version: source.version + 1, metadata: { ...source.metadata, mergedIntoTopicId: target.id }, updatedAt: at }, source.version);
+      const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_merged", targetKind: "project_topic", targetId: target.id, before: { source, target }, after: updatedTarget, meta: { sourceTopicId: source.id, targetTopicId: target.id }, createdAt: at });
+      return { topic: updatedTarget, mergedTopicId: source.id, auditId: audit.id };
+    });
+  }
+
+  split(namespace: RuntimeNamespace, sourceTopicId: string, input: { expectedVersion: number; title: string; summary: string; evidenceMemoryIds: string[]; actor?: Record<string, unknown> }): TopicSplitResult {
+    const namespaceId = namespaceIdFromContext(namespace);
+    return this.deps.repos.transaction(() => {
+      const source = this.requireTopic(sourceTopicId, namespaceId);
+      if (source.version !== input.expectedVersion) throw new TopicVersionConflictError(source.id, source.version, source.status);
+      const evidence = this.deps.repos.topics.listEvidence(source.id, namespaceId);
+      const selected = new Set(input.evidenceMemoryIds);
+      if (!selected.size || [...selected].some((id) => !evidence.some((item) => item.memoryId === id))) throw new Error("topic split evidence must belong to source topic");
+      const at = this.now();
+      const topic: ProjectTopicRecord = { id: newId("topic"), namespaceId, projectId: source.projectId, title: input.title, summary: input.summary, status: "active", version: 1, sourceMemoryIds: [...selected], metadata: { splitFromTopicId: source.id }, createdAt: at, updatedAt: at };
+      this.deps.repos.topics.insertTopic(topic);
+      for (const item of evidence.filter((entry) => selected.has(entry.memoryId))) this.deps.repos.topics.attachEvidence({ ...item, id: newId("topic_evidence"), topicId: topic.id });
+      const updatedSource = this.deps.repos.topics.updateTopic({ ...source, sourceMemoryIds: source.sourceMemoryIds.filter((id) => !selected.has(id)), version: source.version + 1, updatedAt: at }, source.version);
+      const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_split", targetKind: "project_topic", targetId: source.id, before: source, after: { source: updatedSource, topic }, meta: { sourceTopicId: source.id, newTopicId: topic.id, evidenceMemoryIds: [...selected] }, createdAt: at });
+      return { topic, sourceTopic: updatedSource, auditId: audit.id };
+    });
+  }
+
+  evidence(namespace: RuntimeNamespace, topicId: string, limit: number): TopicEvidenceResult {
+    const namespaceId = namespaceIdFromContext(namespace);
+    this.requireTopic(topicId, namespaceId);
+    const all = this.deps.repos.topics.listEvidence(topicId, namespaceId);
+    return { topicId, total: all.length, limit, items: all.slice(0, limit).map((item) => ({ ...item, rawText: this.deps.repos.memories.get(item.memoryId)?.memoryValue ?? "" })) };
   }
 
   async refresh(namespace: RuntimeNamespace): Promise<TopicRefreshResult> {
@@ -182,7 +229,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     return { id: newId("topic"), namespaceId, projectId: normalizeNamespace(namespaceForMemory(memory)).projectId, title: memory.tags[0] ?? "Project topic", summary: memory.memoryValue.slice(0, 500), status: "active", version: 1, sourceMemoryIds: [], metadata: { signals: topicSignalsForMemory(memory) }, createdAt: at, updatedAt: at };
   }
 
-  private approve(candidate: ProjectTopicCandidateRecord, automatic: boolean): TopicDecisionResult {
+  private approve(candidate: ProjectTopicCandidateRecord, automatic: boolean, actor?: Record<string, unknown>): TopicDecisionResult {
     return this.deps.repos.transaction(() => {
       const topic = this.deps.repos.topics.getTopic(candidate.topicId, candidate.namespaceId);
       if (!topic) throw new Error(`topic not found: ${candidate.topicId}`);
@@ -199,8 +246,8 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       if (priorMemory && priorMemory.id !== saved.id && priorMemory.status === "activated") saved = this.deps.repos.memories.supersede({ oldMemory: priorMemory, newMemory: saved, projectId: topic.projectId, reason: `topic candidate ${candidate.id} supersedes ${priorApproved!.id}`, actor: { type: automatic ? "system" : "user" } }).newMemory;
       const at = nowIso();
       const updated = this.deps.repos.topics.updateCandidate({ ...candidate, status: "approved", version: candidate.version + 1, metadata: { ...candidate.metadata, approvedMemoryId: saved.id, automatic }, updatedAt: at }, candidate.version);
-      this.deps.repos.runtime.insertAudit({ userId: source.userId, sessionId: source.sessionId, actor: { type: automatic ? "system" : "user" }, action: "topic_candidate_approved", targetKind: "memory", targetId: saved.id, after: saved, meta: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic }, createdAt: at });
-      return { candidate: updated, memory: saved };
+      const audit = this.deps.repos.runtime.insertAudit({ userId: source.userId, sessionId: source.sessionId, actor: actor ?? { type: automatic ? "system" : "user" }, action: "topic_candidate_approved", targetKind: "memory", targetId: saved.id, after: saved, meta: { topicId: topic.id, candidateId: candidate.id, model: candidate.metadata.model, policyVersion, automatic }, createdAt: at });
+      return { candidate: updated, memory: saved, auditId: audit.id };
     });
   }
 
@@ -209,12 +256,24 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     return row ? this.deps.repos.topics.listCandidates(row.topic_id, namespaceId).find((candidate) => candidate.id === candidateId) : undefined;
   }
 
+  private requireTopic(topicId: string, namespaceId: string): ProjectTopicRecord {
+    const topic = this.deps.repos.topics.getTopic(topicId, namespaceId);
+    if (!topic) throw new Error(`topic not found in namespace: ${topicId}`);
+    return topic;
+  }
+
   private hasDuplicateMemory(candidate: ProjectTopicCandidateRecord, namespace: RuntimeNamespace): boolean {
     const normalized = candidate.conclusion.trim().toLowerCase();
     return this.deps.repos.memories.list({ memoryLayer: "L2", ...namespaceFilter(namespace) }, 10_000).some((memory) => memory.status !== "archived" && memory.memoryValue.trim().toLowerCase() === normalized);
   }
 
   private now(): string { return this.deps.now?.() ?? nowIso(); }
+}
+
+export class TopicVersionConflictError extends Error {
+  constructor(readonly entityId: string, readonly currentVersion: number, readonly currentStatus: string) {
+    super(`topic version conflict: ${entityId}`);
+  }
 }
 
 function namespaceFilter(namespace: RuntimeNamespace): { tenantId: string; projectId: string } {

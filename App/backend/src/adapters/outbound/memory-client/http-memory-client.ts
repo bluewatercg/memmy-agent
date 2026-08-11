@@ -24,6 +24,12 @@ import {
   OpenSessionOutputSchema,
   SearchOutputSchema,
   StartTurnOutputSchema,
+  TopicCandidateDecisionOutputSchema,
+  TopicInboxEvidenceOutputSchema,
+  TopicInboxListOutputSchema,
+  TopicInboxMergeOutputSchema,
+  TopicInboxRefreshOutputSchema,
+  TopicInboxSplitOutputSchema,
   RetryMemoryProcessingOutputSchema,
   RestoreMemoryOutputSchema,
   WorkerRunOutputSchema
@@ -262,6 +268,30 @@ export function createHttpMemoryClient(
 
     async setProjectFocus(input) {
       return request("PUT", "setProjectFocus", ProjectWorkItemRecordSchema.nullable(), { body: input });
+    },
+
+    async listTopicInbox(input) {
+      return request("GET", "listTopicInbox", TopicInboxListOutputSchema, { query: { namespace: JSON.stringify(input.namespace), statuses: input.statuses?.join(",") } });
+    },
+
+    async refreshTopicInbox(input) {
+      return request("POST", "refreshTopicInbox", TopicInboxRefreshOutputSchema, { body: input });
+    },
+
+    async decideTopicCandidate(candidateId, input) {
+      return request("POST", "decideTopicCandidate", TopicCandidateDecisionOutputSchema, { params: { id: candidateId }, body: input });
+    },
+
+    async mergeTopics(topicId, input) {
+      return request("POST", "mergeTopics", TopicInboxMergeOutputSchema, { params: { id: topicId }, body: input });
+    },
+
+    async splitTopic(topicId, input) {
+      return request("POST", "splitTopic", TopicInboxSplitOutputSchema, { params: { id: topicId }, body: input });
+    },
+
+    async topicEvidence(topicId, input) {
+      return request("GET", "topicEvidence", TopicInboxEvidenceOutputSchema, { params: { id: topicId }, query: { namespace: JSON.stringify(input.namespace), limit: input.limit } });
     },
 
     async panelItems(input) {

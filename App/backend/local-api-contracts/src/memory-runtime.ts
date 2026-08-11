@@ -917,6 +917,68 @@ export type ProjectContextWorkItemUpdateInput = z.infer<typeof ProjectContextWor
 export const ProjectContextFocusInputSchema = ProjectContextMutationFieldsSchema.extend({ workItemId: NonEmptyStringSchema.nullable() }).strict();
 export type ProjectContextFocusInput = z.infer<typeof ProjectContextFocusInputSchema>;
 
+const ProjectScopedRuntimeNamespaceSchema = RuntimeNamespaceSchema.refine(
+  (namespace) => Boolean(namespace.projectId || namespace.workspaceId || namespace.workspacePath),
+  { message: "topic inbox requires projectId, workspaceId, or workspacePath" }
+);
+const PositiveVersionSchema = z.number().int().positive();
+export const TopicCandidateStatusSchema = z.enum(["pending", "approved", "rejected", "deferred", "superseded"]);
+export type TopicCandidateStatus = z.infer<typeof TopicCandidateStatusSchema>;
+export const TopicCandidateLayerSchema = z.enum(["L2", "L3", "Skill"]);
+export type TopicCandidateLayer = z.infer<typeof TopicCandidateLayerSchema>;
+
+const TopicInboxRequestSchema = z.object({ namespace: ProjectScopedRuntimeNamespaceSchema }).strict();
+export const TopicInboxListInputSchema = TopicInboxRequestSchema.extend({ statuses: z.array(TopicCandidateStatusSchema).optional() }).strict();
+export type TopicInboxListInput = z.infer<typeof TopicInboxListInputSchema>;
+export const TopicInboxRefreshInputSchema = TopicInboxRequestSchema.extend({ requestId: NonEmptyStringSchema.optional() }).strict();
+export type TopicInboxRefreshInput = z.infer<typeof TopicInboxRefreshInputSchema>;
+
+export const TopicInboxCandidateSchema = z.object({
+  id: NonEmptyStringSchema, topicId: NonEmptyStringSchema, title: NonEmptyStringSchema, conclusion: NonEmptyStringSchema,
+  proposedLayer: TopicCandidateLayerSchema, status: TopicCandidateStatusSchema, version: PositiveVersionSchema,
+  evidenceCount: z.number().int().nonnegative(), updatedAt: IsoTimeSchema
+}).strict();
+export type TopicInboxCandidate = z.infer<typeof TopicInboxCandidateSchema>;
+const TopicCandidateCountsSchema = z.object({ pending: z.number().int().nonnegative(), approved: z.number().int().nonnegative(), rejected: z.number().int().nonnegative(), deferred: z.number().int().nonnegative(), superseded: z.number().int().nonnegative() }).strict();
+export const TopicInboxTopicSchema = z.object({
+  id: NonEmptyStringSchema, title: NonEmptyStringSchema, summary: z.string(), status: z.enum(["active", "archived", "merged"]),
+  version: PositiveVersionSchema, evidenceCount: z.number().int().nonnegative(), candidateCounts: TopicCandidateCountsSchema,
+  candidates: z.array(TopicInboxCandidateSchema), updatedAt: IsoTimeSchema
+}).strict();
+export type TopicInboxTopic = z.infer<typeof TopicInboxTopicSchema>;
+export const TopicInboxProjectGroupSchema = z.object({ namespace: ProjectScopedRuntimeNamespaceSchema, projectId: NonEmptyStringSchema.optional(), topics: z.array(TopicInboxTopicSchema) }).strict();
+export const TopicInboxListOutputSchema = z.object({ projects: z.array(TopicInboxProjectGroupSchema), serverTime: IsoTimeSchema }).strict();
+export type TopicInboxListOutput = z.infer<typeof TopicInboxListOutputSchema>;
+
+const TopicDecisionBaseSchema = TopicInboxRequestSchema.extend({ expectedVersion: PositiveVersionSchema, requestId: NonEmptyStringSchema.optional(), adapterId: NonEmptyStringSchema.optional(), source: NonEmptyStringSchema.optional() });
+export const TopicCandidateDecisionInputSchema = z.discriminatedUnion("action", [
+  TopicDecisionBaseSchema.extend({ action: z.literal("approve") }).strict(),
+  TopicDecisionBaseSchema.extend({ action: z.literal("edit_and_approve"), title: NonEmptyStringSchema, conclusion: NonEmptyStringSchema, proposedLayer: TopicCandidateLayerSchema }).strict(),
+  TopicDecisionBaseSchema.extend({ action: z.literal("reject"), reason: z.string().optional() }).strict(),
+  TopicDecisionBaseSchema.extend({ action: z.literal("defer"), reason: z.string().optional() }).strict()
+]);
+export type TopicCandidateDecisionInput = z.infer<typeof TopicCandidateDecisionInputSchema>;
+export const TopicCandidateDecisionOutputSchema = z.object({ candidate: TopicInboxCandidateSchema, memoryId: NonEmptyStringSchema.optional(), auditId: NonEmptyStringSchema, serverTime: IsoTimeSchema }).strict();
+export type TopicCandidateDecisionOutput = z.infer<typeof TopicCandidateDecisionOutputSchema>;
+export const TopicCandidateConflictOutputSchema = z.object({ candidateId: NonEmptyStringSchema, currentVersion: PositiveVersionSchema, currentStatus: TopicCandidateStatusSchema }).strict();
+export type TopicCandidateConflictOutput = z.infer<typeof TopicCandidateConflictOutputSchema>;
+
+export const TopicInboxRefreshOutputSchema = z.object({ jobId: NonEmptyStringSchema, unchanged: z.boolean() }).strict();
+export type TopicInboxRefreshOutput = z.infer<typeof TopicInboxRefreshOutputSchema>;
+export const TopicInboxMergeInputSchema = TopicInboxRequestSchema.extend({ targetTopicId: NonEmptyStringSchema, expectedVersion: PositiveVersionSchema, targetExpectedVersion: PositiveVersionSchema, requestId: NonEmptyStringSchema.optional() }).strict();
+export type TopicInboxMergeInput = z.infer<typeof TopicInboxMergeInputSchema>;
+export const TopicInboxMergeOutputSchema = z.object({ topic: TopicInboxTopicSchema, mergedTopicId: NonEmptyStringSchema, auditId: NonEmptyStringSchema, serverTime: IsoTimeSchema }).strict();
+export type TopicInboxMergeOutput = z.infer<typeof TopicInboxMergeOutputSchema>;
+export const TopicInboxSplitInputSchema = TopicInboxRequestSchema.extend({ expectedVersion: PositiveVersionSchema, title: NonEmptyStringSchema, summary: z.string(), evidenceMemoryIds: z.array(NonEmptyStringSchema).min(1), requestId: NonEmptyStringSchema.optional() }).strict();
+export type TopicInboxSplitInput = z.infer<typeof TopicInboxSplitInputSchema>;
+export const TopicInboxSplitOutputSchema = z.object({ topic: TopicInboxTopicSchema, sourceTopic: TopicInboxTopicSchema, auditId: NonEmptyStringSchema, serverTime: IsoTimeSchema }).strict();
+export type TopicInboxSplitOutput = z.infer<typeof TopicInboxSplitOutputSchema>;
+export const TopicInboxEvidenceInputSchema = TopicInboxRequestSchema.extend({ limit: z.number().int().positive().max(100).optional() }).strict();
+export type TopicInboxEvidenceInput = z.infer<typeof TopicInboxEvidenceInputSchema>;
+export const TopicInboxEvidenceItemSchema = z.object({ id: NonEmptyStringSchema, memoryId: NonEmptyStringSchema, role: NonEmptyStringSchema, summary: z.string(), rawText: z.string(), createdAt: IsoTimeSchema }).strict();
+export const TopicInboxEvidenceOutputSchema = z.object({ topicId: NonEmptyStringSchema, items: z.array(TopicInboxEvidenceItemSchema).max(100), total: z.number().int().nonnegative(), limit: z.number().int().positive().max(100), serverTime: IsoTimeSchema }).strict();
+export type TopicInboxEvidenceOutput = z.infer<typeof TopicInboxEvidenceOutputSchema>;
+
 /** Schema for panel items output. */
 export const PanelItemsOutputSchema = z.object({
   items: z.array(MemoryListItemSchema),

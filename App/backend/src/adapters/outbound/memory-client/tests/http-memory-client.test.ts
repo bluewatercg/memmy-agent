@@ -41,6 +41,12 @@ describe("HttpMemoryClient", () => {
       "/api/v1/project-context/work-items",
       "/api/v1/project-context/work-items/:id",
       "/api/v1/project-context/focus",
+      "/api/v1/topic-inbox",
+      "/api/v1/topic-inbox/refresh",
+      "/api/v1/topic-inbox/candidates/:id/decision",
+      "/api/v1/topic-inbox/topics/:id/merge",
+      "/api/v1/topic-inbox/topics/:id/split",
+      "/api/v1/topic-inbox/topics/:id/evidence",
       "/api/v1/panel/items",
       "/api/v1/panel/tasks",
       "/api/v1/panel/tasks/:id"
@@ -181,6 +187,33 @@ describe("HttpMemoryClient", () => {
       { ...mutation, title: "Task 4", summary: "", detail: "" }, mutation, { ...mutation, requestId: "req-reject" },
       { ...mutation, title: "Tests", summary: "", nextStep: "Fix" }, { ...mutation, status: "active" }, { ...mutation, workItemId: null }
     ]);
+  });
+
+  it("uses identical topic inbox methods, paths, query, and bodies", async () => {
+    const requests: Array<{ method: string; url: URL; body: unknown }> = [];
+    const baseUrl = await startServer(async (request, response) => {
+      const url = new URL(request.url ?? "/", "http://localhost");
+      const body = await readJson(request);
+      requests.push({ method: request.method ?? "", url, body });
+      if (url.pathname.endsWith("/evidence")) return sendJson(response, topicEvidenceOutput());
+      if (url.pathname.endsWith("/refresh")) return sendJson(response, { jobId: "job-1", unchanged: true });
+      if (url.pathname.endsWith("/decision")) return sendJson(response, { candidate: topicCandidate(), auditId: "audit-1", serverTime: now() });
+      if (url.pathname.endsWith("/merge")) return sendJson(response, { topic: topicSummary(), mergedTopicId: "topic-2", auditId: "audit-2", serverTime: now() });
+      if (url.pathname.endsWith("/split")) return sendJson(response, { topic: topicSummary("topic-3"), sourceTopic: topicSummary(), auditId: "audit-3", serverTime: now() });
+      return sendJson(response, topicListOutput());
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "memory-token", timeoutMs: 500, maxRetries: 0 });
+    const namespace = projectNamespace();
+    await client.listTopicInbox({ namespace, statuses: ["pending"] });
+    await client.refreshTopicInbox({ namespace, requestId: "refresh-1" });
+    await client.decideTopicCandidate("candidate 1", { namespace, action: "reject", expectedVersion: 1, reason: "stale" });
+    await client.mergeTopics("topic 1", { namespace, targetTopicId: "topic-2", expectedVersion: 1, targetExpectedVersion: 2 });
+    await client.splitTopic("topic 1", { namespace, expectedVersion: 1, title: "Split", summary: "", evidenceMemoryIds: ["memory-1"] });
+    await client.topicEvidence("topic 1", { namespace, limit: 20 });
+    expect(requests.map(({ method, url }) => `${method} ${url.pathname}`)).toEqual(["GET /api/v1/topic-inbox", "POST /api/v1/topic-inbox/refresh", "POST /api/v1/topic-inbox/candidates/candidate%201/decision", "POST /api/v1/topic-inbox/topics/topic%201/merge", "POST /api/v1/topic-inbox/topics/topic%201/split", "GET /api/v1/topic-inbox/topics/topic%201/evidence"]);
+    expect(JSON.parse(requests[0]!.url.searchParams.get("namespace")!)).toEqual(namespace);
+    expect(requests[0]!.url.searchParams.get("statuses")).toBe("pending");
+    expect(requests[2]!.body).toMatchObject({ action: "reject", expectedVersion: 1, namespace });
   });
   it("rejects schema-invalid project-context responses", async () => {
     const baseUrl = await startServer(async (_request, response) => sendJson(response, { id: "missing-fields" }));
@@ -668,6 +701,22 @@ function projectContextStateOutput() {
 
 function openSessionInput() {
   return { sessionId: "host-session-1", source: "codex" };
+}
+
+function topicCandidate() {
+  return { id: "candidate-1", topicId: "topic-1", title: "Use Zod", conclusion: "Share schemas.", proposedLayer: "L2", status: "pending", version: 1, evidenceCount: 1, updatedAt: now() };
+}
+
+function topicSummary(id = "topic-1") {
+  return { id, title: "HTTP boundary", summary: "Shared contracts", status: "active", version: 1, evidenceCount: 1, candidateCounts: { pending: 1, approved: 0, rejected: 0, deferred: 0, superseded: 0 }, candidates: [topicCandidate()], updatedAt: now() };
+}
+
+function topicListOutput() {
+  return { projects: [{ namespace: projectNamespace(), projectId: "project-1", topics: [topicSummary()] }], serverTime: now() };
+}
+
+function topicEvidenceOutput() {
+  return { topicId: "topic-1", items: [{ id: "evidence-1", memoryId: "memory-1", role: "verification", summary: "passed", rawText: "full evidence", createdAt: now() }], total: 1, limit: 20, serverTime: now() };
 }
 
 function closeSessionInput() {

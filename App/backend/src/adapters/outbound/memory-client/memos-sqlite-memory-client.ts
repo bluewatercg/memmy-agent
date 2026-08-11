@@ -415,6 +415,13 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
       return requireProjectContextService(memoryService).selectProjectWorkItem(input) ?? null;
     },
 
+    async listTopicInbox() { return readOnlyOperationUnavailable(); },
+    async refreshTopicInbox() { return readOnlyOperationUnavailable(); },
+    async decideTopicCandidate() { return readOnlyOperationUnavailable(); },
+    async mergeTopics() { return readOnlyOperationUnavailable(); },
+    async splitTopic() { return readOnlyOperationUnavailable(); },
+    async topicEvidence() { return readOnlyOperationUnavailable(); },
+
     async panelItems(input: PanelItemsInput): Promise<PanelItemsOutput> {
       const pageSize = 20;
       const filtered = listMemoryRows(sources)

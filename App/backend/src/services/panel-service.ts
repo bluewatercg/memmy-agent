@@ -19,6 +19,18 @@ import type {
   ProjectGoalRecord,
   ProjectWorkItemRecord,
   RuntimeNamespace,
+  TopicCandidateDecisionInput,
+  TopicCandidateDecisionOutput,
+  TopicInboxEvidenceInput,
+  TopicInboxEvidenceOutput,
+  TopicInboxListInput,
+  TopicInboxListOutput,
+  TopicInboxMergeInput,
+  TopicInboxMergeOutput,
+  TopicInboxRefreshInput,
+  TopicInboxRefreshOutput,
+  TopicInboxSplitInput,
+  TopicInboxSplitOutput,
 } from "@memmy/local-api-contracts";
 import { MemoryLayerError } from "../adapters/outbound/memory-client/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
@@ -36,6 +48,12 @@ export interface PanelService {
   createProjectWorkItem(input: ProjectContextWorkItemCreateInput, ctx: RuntimeContext): Promise<ProjectWorkItemRecord>;
   updateProjectWorkItem(id: string, input: ProjectContextWorkItemUpdateInput, ctx: RuntimeContext): Promise<ProjectWorkItemRecord>;
   setProjectFocus(input: ProjectContextFocusInput, ctx: RuntimeContext): Promise<ProjectWorkItemRecord | null>;
+  listTopicInbox(input: TopicInboxListInput, ctx: RuntimeContext): Promise<TopicInboxListOutput>;
+  refreshTopicInbox(input: TopicInboxRefreshInput, ctx: RuntimeContext): Promise<TopicInboxRefreshOutput>;
+  decideTopicCandidate(id: string, input: TopicCandidateDecisionInput, ctx: RuntimeContext): Promise<TopicCandidateDecisionOutput>;
+  mergeTopics(id: string, input: TopicInboxMergeInput, ctx: RuntimeContext): Promise<TopicInboxMergeOutput>;
+  splitTopic(id: string, input: TopicInboxSplitInput, ctx: RuntimeContext): Promise<TopicInboxSplitOutput>;
+  topicEvidence(id: string, input: TopicInboxEvidenceInput, ctx: RuntimeContext): Promise<TopicInboxEvidenceOutput>;
   items(input: PanelItemsInput, ctx: RuntimeContext): Promise<PanelItemsOutput>;
   tasks(input: PanelTasksInput, ctx: RuntimeContext): Promise<PanelTasksOutput>;
   deleteTask(id: string, ctx: RuntimeContext): Promise<DeletePanelTaskOutput>;
@@ -84,6 +102,13 @@ export function createPanelService(deps: { memoryClient: MemoryClient }): PanelS
     async setProjectFocus(input, ctx) {
       return deps.memoryClient.setProjectFocus(withRuntimeProvenance(input, ctx));
     },
+
+    async listTopicInbox(input, _ctx) { return deps.memoryClient.listTopicInbox(input); },
+    async refreshTopicInbox(input, _ctx) { return deps.memoryClient.refreshTopicInbox(input); },
+    async decideTopicCandidate(id, input, _ctx) { return deps.memoryClient.decideTopicCandidate(id, input); },
+    async mergeTopics(id, input, _ctx) { return deps.memoryClient.mergeTopics(id, input); },
+    async splitTopic(id, input, _ctx) { return deps.memoryClient.splitTopic(id, input); },
+    async topicEvidence(id, input, _ctx) { return deps.memoryClient.topicEvidence(id, input); },
 
     async items(input, _ctx) {
       return deps.memoryClient.panelItems(input);

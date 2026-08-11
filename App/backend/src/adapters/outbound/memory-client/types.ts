@@ -41,6 +41,18 @@ import type {
   StartTurnInput,
   StartTurnOutput,
   RetryMemoryProcessingOutput,
+  TopicCandidateDecisionInput,
+  TopicCandidateDecisionOutput,
+  TopicInboxEvidenceInput,
+  TopicInboxEvidenceOutput,
+  TopicInboxListInput,
+  TopicInboxListOutput,
+  TopicInboxMergeInput,
+  TopicInboxMergeOutput,
+  TopicInboxRefreshInput,
+  TopicInboxRefreshOutput,
+  TopicInboxSplitInput,
+  TopicInboxSplitOutput,
   RestoreMemoryInput,
   RestoreMemoryOutput,
   WorkerRunOutput
@@ -84,6 +96,12 @@ export interface MemoryClient {
   createProjectWorkItem(input: ProjectContextWorkItemCreateInput): Promise<ProjectWorkItemRecord>;
   updateProjectWorkItem(workItemId: string, input: ProjectContextWorkItemUpdateInput): Promise<ProjectWorkItemRecord>;
   setProjectFocus(input: ProjectContextFocusInput): Promise<ProjectWorkItemRecord | null>;
+  listTopicInbox(input: TopicInboxListInput): Promise<TopicInboxListOutput>;
+  refreshTopicInbox(input: TopicInboxRefreshInput): Promise<TopicInboxRefreshOutput>;
+  decideTopicCandidate(candidateId: string, input: TopicCandidateDecisionInput): Promise<TopicCandidateDecisionOutput>;
+  mergeTopics(topicId: string, input: TopicInboxMergeInput): Promise<TopicInboxMergeOutput>;
+  splitTopic(topicId: string, input: TopicInboxSplitInput): Promise<TopicInboxSplitOutput>;
+  topicEvidence(topicId: string, input: TopicInboxEvidenceInput): Promise<TopicInboxEvidenceOutput>;
   panelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   panelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(taskId: string): Promise<DeletePanelTaskOutput>;

@@ -10,6 +10,7 @@ import type {
   ProjectWorkItemUpdateRequest
 } from "../service/project-context/project-context-service.js";
 import type { ProjectContextProposeGoalRequest } from "../service/project-context/project-context-types.js";
+import type { TopicCandidateDecision, TopicInboxItem, TopicInboxView } from "../service/topic-inbox/topic-inbox-types.js";
 import type {
   MemoryAddRequest,
   MemoryGovernanceRequest,
@@ -17,6 +18,9 @@ import type {
   MemoryReloadConfigRequest,
   MemorySearchRequest,
   MemoryMarkdownImportRequest,
+  ProjectTopicCandidateRecord,
+  ProjectTopicCandidateStatus,
+  ProjectTopicRecord,
   RequestEnvelope,
   RuntimeNamespace,
   SessionCheckpointRequest,
@@ -29,6 +33,7 @@ import { MemoryService } from "../service/memory-service.js";
 import { createAgentTokenStatsService } from "../service/agent-token-stats-service.js";
 import { normalizeNamespace } from "../service/namespace/namespace-scope.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
+import { TopicVersionConflictError } from "../service/topic-inbox/project-topic-inbox.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
@@ -87,6 +92,12 @@ export const API_ROUTES = [
   "POST /api/v1/project-context/work-items",
   "PATCH /api/v1/project-context/work-items/:id",
   "PUT /api/v1/project-context/focus",
+  "GET /api/v1/topic-inbox",
+  "POST /api/v1/topic-inbox/refresh",
+  "POST /api/v1/topic-inbox/candidates/:id/decision",
+  "POST /api/v1/topic-inbox/topics/:id/merge",
+  "POST /api/v1/topic-inbox/topics/:id/split",
+  "GET /api/v1/topic-inbox/topics/:id/evidence",
   "GET /api/v1/panel/context-packs",
   "GET /api/v1/panel/namespace-audit",
   "GET /api/v1/panel/analysis",
@@ -736,6 +747,54 @@ async function routeRequest(
     requirePanelWrite(principal);
     const request = projectContextFocus(body, "project-context.focus", principal);
     return service.idempotent("project-context.focus", request, request, () => service.selectProjectWorkItem(request) ?? null);
+  }
+  if (method === "GET" && path === "/api/v1/topic-inbox") {
+    requirePanelRead(principal);
+    const namespace = projectContextNamespace(url, principal);
+    const statuses = url.searchParams.get("statuses")?.split(",").filter(Boolean) as Array<"pending" | "approved" | "rejected" | "deferred" | "superseded"> | undefined;
+    const view = service.listProjectTopicInbox(namespace, { statuses });
+    return topicInboxListResponse(namespace, view);
+  }
+  if (method === "POST" && path === "/api/v1/topic-inbox/refresh") {
+    requirePanelWrite(principal);
+    const request = topicInboxMutation(body, "topic-inbox.refresh", principal);
+    return service.refreshProjectTopicInbox(request.namespace);
+  }
+  const topicDecision = match(path, /^\/api\/v1\/topic-inbox\/candidates\/([^/]+)\/decision$/);
+  if (method === "POST" && topicDecision) {
+    requirePanelWrite(principal);
+    const request = topicInboxMutation(body, "topic-inbox.candidate.decision", principal);
+    const candidateId = decodeMatchSegment(topicDecision, 1);
+    const decision = topicDecisionInput(request);
+    try {
+      const result = await service.decideProjectTopicCandidate(request.namespace, candidateId, { ...decision, actor: decisionActor(request) } as TopicCandidateDecision);
+      return { candidate: topicCandidateCard(result.candidate), memoryId: result.memory?.id, auditId: result.auditId, serverTime: new Date().toISOString() };
+    } catch (error) {
+      if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", JSON.stringify({ candidateId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus }));
+      throw error;
+    }
+  }
+  const topicMerge = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/merge$/);
+  if (method === "POST" && topicMerge) {
+    requirePanelWrite(principal);
+    const request = topicInboxMutation(body, "topic-inbox.topic.merge", principal);
+    const result = service.mergeProjectTopics(request.namespace, decodeMatchSegment(topicMerge, 1), { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
+    return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
+  }
+  const topicSplit = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/split$/);
+  if (method === "POST" && topicSplit) {
+    requirePanelWrite(principal);
+    const request = topicInboxMutation(body, "topic-inbox.topic.split", principal);
+    const result = service.splitProjectTopic(request.namespace, decodeMatchSegment(topicSplit, 1), { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
+    const view = service.listProjectTopicInbox(request.namespace);
+    return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
+  }
+  const topicEvidence = match(path, /^\/api\/v1\/topic-inbox\/topics\/([^/]+)\/evidence$/);
+  if (method === "GET" && topicEvidence) {
+    requirePanelRead(principal);
+    const namespace = projectContextNamespace(url, principal);
+    const limit = Math.min(100, Math.max(1, parseNumber(url.searchParams.get("limit")) ?? 20));
+    return { ...service.projectTopicEvidence(namespace, decodeMatchSegment(topicEvidence, 1), limit), serverTime: new Date().toISOString() };
   }
   if (method === "GET" && path === "/api/v1/panel/context-pack") {
     requirePanelRead(principal);
@@ -1514,6 +1573,55 @@ function projectContextFocus(body: unknown, routeName: string, principal: AuthPr
   const request = projectContextMutation(body, routeName, principal);
   if (request.workItemId !== null && typeof request.workItemId !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} workItemId must be a string or null`);
   return { ...request, namespace: request.namespace, workItemId: request.workItemId };
+}
+
+function topicInboxMutation(body: unknown, routeName: string, principal: AuthPrincipal): Record<string, unknown> & { namespace: RuntimeNamespace } {
+  const raw = asObject(body, routeName);
+  if (!isRecord(raw.namespace)) throw new MemoryServiceError("invalid_argument", `${routeName} namespace is required`);
+  const request = envelopeWithPrincipal(raw, principal);
+  if (!request.namespace) throw new MemoryServiceError("invalid_argument", `${routeName} project namespace is required`);
+  return { ...request, namespace: request.namespace };
+}
+
+function positiveVersion(value: unknown): number {
+  if (!Number.isInteger(value) || Number(value) < 1) throw new MemoryServiceError("invalid_argument", "expectedVersion must be a positive integer");
+  return Number(value);
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new MemoryServiceError("invalid_argument", `${field} is required`);
+  return value;
+}
+
+function topicDecisionInput(request: Record<string, unknown>): Omit<TopicCandidateDecision, "actor"> {
+  const expectedVersion = positiveVersion(request.expectedVersion);
+  if (request.action === "approve") return { action: "approve", expectedVersion };
+  if (request.action === "edit_and_approve") return { action: "edit_and_approve", expectedVersion, title: requiredString(request.title, "title"), conclusion: requiredString(request.conclusion, "conclusion"), proposedLayer: topicLayer(request.proposedLayer) } as Omit<Extract<TopicCandidateDecision, { action: "edit_and_approve" }>, "actor">;
+  if (request.action === "reject" || request.action === "defer") return { action: request.action, expectedVersion, reason: typeof request.reason === "string" ? request.reason : undefined } as Omit<Extract<TopicCandidateDecision, { action: "reject" | "defer" }>, "actor">;
+  throw new MemoryServiceError("invalid_argument", "topic candidate action is invalid");
+}
+
+function topicLayer(value: unknown): "L2" | "L3" | "Skill" {
+  if (value === "L2" || value === "L3" || value === "Skill") return value;
+  throw new MemoryServiceError("invalid_argument", "proposedLayer is invalid");
+}
+
+function decisionActor(request: Record<string, unknown>): Record<string, unknown> {
+  return { type: "user", source: request.source, adapterId: request.adapterId, requestId: request.requestId };
+}
+
+function topicCandidateCard(candidate: ProjectTopicCandidateRecord) {
+  return { id: candidate.id, topicId: candidate.topicId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: candidate.status, version: candidate.version, evidenceCount: candidate.sourceMemoryIds.length, updatedAt: candidate.updatedAt };
+}
+
+function topicSummary(topic: ProjectTopicRecord, item?: TopicInboxItem) {
+  const candidates = item?.candidates ?? [];
+  const count = (status: ProjectTopicCandidateStatus) => candidates.filter((candidate) => candidate.status === status).length;
+  return { id: topic.id, title: topic.title, summary: topic.summary, status: topic.status, version: topic.version, evidenceCount: item?.evidence.length ?? topic.sourceMemoryIds.length, candidateCounts: { pending: count("pending"), approved: count("approved"), rejected: count("rejected"), deferred: count("deferred"), superseded: count("superseded") }, candidates: candidates.map(topicCandidateCard), updatedAt: topic.updatedAt };
+}
+
+function topicInboxListResponse(namespace: RuntimeNamespace, view: TopicInboxView) {
+  return { projects: [{ namespace, projectId: namespace.projectId, topics: view.topics.map((item) => topicSummary(item.topic, item)) }], serverTime: new Date().toISOString() };
 }
 
 function stringList(value: unknown, routeName: string): string[] | undefined { return parseOptionalStringArray(value, routeName); }

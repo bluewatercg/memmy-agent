@@ -1,5 +1,5 @@
 /** Memory Panel runtime routes. */
-import { PanelItemsInputSchema, PanelTasksInputSchema, ProjectContextFocusInputSchema, ProjectContextGoalDecisionInputSchema, ProjectContextProposeGoalInputSchema, ProjectContextWorkItemCreateInputSchema, ProjectContextWorkItemUpdateInputSchema, RuntimeNamespaceSchema } from "@memmy/local-api-contracts";
+import { PanelItemsInputSchema, PanelTasksInputSchema, ProjectContextFocusInputSchema, ProjectContextGoalDecisionInputSchema, ProjectContextProposeGoalInputSchema, ProjectContextWorkItemCreateInputSchema, ProjectContextWorkItemUpdateInputSchema, RuntimeNamespaceSchema, TopicCandidateDecisionInputSchema, TopicInboxEvidenceInputSchema, TopicInboxListInputSchema, TopicInboxMergeInputSchema, TopicInboxRefreshInputSchema, TopicInboxSplitInputSchema } from "@memmy/local-api-contracts";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
@@ -65,6 +65,31 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
   }));
   app.put("/api/v1/project-context/focus", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => reply.send(await deps.services.panel.setProjectFocus(ProjectContextFocusInputSchema.parse(request.body), runtimeContext(request)))));
 
+  app.get("/api/v1/topic-inbox", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
+    const query = request.query as Record<string, unknown>;
+    const namespace = parseNamespaceQuery(query);
+    const statuses = typeof query.statuses === "string" ? query.statuses.split(",") : query.statuses;
+    return reply.send(await deps.services.panel.listTopicInbox(TopicInboxListInputSchema.parse({ namespace, statuses }), runtimeContext(request)));
+  }));
+  app.post("/api/v1/topic-inbox/refresh", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => reply.send(await deps.services.panel.refreshTopicInbox(TopicInboxRefreshInputSchema.parse(request.body), runtimeContext(request)))));
+  app.post("/api/v1/topic-inbox/candidates/:id/decision", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    return reply.send(await deps.services.panel.decideTopicCandidate(id, TopicCandidateDecisionInputSchema.parse(request.body), runtimeContext(request)));
+  }));
+  app.post("/api/v1/topic-inbox/topics/:id/merge", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    return reply.send(await deps.services.panel.mergeTopics(id, TopicInboxMergeInputSchema.parse(request.body), runtimeContext(request)));
+  }));
+  app.post("/api/v1/topic-inbox/topics/:id/split", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    return reply.send(await deps.services.panel.splitTopic(id, TopicInboxSplitInputSchema.parse(request.body), runtimeContext(request)));
+  }));
+  app.get("/api/v1/topic-inbox/topics/:id/evidence", { preHandler: deps.authenticateRuntimeToken }, withErrorEnvelope(async (request, reply) => {
+    const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
+    const query = request.query as Record<string, unknown>;
+    return reply.send(await deps.services.panel.topicEvidence(id, TopicInboxEvidenceInputSchema.parse({ namespace: parseNamespaceQuery(query), limit: query.limit === undefined ? undefined : Number(query.limit) }), runtimeContext(request)));
+  }));
+
   app.get(
     "/api/v1/panel/items",
     { preHandler: deps.authenticateRuntimeToken },
@@ -112,4 +137,10 @@ function queryValues(rawUrl: string | undefined, name: string): string[] | undef
     .map((value) => value.trim())
     .filter(Boolean);
   return values.length > 0 ? values : undefined;
+}
+
+function parseNamespaceQuery(query: Record<string, unknown>) {
+  if (typeof query.namespace !== "string") return RuntimeNamespaceSchema.parse(query);
+  try { return RuntimeNamespaceSchema.parse(JSON.parse(query.namespace)); }
+  catch { throw new z.ZodError([{ code: "custom", path: ["namespace"], message: "namespace must be valid JSON" }]); }
 }
