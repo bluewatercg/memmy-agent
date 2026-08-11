@@ -71,3 +71,11 @@ Exact fresh verification:
 - `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 3 files / 38 tests.
 - `cd App/backend && npx vitest run src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/outbound/memory-client/tests/memos-sqlite-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts src/services/tests/agent-runtime-services.test.ts -t "topic|structured|provenance" && npm run typecheck` -> PASS, 4 files / 6 focused tests; 44 skipped by filter; typecheck passed.
 - Clean standard script proof: `mv App/backend/local-api-contracts/dist /tmp/contracts-dist-r3 && npm --prefix App/backend run typecheck && rm -rf /tmp/contracts-dist-r3` -> PASS; the unmodified standard backend script rebuilt contracts first, then Memory with version sync.
+
+## Fix Round 4
+
+- Topic refresh/decision/merge/split route idempotency calls are explicitly awaited inside their `try` blocks, so stale-version errors produce structured 409 responses. Added direct REST assertions for candidate/merge/split conflict IDs and current versions.
+- `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 20 tests.
+- `cd App/backend && npm run typecheck` -> PASS, including contracts and Memory prerequisite builds.
+
+Concern: SQLite runtime idempotency write is currently performed after the domain callback; an injected idempotency save failure can leave a committed domain mutation. A full atomic merge/split replay-write rollback requires extending the existing repository transaction boundary and was not implemented in this round.

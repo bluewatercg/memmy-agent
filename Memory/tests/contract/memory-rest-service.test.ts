@@ -10,6 +10,7 @@ import {
   createMemoryHttpServer
 } from "../../src/index.js";
 import { Repositories } from "../../src/storage/repositories.js";
+import { TopicVersionConflictError } from "../../src/service/topic-inbox/project-topic-inbox.js";
 import {
   accountRuntimeConfig,
   addAgentSourceImport,
@@ -201,6 +202,22 @@ describe("MemoryService / REST contract", () => {
       expect(service.renderStableProjectContext(namespace).markdown).not.toContain("Share schemas");
     });
     db.close();
+  });
+
+  it("returns structured 409 details for stale topic decision, merge, and split", async () => {
+    const { db, service } = createTestService(); const namespace = { source: "codex", profileId: "default", userId: "rest-user", projectId: "topic-project" };
+    const conflict = (entityId: string, currentVersion: number, currentStatus: string) => { throw new TopicVersionConflictError(entityId, currentVersion, currentStatus); };
+    service.decideProjectTopicCandidate = async () => conflict("candidate-1", 3, "pending") as never;
+    service.mergeProjectTopics = () => conflict("topic-1", 4, "active") as never;
+    service.splitProjectTopic = () => conflict("topic-1", 5, "active") as never;
+    const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { writer: { namespace, scopes: ["panel:write"] } } } });
+    await withServerClosed(server, async () => { await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve)); const address = server.address(); if (!address || typeof address === "string") throw new Error("expected TCP address"); const base = `http://127.0.0.1:${address.port}`; const headers = { authorization: "Bearer writer", "content-type": "application/json" }; const ns = JSON.stringify(namespace);
+      const decision = await fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/decision`, { method: "POST", headers, body: JSON.stringify({ namespace, action: "reject", expectedVersion: 1 }) });
+      const merge = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/merge`, { method: "POST", headers, body: JSON.stringify({ namespace, targetTopicId: "topic-2", expectedVersion: 1, targetExpectedVersion: 1 }) });
+      const split = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/split`, { method: "POST", headers, body: JSON.stringify({ namespace, expectedVersion: 1, title: "split", summary: "", evidenceMemoryIds: ["m-1"] }) });
+      for (const [response, id, version] of [[decision, "candidate-1", 3], [merge, "topic-1", 4], [split, "topic-1", 5]] as const) { expect(response.status).toBe(409); expect(await response.json()).toMatchObject({ error: { code: "conflict" }, details: { [id.startsWith("candidate") ? "candidateId" : "topicId"]: id, currentVersion: version } }); }
+      void ns;
+    }); db.close();
   });
 
   it("serves structured session checkpoints through the REST client", async () => {
