@@ -20,6 +20,7 @@ const ROUTE_PAGE_TITLES: Record<AppRoutePath, string> = {
 };
 
 const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
+  "topic-inbox": "Topic Inbox",
   overview: "Overview",
   memories: "Memories",
   tasks: "Tasks",

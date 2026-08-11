@@ -16,6 +16,7 @@ import { PoliciesSubPage } from "./memory/policies-sub-page.js";
 import { SkillsSubPage } from "./memory/skills-sub-page.js";
 import { SourcesSubPage } from "./memory/sources-sub-page.js";
 import { TasksSubPage } from "./memory/tasks-sub-page.js";
+import { TopicInboxSubPage } from "./memory/topic-inbox-sub-page.js";
 import { TokenStatsSubPage } from "./memory/token-stats-sub-page.js";
 import { WorldModelSubPage } from "./memory/world-model-sub-page.js";
 import {
@@ -33,8 +34,10 @@ import {
   Sparkles,
   Wand2
 } from "./memory/memory-prototype-icons.js";
+import { Inbox } from "lucide-react";
 
 export type MemorySubPageId =
+  | "topic-inbox"
   | "overview"
   | "memories"
   | "tasks"
@@ -61,6 +64,7 @@ const memoryNavSections: MemoryNavSection[] = [
   {
     titleKey: "memory.nav.work",
     items: [
+      { id: "topic-inbox", labelKey: "memory.nav.topicInbox", icon: <Inbox size={16} /> },
       { id: "overview", labelKey: "memory.nav.overview", icon: <Layers size={16} /> },
       { id: "memories", labelKey: "memory.nav.memory", icon: <BrainCircuit size={16} /> },
       { id: "tasks", labelKey: "memory.nav.tasks", icon: <ListChecks size={16} /> },
@@ -92,7 +96,7 @@ export interface MemoryPageProps {
 
 export function MemoryPage(props: MemoryPageProps) {
   const { clients } = useApiClients();
-  const { dispatch } = useAppState();
+  const { state, dispatch } = useAppState();
   const { track, ready: analyticsReady } = useAnalytics();
   const prevSubPageRef = useRef<MemorySubPageId | null>(null);
   const [activePage, setActivePage] = useState<MemorySubPageId>(() => props.initialSubPage ?? readInitialMemorySubPage());
@@ -118,6 +122,7 @@ export function MemoryPage(props: MemoryPageProps) {
 
   const childByPage = useMemo<Record<MemorySubPageId, ReactNode>>(
     () => ({
+      "topic-inbox": <TopicInboxSubPage client={client} projects={state.agent.projects.map((project) => ({ id: project.id, name: project.name }))} />,
       overview: <OverviewSubPage client={client} />,
       memories: <MemoriesSubPage client={client} onOpenSettings={() => dispatch(appActions.navigate("/settings"))} />,
       tasks: <TasksSubPage client={client} />,
@@ -129,7 +134,7 @@ export function MemoryPage(props: MemoryPageProps) {
       logs: <LogsSubPage client={client} />,
       sources: <SourcesSubPage />
     }),
-    [client, dispatch]
+    [client, dispatch, state.agent.projects]
   );
 
   useEffect(() => {
@@ -293,6 +298,7 @@ export function MemoryPageView(props: MemoryPageViewProps) {
  */
 function createPreviewChildByPage(t: (key: MessageKey) => string): Record<MemorySubPageId, ReactNode> {
   return {
+    "topic-inbox": <div>{t("memory.topicInbox.title")}</div>,
     overview: <div>{t("memory.overview.total")}</div>,
     memories: <div>{t("memory.memories.title")}</div>,
     tasks: <div>{t("memory.tasks.title")}</div>,

@@ -563,6 +563,14 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
     async setProjectFocus() {
       return null;
     },
+    async listTopicInbox(input) {
+      return { projects: [{ namespace: input.namespace, projectId: input.namespace.projectId, topics: [] }], serverTime: now };
+    },
+    async refreshTopicInbox() { return { jobId: "fixture-topic-refresh", unchanged: true }; },
+    async decideTopicCandidate(_id, input) { return { candidate: { id: "fixture-candidate", topicId: "fixture-topic", title: "Fixture", conclusion: "Fixture", proposedLayer: "L3" as const, status: input.action === "reject" ? "rejected" as const : input.action === "defer" ? "deferred" as const : "approved" as const, version: input.expectedVersion + 1, evidenceCount: 1, updatedAt: now }, auditId: "fixture-audit", serverTime: now }; },
+    async mergeTopics(_id, input) { return { topic: fixtureTopic(input.targetTopicId), mergedTopicId: "fixture-topic", auditId: "fixture-audit", serverTime: now }; },
+    async splitTopic(_id) { return { topic: fixtureTopic("fixture-split"), sourceTopic: fixtureTopic("fixture-topic"), auditId: "fixture-audit", serverTime: now }; },
+    async topicEvidence(id, input) { return { topicId: id, items: [], total: 0, limit: input.limit ?? 20, serverTime: now }; },
     async listPanelItems(input): Promise<PanelItemsOutput> {
       return filterMemoryItems(input);
     },
@@ -583,6 +591,10 @@ export function createMockMemoryRuntimeClient(): MemoryRuntimeClient {
       return { ok: true, id, deletedMemoryIds: [], serverTime: now };
     }
   };
+}
+
+function fixtureTopic(id: string) {
+  return { id, title: "Fixture topic", summary: "", status: "active" as const, version: 1, evidenceCount: 0, candidateCounts: { pending: 0, approved: 0, rejected: 0, deferred: 0, superseded: 0 }, candidates: [], updatedAt: now };
 }
 
 function findMemoryDetail(id: string): GetMemoryOutput {

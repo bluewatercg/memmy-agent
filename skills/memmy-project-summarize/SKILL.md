@@ -72,6 +72,8 @@ Do not promote a changed file, an unverified command intention, or a proposed pl
 
    Replace `<agent-source>` with the calling CLI name, such as `codex`, `claude`, or `pi`. If Memmy is unavailable, continue from project files and label history evidence unavailable. Never use `--no-workspace` for this workflow.
 
+   For Full Summary, refresh and list the project topic inbox using this exact canonical namespace before falling back to raw searches. Present the endpoint's stable topics separately from pending candidate projections. Fetch bounded raw evidence only when a card is expanded or needs verification. If the topic-inbox endpoint is unavailable, use the evidence searches below and label the fallback. Never treat pending candidates as stable context or automatically approve L3 or Skill candidates.
+
 5. Retrieve bounded workspace history. Derive focused queries from the project name and current planning artifacts, then search at least these concerns when relevant:
 
    ```bash

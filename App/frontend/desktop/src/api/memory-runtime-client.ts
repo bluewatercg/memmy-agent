@@ -41,6 +41,18 @@ import {
   RetryMemoryProcessingOutputSchema,
   RestoreMemoryInputSchema,
   RestoreMemoryOutputSchema,
+  TopicCandidateDecisionInputSchema,
+  TopicCandidateDecisionOutputSchema,
+  TopicInboxEvidenceInputSchema,
+  TopicInboxEvidenceOutputSchema,
+  TopicInboxListInputSchema,
+  TopicInboxListOutputSchema,
+  TopicInboxMergeInputSchema,
+  TopicInboxMergeOutputSchema,
+  TopicInboxRefreshInputSchema,
+  TopicInboxRefreshOutputSchema,
+  TopicInboxSplitInputSchema,
+  TopicInboxSplitOutputSchema,
   type CloseSessionInput,
   type CloseSessionOutput,
   type CompleteTurnInput,
@@ -80,6 +92,18 @@ import {
   type StartTurnInput,
   type StartTurnOutput,
   type RetryMemoryProcessingOutput,
+  type TopicCandidateDecisionInput,
+  type TopicCandidateDecisionOutput,
+  type TopicInboxEvidenceInput,
+  type TopicInboxEvidenceOutput,
+  type TopicInboxListInput,
+  type TopicInboxListOutput,
+  type TopicInboxMergeInput,
+  type TopicInboxMergeOutput,
+  type TopicInboxRefreshInput,
+  type TopicInboxRefreshOutput,
+  type TopicInboxSplitInput,
+  type TopicInboxSplitOutput,
   type RestoreMemoryInput,
   type RestoreMemoryOutput,
   type RuntimeConfig
@@ -112,6 +136,12 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/project-context/work-items",
   "PATCH /api/v1/project-context/work-items/:id",
   "PUT /api/v1/project-context/focus",
+  "GET /api/v1/topic-inbox",
+  "POST /api/v1/topic-inbox/refresh",
+  "POST /api/v1/topic-inbox/candidates/:id/decision",
+  "POST /api/v1/topic-inbox/topics/:id/merge",
+  "POST /api/v1/topic-inbox/topics/:id/split",
+  "GET /api/v1/topic-inbox/topics/:id/evidence",
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id"
@@ -143,6 +173,12 @@ export interface MemoryRuntimeClient {
   createProjectWorkItem(input: ProjectContextWorkItemCreateInput): Promise<ProjectWorkItemRecord>;
   updateProjectWorkItem(id: string, input: ProjectContextWorkItemUpdateInput): Promise<ProjectWorkItemRecord>;
   setProjectFocus(input: ProjectContextFocusInput): Promise<ProjectWorkItemRecord | null>;
+  listTopicInbox(input: TopicInboxListInput): Promise<TopicInboxListOutput>;
+  refreshTopicInbox(input: TopicInboxRefreshInput): Promise<TopicInboxRefreshOutput>;
+  decideTopicCandidate(id: string, input: TopicCandidateDecisionInput): Promise<TopicCandidateDecisionOutput>;
+  mergeTopics(id: string, input: TopicInboxMergeInput): Promise<TopicInboxMergeOutput>;
+  splitTopic(id: string, input: TopicInboxSplitInput): Promise<TopicInboxSplitOutput>;
+  topicEvidence(id: string, input: TopicInboxEvidenceInput): Promise<TopicInboxEvidenceOutput>;
   listPanelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
   listPanelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
@@ -307,6 +343,31 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
     async setProjectFocus(input) {
       return requestJson({ config, path: "/api/v1/project-context/focus", schema: ProjectWorkItemRecordSchema.nullable(), body: ProjectContextFocusInputSchema.parse(input), init: { method: "PUT" } });
     },
+    async listTopicInbox(input) {
+      const parsed = TopicInboxListInputSchema.parse(input);
+      return requestJson({ config, path: withQuery("/api/v1/topic-inbox", { namespace: JSON.stringify(parsed.namespace), statuses: parsed.statuses?.join(",") }), schema: TopicInboxListOutputSchema });
+    },
+
+    async refreshTopicInbox(input) {
+      return requestJson({ config, path: "/api/v1/topic-inbox/refresh", schema: TopicInboxRefreshOutputSchema, body: TopicInboxRefreshInputSchema.parse(input) });
+    },
+
+    async decideTopicCandidate(id, input) {
+      return requestJson({ config, path: `/api/v1/topic-inbox/candidates/${encodeURIComponent(id)}/decision`, schema: TopicCandidateDecisionOutputSchema, body: TopicCandidateDecisionInputSchema.parse(input) });
+    },
+
+    async mergeTopics(id, input) {
+      return requestJson({ config, path: `/api/v1/topic-inbox/topics/${encodeURIComponent(id)}/merge`, schema: TopicInboxMergeOutputSchema, body: TopicInboxMergeInputSchema.parse(input) });
+    },
+
+    async splitTopic(id, input) {
+      return requestJson({ config, path: `/api/v1/topic-inbox/topics/${encodeURIComponent(id)}/split`, schema: TopicInboxSplitOutputSchema, body: TopicInboxSplitInputSchema.parse(input) });
+    },
+
+    async topicEvidence(id, input) {
+      const parsed = TopicInboxEvidenceInputSchema.parse(input);
+      return requestJson({ config, path: withQuery(`/api/v1/topic-inbox/topics/${encodeURIComponent(id)}/evidence`, { namespace: JSON.stringify(parsed.namespace), limit: parsed.limit }), schema: TopicInboxEvidenceOutputSchema });
+    },
 
     async listPanelItems(input) {
       return requestJson({ config, path: withQuery("/api/v1/panel/items", PanelItemsInputSchema.parse(input)), schema: PanelItemsOutputSchema });
@@ -415,6 +476,12 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
     async createProjectWorkItem() { throw unavailable(); },
     async updateProjectWorkItem() { throw unavailable(); },
     async setProjectFocus() { throw unavailable(); },
+    async listTopicInbox() { throw unavailable(); },
+    async refreshTopicInbox() { throw unavailable(); },
+    async decideTopicCandidate() { throw unavailable(); },
+    async mergeTopics() { throw unavailable(); },
+    async splitTopic() { throw unavailable(); },
+    async topicEvidence() { throw unavailable(); },
     async listPanelItems() {
       throw unavailable();
     },
