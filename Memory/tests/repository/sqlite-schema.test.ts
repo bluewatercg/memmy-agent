@@ -382,8 +382,8 @@ describe("repository sqlite schema contract", () => {
     }
   });
 
-  it("migrates schema v5 to v6 while preserving runtime data and backup", () => {
-    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v5-project-context-migration-"));
+  it("migrates schema v6 to v7 while preserving runtime data and backup", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-repo-v6-project-topic-migration-"));
     const dbPath = join(root, "memory.sqlite");
     const backupPath = `${dbPath}.pre-v${SCHEMA_VERSION}.bak`;
     try {
@@ -407,12 +407,13 @@ describe("repository sqlite schema contract", () => {
       `).run("old-vector-memory", "2026-01-01T00:00:00.000Z");
       const beforeCounts = memoryLayerCounts(seeded.db);
       seeded.db.exec(`
-        DROP TABLE project_context_facts;
-        DROP TABLE project_context_work_items;
-        DROP TABLE project_context_goals;
+        DROP TABLE project_topic_analysis_runs;
+        DROP TABLE project_topic_candidates;
+        DROP TABLE project_topic_evidence;
+        DROP TABLE project_topics;
         DELETE FROM schema_migrations;
         INSERT INTO schema_migrations (id, version, applied_at, checksum)
-        VALUES ('005_processing_state', 5, '2026-01-01T00:00:00.000Z', 'v5');
+        VALUES ('006_project_context', 6, '2026-01-01T00:00:00.000Z', 'v6');
       `);
       seeded.close();
 
@@ -439,6 +440,10 @@ describe("repository sqlite schema contract", () => {
         "project_topic_candidates",
         "project_topic_analysis_runs"
       ]));
+      expect((migrated.db.prepare(`PRAGMA index_list(project_topics)`).all() as Array<{ name: string }>).map((index) => index.name)).toContain("idx_project_topics_namespace_status_updated");
+      expect((migrated.db.prepare(`PRAGMA index_list(project_topic_evidence)`).all() as Array<{ name: string }>).map((index) => index.name)).toContain("idx_project_topic_evidence_topic");
+      expect((migrated.db.prepare(`PRAGMA index_list(project_topic_candidates)`).all() as Array<{ name: string }>).map((index) => index.name)).toContain("idx_project_topic_candidates_topic_status");
+      expect((migrated.db.prepare(`PRAGMA index_list(project_topic_analysis_runs)`).all() as Array<{ name: string }>).map((index) => index.name)).toEqual(expect.arrayContaining(["idx_project_topic_analysis_namespace", "sqlite_autoindex_project_topic_analysis_runs_2"]));
       expect((migrated.db.prepare(`PRAGMA index_list(project_context_goals)`).all() as Array<{ name: string }>)
         .map((index) => index.name)).toContain("uq_project_context_active_goal");
       expect((migrated.db.prepare(`PRAGMA index_list(project_context_work_items)`).all() as Array<{ name: string }>)
@@ -449,8 +454,8 @@ describe("repository sqlite schema contract", () => {
 
       const backup = new Database(backupPath, { readonly: true });
       expect(backup.prepare(`SELECT id, version FROM schema_migrations`).get()).toEqual({
-        id: "005_processing_state",
-        version: 5
+        id: "006_project_context",
+        version: 6
       });
       expect(backup.prepare(`SELECT id FROM memories`).get()).toEqual({ id: "old-vector-memory" });
       expect(backup.prepare(`SELECT id FROM sessions`).get()).toEqual({ id: "v5-session-preserved" });
@@ -459,7 +464,7 @@ describe("repository sqlite schema contract", () => {
         state: "ready"
       });
       expect((backup.prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'project_context_%'`
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'project_topic%'`
       ).all() as Array<{ name: string }>)).toEqual([]);
       expect(backup.pragma("integrity_check", { simple: true })).toBe("ok");
       backup.close();

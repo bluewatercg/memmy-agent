@@ -40,3 +40,31 @@ completed successfully
 
 ## Concerns
 None.
+
+## Fix Round 1
+
+Addressed review findings by enforcing L1 and namespace evidence validation, atomic candidate supersession and analysis-run idempotency, strictly monotonic optimistic versions, consistent bundle parent/child scoping, and explicit v6-to-v7 index migration coverage. Reformatted the topic repository methods.
+
+Focused command:
+
+```bash
+cd Memory
+npm test -- --run tests/repository/sqlite-schema.test.ts tests/repository/project-topic-repository.test.ts tests/service/bundle/bundle.test.ts
+```
+
+Output:
+
+```text
+Test Files  3 passed (3)
+Tests       13 passed (13)
+Duration    10.83s
+```
+
+Type check:
+
+```bash
+cd Memory
+npm run typecheck -- --pretty false
+```
+
+Output: completed successfully.

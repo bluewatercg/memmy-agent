@@ -76,6 +76,30 @@ describe("MemoryService / bundle", () => {
     expect([...changeNamespaces].some((namespace) => String(namespace).includes("workspace-export-a"))).toBe(true);
     expect([...changeNamespaces].some((namespace) => String(namespace).includes("workspace-export-b"))).toBe(false);
 
+
+    const namespaceIdA = `local:${namespaceA.workspaceId}`;
+    const namespaceIdB = `local:${namespaceB.workspaceId}`;
+    db.db.prepare(`INSERT INTO project_topics (id, namespace_id, title, summary, status, version, created_at, updated_at) VALUES (?, ?, 'A', '', 'active', 1, ?, ?), (?, ?, 'B', '', 'active', 1, ?, ?)`)
+      .run("topic-export-a", namespaceIdA, "2026-08-11T00:00:00.000Z", "2026-08-11T00:00:00.000Z", "topic-export-b", namespaceIdB, "2026-08-11T00:00:00.000Z", "2026-08-11T00:00:00.000Z");
+    db.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, created_at) VALUES (?, ?, ?, ?, 'source', '', ?), (?, ?, ?, ?, 'source', '', ?)`)
+      .run("evidence-export-a", "topic-export-a", namespaceIdA, completeA.l1MemoryId, "2026-08-11T00:00:00.000Z", "evidence-inconsistent", "topic-export-a", namespaceIdA, completeB.l1MemoryId, "2026-08-11T00:00:00.000Z");
+    const topicBundle = service.exportBundle({ namespace: namespaceA });
+    expect((topicBundle.tables.project_topics ?? []).map((row) => row.id)).toEqual(["topic-export-a"]);
+    expect((topicBundle.tables.project_topic_evidence ?? []).map((row) => row.id)).toEqual(["evidence-export-a"]);
+
+    const inconsistentBundle = structuredClone(topicBundle);
+    inconsistentBundle.tables.project_topic_evidence = inconsistentBundle.tables.project_topic_evidence ?? [];
+    inconsistentBundle.tables.project_topic_evidence.push({
+      id: "evidence-import-invalid",
+      topic_id: "topic-export-a",
+      namespace_id: namespaceIdA,
+      memory_id: completeB.l1MemoryId,
+      role: "source",
+      summary: "",
+      metadata_json: "{}",
+      created_at: "2026-08-11T00:00:00.000Z"
+    });
+    expect(() => service.importBundle({ namespace: namespaceA, bundle: inconsistentBundle })).toThrow(/outside the requested namespace/);
     db.close();
   });
 });

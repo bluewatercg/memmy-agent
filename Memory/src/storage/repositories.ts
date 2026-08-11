@@ -1,4 +1,5 @@
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
+import { namespaceForMemory, namespaceIdFromContext } from "../service/namespace/namespace-scope.js";
 import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus } from "../types.js";
 import type Database from "better-sqlite3";
 import type {
@@ -3619,25 +3620,94 @@ export class RuntimeRepository {
 }
 export class ProjectTopicRepository {
   constructor(private readonly db: Database.Database) {}
-  insertTopic(t: ProjectTopicRecord): ProjectTopicRecord { this.db.prepare(`INSERT INTO project_topics (id,namespace_id,project_id,title,summary,status,version,source_memory_ids_json,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(t.id,t.namespaceId,t.projectId??null,t.title,t.summary,t.status,t.version,toJson(t.sourceMemoryIds),toJson(t.metadata),t.createdAt,t.updatedAt); return t; }
-  getTopic(id: string, namespaceId: string): ProjectTopicRecord | undefined { return topicFromSql(this.db.prepare(`SELECT * FROM project_topics WHERE id=? AND namespace_id=?`).get(id,namespaceId) as TopicSqlRow|undefined); }
-  listTopics(namespaceId: string, status?: ProjectTopicStatus[]): ProjectTopicRecord[] { const q=status?.length?`SELECT * FROM project_topics WHERE namespace_id=? AND status IN (${status.map(()=>"?").join(",")}) ORDER BY updated_at DESC`:`SELECT * FROM project_topics WHERE namespace_id=? ORDER BY updated_at DESC`; return (this.db.prepare(q).all(namespaceId,...(status??[])) as TopicSqlRow[]).map((r)=>topicFromSql(r)!); }
-  updateTopic(t: ProjectTopicRecord, expectedVersion: number): ProjectTopicRecord { const r=this.db.prepare(`UPDATE project_topics SET project_id=?,title=?,summary=?,status=?,version=?,source_memory_ids_json=?,metadata_json=?,updated_at=? WHERE id=? AND namespace_id=? AND version=?`).run(t.projectId??null,t.title,t.summary,t.status,t.version,toJson(t.sourceMemoryIds),toJson(t.metadata),t.updatedAt,t.id,t.namespaceId,expectedVersion); if(!r.changes) throw new Error(`project topic version conflict: ${t.id}`); return t; }
-  attachEvidence(e: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord { const old=this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id=? AND memory_id=? AND namespace_id=?`).get(e.topicId,e.memoryId,e.namespaceId) as EvidenceSqlRow|undefined; if(old) return evidenceFromSql(old); if(!this.getTopic(e.topicId,e.namespaceId)) throw new Error("project topic namespace mismatch"); this.db.prepare(`INSERT INTO project_topic_evidence (id,topic_id,namespace_id,memory_id,role,summary,metadata_json,created_at) VALUES (?,?,?,?,?,?,?,?)`).run(e.id,e.topicId,e.namespaceId,e.memoryId,e.role,e.summary,toJson(e.metadata),e.createdAt); return e; }
-  listEvidence(topicId: string, namespaceId: string): ProjectTopicEvidenceRecord[] { return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id=? AND namespace_id=? ORDER BY created_at`).all(topicId,namespaceId) as EvidenceSqlRow[]).map(evidenceFromSql); }
-  insertCandidate(c: ProjectTopicCandidateRecord): ProjectTopicCandidateRecord { if(!this.getTopic(c.topicId,c.namespaceId)) throw new Error("project topic namespace mismatch"); if(c.supersedesId) this.db.prepare(`UPDATE project_topic_candidates SET status='superseded',updated_at=? WHERE id=? AND namespace_id=?`).run(c.updatedAt,c.supersedesId,c.namespaceId); this.db.prepare(`INSERT INTO project_topic_candidates (id,topic_id,namespace_id,title,conclusion,proposed_layer,status,version,supersedes_id,source_memory_ids_json,metadata_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(c.id,c.topicId,c.namespaceId,c.title,c.conclusion,c.proposedLayer,c.status,c.version,c.supersedesId??null,toJson(c.sourceMemoryIds),toJson(c.metadata),c.createdAt,c.updatedAt); return c; }
-  listCandidates(topicId: string, namespaceId: string): ProjectTopicCandidateRecord[] { return (this.db.prepare(`SELECT * FROM project_topic_candidates WHERE topic_id=? AND namespace_id=? ORDER BY updated_at DESC`).all(topicId,namespaceId) as CandidateSqlRow[]).map(candidateFromSql); }
-  updateCandidate(c: ProjectTopicCandidateRecord, expectedVersion: number): ProjectTopicCandidateRecord { const r=this.db.prepare(`UPDATE project_topic_candidates SET title=?,conclusion=?,proposed_layer=?,status=?,version=?,supersedes_id=?,source_memory_ids_json=?,metadata_json=?,updated_at=? WHERE id=? AND namespace_id=? AND version=?`).run(c.title,c.conclusion,c.proposedLayer,c.status,c.version,c.supersedesId??null,toJson(c.sourceMemoryIds),toJson(c.metadata),c.updatedAt,c.id,c.namespaceId,expectedVersion); if(!r.changes) throw new Error(`project topic candidate version conflict: ${c.id}`); return c; }
-  recordAnalysisRun(r: ProjectTopicAnalysisRunRecord): ProjectTopicAnalysisRunRecord { return this.findAnalysisRun(r.namespaceId,r.inputHash) ?? (this.db.prepare(`INSERT INTO project_topic_analysis_runs (id,namespace_id,input_hash,topic_id,status,result_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`).run(r.id,r.namespaceId,r.inputHash,r.topicId??null,r.status,toJson(r.result),r.createdAt,r.updatedAt),r); }
-  findAnalysisRun(namespaceId: string,inputHash: string): ProjectTopicAnalysisRunRecord|undefined { const r=this.db.prepare(`SELECT * FROM project_topic_analysis_runs WHERE namespace_id=? AND input_hash=?`).get(namespaceId,inputHash) as RunSqlRow|undefined; return r?{id:r.id,namespaceId:r.namespace_id,inputHash:r.input_hash,topicId:r.topic_id??undefined,status:r.status,result:parseJson(r.result_json,{}),createdAt:r.created_at,updatedAt:r.updated_at}:undefined; }
+
+  insertTopic(topic: ProjectTopicRecord): ProjectTopicRecord {
+    this.db.prepare(`INSERT INTO project_topics (id, namespace_id, project_id, title, summary, status, version, source_memory_ids_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(topic.id, topic.namespaceId, topic.projectId ?? null, topic.title, topic.summary, topic.status, topic.version, toJson(topic.sourceMemoryIds), toJson(topic.metadata), topic.createdAt, topic.updatedAt);
+    return topic;
+  }
+
+  getTopic(id: string, namespaceId: string): ProjectTopicRecord | undefined {
+    return topicFromSql(this.db.prepare(`SELECT * FROM project_topics WHERE id = ? AND namespace_id = ?`).get(id, namespaceId) as TopicSqlRow | undefined);
+  }
+
+  listTopics(namespaceId: string, status?: ProjectTopicStatus[]): ProjectTopicRecord[] {
+    const sql = status?.length
+      ? `SELECT * FROM project_topics WHERE namespace_id = ? AND status IN (${status.map(() => "?").join(", ")}) ORDER BY updated_at DESC`
+      : `SELECT * FROM project_topics WHERE namespace_id = ? ORDER BY updated_at DESC`;
+    return (this.db.prepare(sql).all(namespaceId, ...(status ?? [])) as TopicSqlRow[]).map((row) => topicFromSql(row)!);
+  }
+
+  updateTopic(topic: ProjectTopicRecord, expectedVersion: number): ProjectTopicRecord {
+    if (topic.version !== expectedVersion + 1) throw new Error(`project topic version must advance by one: ${topic.id}`);
+    const result = this.db.prepare(`UPDATE project_topics SET project_id = ?, title = ?, summary = ?, status = ?, version = ?, source_memory_ids_json = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`)
+      .run(topic.projectId ?? null, topic.title, topic.summary, topic.status, topic.version, toJson(topic.sourceMemoryIds), toJson(topic.metadata), topic.updatedAt, topic.id, topic.namespaceId, expectedVersion);
+    if (!result.changes) throw new Error(`project topic version conflict: ${topic.id}`);
+    return topic;
+  }
+
+  attachEvidence(evidence: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord {
+    if (!this.getTopic(evidence.topicId, evidence.namespaceId)) throw new Error("project topic namespace mismatch");
+    const memory = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
+    if (!memory || memory.memory_layer !== "L1") throw new Error("project topic evidence must reference an L1 memory");
+    if (namespaceIdFromContext(namespaceForMemory(memoryFromSql(memory))) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
+    this.db.prepare(`INSERT OR IGNORE INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);
+    const stored = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND memory_id = ? AND namespace_id = ?`).get(evidence.topicId, evidence.memoryId, evidence.namespaceId) as EvidenceSqlRow;
+    return evidenceFromSql(stored);
+  }
+
+  listEvidence(topicId: string, namespaceId: string): ProjectTopicEvidenceRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? ORDER BY created_at`).all(topicId, namespaceId) as EvidenceSqlRow[]).map(evidenceFromSql);
+  }
+
+  insertCandidate(candidate: ProjectTopicCandidateRecord): ProjectTopicCandidateRecord {
+    return this.db.transaction(() => {
+      if (!this.getTopic(candidate.topicId, candidate.namespaceId)) throw new Error("project topic namespace mismatch");
+      if (candidate.supersedesId) {
+        const result = this.db.prepare(`UPDATE project_topic_candidates SET status = 'superseded', updated_at = ? WHERE id = ? AND topic_id = ? AND namespace_id = ?`)
+          .run(candidate.updatedAt, candidate.supersedesId, candidate.topicId, candidate.namespaceId);
+        if (!result.changes) throw new Error("project topic candidate predecessor mismatch");
+      }
+      this.db.prepare(`INSERT INTO project_topic_candidates (id, topic_id, namespace_id, title, conclusion, proposed_layer, status, version, supersedes_id, source_memory_ids_json, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(candidate.id, candidate.topicId, candidate.namespaceId, candidate.title, candidate.conclusion, candidate.proposedLayer, candidate.status, candidate.version, candidate.supersedesId ?? null, toJson(candidate.sourceMemoryIds), toJson(candidate.metadata), candidate.createdAt, candidate.updatedAt);
+      return candidate;
+    })();
+  }
+
+  listCandidates(topicId: string, namespaceId: string): ProjectTopicCandidateRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_candidates WHERE topic_id = ? AND namespace_id = ? ORDER BY updated_at DESC`).all(topicId, namespaceId) as CandidateSqlRow[]).map(candidateFromSql);
+  }
+
+  updateCandidate(candidate: ProjectTopicCandidateRecord, expectedVersion: number): ProjectTopicCandidateRecord {
+    if (candidate.version !== expectedVersion + 1) throw new Error(`project topic candidate version must advance by one: ${candidate.id}`);
+    const result = this.db.prepare(`UPDATE project_topic_candidates SET title = ?, conclusion = ?, proposed_layer = ?, status = ?, version = ?, supersedes_id = ?, source_memory_ids_json = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND topic_id = ? AND namespace_id = ? AND version = ?`)
+      .run(candidate.title, candidate.conclusion, candidate.proposedLayer, candidate.status, candidate.version, candidate.supersedesId ?? null, toJson(candidate.sourceMemoryIds), toJson(candidate.metadata), candidate.updatedAt, candidate.id, candidate.topicId, candidate.namespaceId, expectedVersion);
+    if (!result.changes) throw new Error(`project topic candidate version conflict: ${candidate.id}`);
+    return candidate;
+  }
+
+  recordAnalysisRun(run: ProjectTopicAnalysisRunRecord): ProjectTopicAnalysisRunRecord {
+    this.db.prepare(`INSERT OR IGNORE INTO project_topic_analysis_runs (id, namespace_id, input_hash, topic_id, status, result_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(run.id, run.namespaceId, run.inputHash, run.topicId ?? null, run.status, toJson(run.result), run.createdAt, run.updatedAt);
+    return this.findAnalysisRun(run.namespaceId, run.inputHash)!;
+  }
+
+  findAnalysisRun(namespaceId: string, inputHash: string): ProjectTopicAnalysisRunRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_analysis_runs WHERE namespace_id = ? AND input_hash = ?`).get(namespaceId, inputHash) as RunSqlRow | undefined;
+    return row ? analysisRunFromSql(row) : undefined;
+  }
 }
-interface TopicSqlRow { id:string; namespace_id:string; project_id:string|null; title:string; summary:string; status:ProjectTopicStatus; version:number; source_memory_ids_json:string; metadata_json:string; created_at:string; updated_at:string }
-interface EvidenceSqlRow { id:string; topic_id:string; namespace_id:string; memory_id:string; role:string; summary:string; metadata_json:string; created_at:string }
-interface CandidateSqlRow extends EvidenceSqlRow { title:string; conclusion:string; proposed_layer:"L2"|"L3"|"Skill"; status:ProjectTopicCandidateRecord["status"]; version:number; supersedes_id:string|null; source_memory_ids_json:string; updated_at:string }
-interface RunSqlRow { id:string; namespace_id:string; input_hash:string; topic_id:string|null; status:string; result_json:string; created_at:string; updated_at:string }
-function topicFromSql(r:TopicSqlRow|undefined):ProjectTopicRecord|undefined { return r?{id:r.id,namespaceId:r.namespace_id,projectId:r.project_id??undefined,title:r.title,summary:r.summary,status:r.status,version:r.version,sourceMemoryIds:asStringArray(parseJson(r.source_memory_ids_json,[])),metadata:parseJson(r.metadata_json,{}),createdAt:r.created_at,updatedAt:r.updated_at}:undefined; }
-function evidenceFromSql(r:EvidenceSqlRow):ProjectTopicEvidenceRecord { return {id:r.id,topicId:r.topic_id,namespaceId:r.namespace_id,memoryId:r.memory_id,role:r.role,summary:r.summary,metadata:parseJson(r.metadata_json,{}),createdAt:r.created_at}; }
-function candidateFromSql(r:CandidateSqlRow):ProjectTopicCandidateRecord { return {id:r.id,topicId:r.topic_id,namespaceId:r.namespace_id,title:r.title,conclusion:r.conclusion,proposedLayer:r.proposed_layer,status:r.status,version:r.version,supersedesId:r.supersedes_id??undefined,sourceMemoryIds:asStringArray(parseJson(r.source_memory_ids_json,[])),metadata:parseJson(r.metadata_json,{}),createdAt:r.created_at,updatedAt:r.updated_at}; }
+
+interface TopicSqlRow { id: string; namespace_id: string; project_id: string | null; title: string; summary: string; status: ProjectTopicStatus; version: number; source_memory_ids_json: string; metadata_json: string; created_at: string; updated_at: string }
+interface EvidenceSqlRow { id: string; topic_id: string; namespace_id: string; memory_id: string; role: string; summary: string; metadata_json: string; created_at: string }
+interface CandidateSqlRow extends EvidenceSqlRow { title: string; conclusion: string; proposed_layer: "L2" | "L3" | "Skill"; status: ProjectTopicCandidateRecord["status"]; version: number; supersedes_id: string | null; source_memory_ids_json: string; updated_at: string }
+interface RunSqlRow { id: string; namespace_id: string; input_hash: string; topic_id: string | null; status: string; result_json: string; created_at: string; updated_at: string }
+
+function topicFromSql(row: TopicSqlRow | undefined): ProjectTopicRecord | undefined { return row ? { id: row.id, namespaceId: row.namespace_id, projectId: row.project_id ?? undefined, title: row.title, summary: row.summary, status: row.status, version: row.version, sourceMemoryIds: asStringArray(parseJson(row.source_memory_ids_json, [])), metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at } : undefined; }
+function evidenceFromSql(row: EvidenceSqlRow): ProjectTopicEvidenceRecord { return { id: row.id, topicId: row.topic_id, namespaceId: row.namespace_id, memoryId: row.memory_id, role: row.role, summary: row.summary, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at }; }
+function candidateFromSql(row: CandidateSqlRow): ProjectTopicCandidateRecord { return { id: row.id, topicId: row.topic_id, namespaceId: row.namespace_id, title: row.title, conclusion: row.conclusion, proposedLayer: row.proposed_layer, status: row.status, version: row.version, supersedesId: row.supersedes_id ?? undefined, sourceMemoryIds: asStringArray(parseJson(row.source_memory_ids_json, [])), metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function analysisRunFromSql(row: RunSqlRow): ProjectTopicAnalysisRunRecord { return { id: row.id, namespaceId: row.namespace_id, inputHash: row.input_hash, topicId: row.topic_id ?? undefined, status: row.status, result: parseJson(row.result_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 
 export class ProjectContextRepository {
   constructor(private readonly db: Database.Database) {}

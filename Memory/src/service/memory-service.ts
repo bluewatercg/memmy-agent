@@ -3091,8 +3091,11 @@ function scopeBundleTables(
     if (table === "artifacts") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
     if (table === "feedback" || table === "decision_repairs" || table === "evolution_jobs") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, ["l1_memory_id", "target_memory_id"]);
     if (table === "recall_events") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) || rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
-    if (table === "project_topics" || table === "project_topic_analysis_runs") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized);
-    if (table === "project_topic_evidence" || table === "project_topic_candidates") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && (table === "project_topic_evidence" ? memoryIds.has(stringField(row, "memory_id") ?? "") || topicIds.has(stringField(row, "topic_id") ?? "") : topicIds.has(stringField(row, "topic_id") ?? ""));
+    if (table === "project_topics") return topicIds.has(stringField(row, "id") ?? "");
+    if (table === "project_topic_analysis_runs") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && (!stringField(row, "topic_id") || topicIds.has(stringField(row, "topic_id")!));
+    if (table === "project_topic_evidence") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && topicIds.has(stringField(row, "topic_id") ?? "") && memoryIds.has(stringField(row, "memory_id") ?? "");
+    if (table === "project_topic_candidates") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && topicIds.has(stringField(row, "topic_id") ?? "");
+    return false;
   });
 
   const result: Record<string, Array<Record<string, unknown>>> = {};
