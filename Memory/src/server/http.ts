@@ -759,7 +759,7 @@ async function routeRequest(
     requirePanelWrite(principal);
     const request = parseShared(TopicInboxRefreshInputSchema, body);
     assertNamespaceScope(request.namespace, principal.namespace);
-    return service.idempotent("topic-inbox.refresh", request, request, () => service.refreshProjectTopicInbox(request.namespace));
+    return service.idempotent("topic-inbox.refresh", request, request, () => service.refreshProjectTopicInbox(request.namespace), { exactReplay: true });
   }
   const topicDecision = match(path, /^\/api\/v1\/topic-inbox\/candidates\/([^/]+)\/decision$/);
   if (method === "POST" && topicDecision) {
@@ -772,7 +772,7 @@ async function routeRequest(
       return service.idempotent("topic-inbox.candidate.decision", request, { candidateId, request }, async () => {
         const result = await service.decideProjectTopicCandidate(request.namespace, candidateId, decision);
         return { candidate: topicCandidateCard(result.candidate), memoryId: result.memory?.id, auditId: result.auditId, serverTime: new Date().toISOString() };
-      });
+      }, { exactReplay: true });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic candidate version conflict", 409, undefined, { candidateId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;
@@ -784,8 +784,11 @@ async function routeRequest(
     const request = parseShared(TopicInboxMergeInputSchema, body);
     assertNamespaceScope(request.namespace, principal.namespace);
     try {
-      const result = service.mergeProjectTopics(request.namespace, decodeMatchSegment(topicMerge, 1), { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
-      return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
+      const topicId = decodeMatchSegment(topicMerge, 1);
+      return service.idempotent("topic-inbox.topic.merge", request, { topicId, request }, () => {
+        const result = service.mergeProjectTopics(request.namespace, topicId, { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
+        return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
+      }, { exactReplay: true });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;
@@ -797,9 +800,12 @@ async function routeRequest(
     const request = parseShared(TopicInboxSplitInputSchema, body);
     assertNamespaceScope(request.namespace, principal.namespace);
     try {
-      const result = service.splitProjectTopic(request.namespace, decodeMatchSegment(topicSplit, 1), { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
-      const view = service.listProjectTopicInbox(request.namespace);
-      return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
+      const topicId = decodeMatchSegment(topicSplit, 1);
+      return service.idempotent("topic-inbox.topic.split", request, { topicId, request }, () => {
+        const result = service.splitProjectTopic(request.namespace, topicId, { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
+        const view = service.listProjectTopicInbox(request.namespace);
+        return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
+      }, { exactReplay: true });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;

@@ -157,6 +157,11 @@ describe("HttpMemoryClient", () => {
       source: "codex"
     });
   });
+  it("parses structured topic conflicts from upstream", async () => {
+    const baseUrl = await startServer(async (_request, response) => sendJson(response, { error: { code: "conflict", message: "topic version conflict", requestId: "upstream" }, details: { topicId: "topic-1", currentVersion: 4, currentStatus: "active" } }, 409));
+    const client = createHttpMemoryClient({ baseUrl, token: "memory-token", timeoutMs: 500, maxRetries: 0 });
+    await expect(client.mergeTopics("topic-1", { namespace: { source: "codex", profileId: "p", projectId: "project" }, targetTopicId: "topic-2", expectedVersion: 1, targetExpectedVersion: 1 })).rejects.toMatchObject({ code: "conflict", status: 409, details: { topicId: "topic-1", currentVersion: 4, currentStatus: "active" } });
+  });
   it("uses the exact methods, paths, bodies, query, and response schemas for project context", async () => {
     const requests: Array<{ method: string; url: URL; body: unknown }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -446,8 +451,8 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   return body ? JSON.parse(body) : undefined;
 }
 
-function sendJson(response: ServerResponse, body: unknown): void {
-  response.writeHead(200, { "content-type": "application/json" });
+function sendJson(response: ServerResponse, body: unknown, status = 200): void {
+  response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(body));
 }
 

@@ -59,12 +59,11 @@ describe("createMemosSqliteMemoryClient", { timeout: 10_000 }, () => {
     expect(state.goals[0]?.title).toBe("Task 4");
   });
 
-  it("returns explicit 503 for embedded topic inbox reads", async () => {
-    const client = createMemosSqliteMemoryClient({ sources: [] });
-    const namespace = { source: "codex", profileId: "default", projectId: "project-4" };
-    for (const operation of [client.listTopicInbox({ namespace }), client.topicEvidence("topic-1", { namespace, limit: 20 })]) {
-      await expect(operation).rejects.toMatchObject({ code: "memory_layer_unavailable", status: 503, message: "topic inbox requires the Memory service topic repository" });
-    }
+  it("returns explicit 503 for every embedded topic inbox operation", async () => {
+    const client = createMemosSqliteMemoryClient({ sources: [] }); const namespace = { source: "codex", profileId: "default", projectId: "project-4" };
+    const operations = [client.listTopicInbox({ namespace }), client.refreshTopicInbox({ namespace }), client.decideTopicCandidate("candidate", { namespace, action: "reject", expectedVersion: 1 }), client.mergeTopics("source", { namespace, targetTopicId: "target", expectedVersion: 1, targetExpectedVersion: 1 }), client.splitTopic("source", { namespace, expectedVersion: 1, title: "new", summary: "", evidenceMemoryIds: ["memory"] }), client.topicEvidence("topic-1", { namespace, limit: 20 })];
+    expect(operations).toHaveLength(6);
+    for (const operation of operations) await expect(operation).rejects.toMatchObject({ code: "memory_layer_unavailable", status: 503, message: "topic inbox requires the Memory service topic repository" });
   });
   it("preserves Span memory kinds in panel responses", async () => {
     const dbPath = createMemoryDatabase({

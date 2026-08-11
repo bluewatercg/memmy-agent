@@ -62,3 +62,12 @@ Exact fresh verification:
 - Embedded list/evidence exact `memory_layer_unavailable` 503 status/message assertion passes.
 - Fresh verification: `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 2 files / 35 tests.
 - Fresh verification: `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/outbound/memory-client/tests/memos-sqlite-memory-client.test.ts -t "topic|structured|explicit 503" src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts && npm run typecheck` -> PASS, 4 files / 6 focused tests (95 skipped by filter), backend typecheck and prerequisite builds pass.
+
+## Fix Round 3
+
+- Standard root/backend build, typecheck, and test prerequisites now build local API contracts before Memory while retaining Memory's version-sync lifecycle.
+- Restored legacy `duplicate: true` idempotency replay by default; only strict topic routes request exact stored replay. Merge and split now store complete exact HTTP responses under their request identity.
+- Added structured upstream conflict parsing, PanelService four-mutation provenance, and all-six embedded topic operation 503 regressions.
+- `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 3 files / 38 tests.
+- `cd App/backend && npx vitest run src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/outbound/memory-client/tests/memos-sqlite-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts src/services/tests/agent-runtime-services.test.ts -t "topic|structured|provenance" && npm run typecheck` -> PASS, 4 files / 6 focused tests; 44 skipped by filter; typecheck passed.
+- Clean standard script proof: `mv App/backend/local-api-contracts/dist /tmp/contracts-dist-r3 && npm --prefix App/backend run typecheck && rm -rf /tmp/contracts-dist-r3` -> PASS; the unmodified standard backend script rebuilt contracts first, then Memory with version sync.

@@ -121,7 +121,7 @@ describe("MemoryService / REST contract", () => {
       const duplicateGoal = await fetch(`${base}/api/v1/project-context/goals/propose`, { method: "POST", headers, body: JSON.stringify(goalInput) });
       const duplicateGoalBody = await duplicateGoal.json() as { id: string; duplicate?: boolean };
       expect(duplicateGoalBody.id).toBe(goal.id);
-      expect(duplicateGoalBody).toEqual(goal);
+      expect(duplicateGoalBody).toEqual({ ...goal, duplicate: true });
       const state = await fetch(`${base}/api/v1/project-context/state?namespace=${encodeURIComponent(JSON.stringify(namespace))}`, { headers: { authorization: "Bearer memory-token" } });
       expect(state.status).toBe(200);
       expect((await state.json()).goals).toHaveLength(1);

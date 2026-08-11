@@ -53,6 +53,14 @@ describe("agent runtime services", () => {
     await panelService.memoryApiLogs({ limit: 20, offset: 0 }, runtimeCtx());
   });
 
+  it("enriches every topic mutation with runtime provenance accepted by shared schemas", async () => {
+    const calls: unknown[] = [];
+    const memoryClient = { ...createClient(), async refreshTopicInbox(input: unknown) { calls.push(input); return {} as never; }, async decideTopicCandidate(_id: string, input: unknown) { calls.push(input); return {} as never; }, async mergeTopics(_id: string, input: unknown) { calls.push(input); return {} as never; }, async splitTopic(_id: string, input: unknown) { calls.push(input); return {} as never; } };
+    const panel = createPanelService({ memoryClient }); const namespace = { source: "codex", profileId: "p", projectId: "project" }; const ctx = runtimeCtx();
+    await panel.refreshTopicInbox({ namespace }, ctx); await panel.decideTopicCandidate("candidate", { namespace, action: "reject", expectedVersion: 1 }, ctx); await panel.mergeTopics("source", { namespace, targetTopicId: "target", expectedVersion: 1, targetExpectedVersion: 1 }, ctx); await panel.splitTopic("source", { namespace, expectedVersion: 1, title: "new", summary: "", evidenceMemoryIds: ["memory"] }, ctx);
+    expect(calls).toHaveLength(4); for (const input of calls) expect(input).toMatchObject({ adapterId: ctx.adapterId, requestId: ctx.requestId, source: "memmy-agent" });
+  });
+
   it("treats old memory runtimes that route logs as memory id as empty logs", async () => {
     const memoryClient = {
       ...createClient(),

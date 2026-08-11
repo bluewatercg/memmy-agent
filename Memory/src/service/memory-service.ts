@@ -715,7 +715,8 @@ export class MemoryService {
     operation: string,
     request: RequestEnvelope,
     fingerprint: unknown,
-    run: () => T | Promise<T>
+    run: () => T | Promise<T>,
+    options: { exactReplay?: boolean } = {}
   ): Promise<T> {
     if (!this.memoryAddEnabled()) {
       return run();
@@ -732,7 +733,7 @@ export class MemoryService {
       if (existing.requestHash !== requestHash) {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
-      return existing.response as T;
+      return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T;
     }
     const response = await run();
     this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
