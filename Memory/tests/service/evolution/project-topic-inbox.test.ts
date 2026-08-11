@@ -118,4 +118,26 @@ describe("ProjectTopicInbox", () => {
     expect(candidates.filter((item) => item.status === "pending").map((item) => item.metadata.stableKey).sort()).toEqual(["backend", "frontend"]);
     expect(candidates.find((item) => item.metadata.stableKey === "frontend" && item.status === "pending")?.supersedesId).toBeTruthy();
   });
+
+  it("rolls back approval memory and candidate writes when persistence fails", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "transactional approval", "approval-rollback");
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const source = repos.memories.get(memoryId)!;
+    const inbox = new ProjectTopicInboxService({
+      repos,
+      llm: topicLlm([{ topic: { title: "Approval", summary: "Transactional approval" }, candidates: [{ title: "Approve atomically", conclusion: "Persist approval atomically.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]),
+      buildMemory: () => ({ ...source, id: "rollback-l2", memoryLayer: "L2", memoryKey: "rollback-l2", memoryValue: "Persist approval atomically.", properties: { ...source.properties, internal_info: { ...source.properties.internal_info, memory_layer: "L2", memory_kind: "policy" } } }),
+      upsertMemory: (memory) => {
+        repos.memories.upsertByKey(memory);
+        throw new Error("injected approval persistence failure");
+      }
+    });
+    await inbox.ingest(memoryId);
+    const candidate = inbox.list(namespace).topics[0]!.candidates[0]!;
+    await expect(inbox.decide(namespace, candidate.id, { decision: "approve" })).rejects.toThrow("injected approval persistence failure");
+    expect(repos.memories.get("rollback-l2")).toBeUndefined();
+    expect(inbox.list(namespace).topics[0]!.candidates.find((item) => item.id === candidate.id)?.status).toBe("pending");
+  });
 });
