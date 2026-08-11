@@ -213,7 +213,6 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     try {
       const cursor = this.deps.repos.memories.eligibleL1SnapshotCursor(snapshotId);
       if (expectedCursor && expectedCursor !== cursor) {
-        this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
         throw new Error("topic refresh evidence cursor changed; retry refresh");
       }
       const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
