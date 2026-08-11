@@ -70,3 +70,33 @@ Duration  20.23s
 ### Concerns
 
 None. Snapshot storage is connection-private and released in `finally`; the unrelated untracked plan remains untouched.
+
+## Fix Round 2
+
+### Findings Addressed
+
+1. Captured rows retain snapshot content, but each row is revalidated against the live canonical namespace, L1 layer, activated status, and existence before analysis or persistence. Moved, archived, or deleted rows are skipped and never enter evidence or model input.
+2. Snapshot rows are inserted directly with `INSERT ... SELECT`; no full corpus is hydrated. Vector capture runs in bounded 250-ID keyset pages inside the same SQLite transaction/read snapshot as row capture. Traversal remains bounded keyset pagination.
+3. Snapshot row and vector capture share one database transaction. The refresh mutation seam proves later content changes do not alter captured analysis input while live eligibility changes still exclude persistence.
+4. Removing the final summary vector deletes `embeddingCentroid` while persisting the new centroid input hash.
+5. Centroid metadata is updated early only for a vector-only delta with an already successful semantic run. When semantic evidence changed, centroid metadata is staged inside the same transaction as validated analysis, topic/evidence/candidate writes, and successful run completion. Duplicate model slots leave topic metadata/version/evidence/candidates unchanged.
+
+### Exact Verification
+
+From `Memory`:
+
+```text
+$ npm run typecheck
+> tsc -p tsconfig.json --noEmit
+(exit 0)
+
+$ npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts
+Test Files  7 passed (7)
+Tests  64 passed (64)
+Duration  21.31s
+(exit 0)
+```
+
+### Concerns
+
+None. The unrelated untracked plan remains untouched.

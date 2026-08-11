@@ -137,9 +137,13 @@ describe("ProjectTopicInbox", () => {
     }, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item), refreshPageSize: 3 });
     await inbox.processRefresh({ source: "codex", profileId: "p", userId: "u", projectId: "project" });
 
+    const keptIds = capturedIds.slice(0, 3).concat(capturedIds[6]!);
     const evidenceIds = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics.flatMap((item) => item.evidence.map((evidence) => evidence.memoryId));
-    expect(evidenceIds.sort()).toEqual(capturedIds.sort());
-    expect(new Set(evidenceIds).size).toBe(capturedIds.length);
+    expect(evidenceIds.sort()).toEqual(keptIds.sort());
+    expect(new Set(evidenceIds).size).toBe(keptIds.length);
+    expect(seenValues.has(capturedIds[3]!)).toBe(false);
+    expect(seenValues.has(capturedIds[4]!)).toBe(false);
+    expect(seenValues.has(capturedIds[5]!)).toBe(false);
     expect(seenValues.get(capturedIds[6]!)).toBe(capturedValues.get(capturedIds[6]!));
     expect(pages).toBeGreaterThan(1);
   });
@@ -238,6 +242,39 @@ describe("ProjectTopicInbox", () => {
     expect(after.topic.version).toBe(before.topic.version);
     expect(after.topic.title).toBe("Vectors");
     expect(after.candidates).toEqual(before.candidates);
+  });
+
+  it("clears centroid when the last summary vector is removed", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "vector removal", "vector-removal");
+    repos.memories.updateMaintenance(attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [1, 0] }));
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Vectors", summary: "Vector removal" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    repos.memories.deleteVector(memoryId, "vec_summary");
+    await inbox.ingest(memoryId);
+    const metadata = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics[0]!.topic.metadata;
+    expect(metadata.embeddingCentroid).toBeUndefined();
+    expect(metadata.centroidInputHash).toBeTruthy();
+  });
+
+  it("leaves topic metadata and writes unchanged when changed semantic analysis is invalid", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "semantic rollback", "semantic-rollback");
+    repos.memories.updateMaintenance(attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [1, 0] }));
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Stable", summary: "Stable metadata" }, candidates: [] }, { topic: { title: "Invalid", summary: "Duplicate" }, candidates: [
+      { stableKey: "dup", title: "A", conclusion: "A", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] },
+      { stableKey: "dup", title: "B", conclusion: "B", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }
+    ] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const before = inbox.list(namespace).topics[0]!;
+    const changed = repos.memories.get(memoryId)!;
+    repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nsemantic change`, updatedAt: new Date().toISOString() });
+    repos.memories.updateMaintenance(attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [0, 1] }));
+    await expect(inbox.ingest(memoryId)).rejects.toThrow("duplicate topic candidate slot");
+    expect(inbox.list(namespace).topics[0]).toEqual(before);
   });
 
 

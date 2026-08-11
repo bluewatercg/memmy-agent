@@ -588,12 +588,32 @@ export class MemoryRepository {
     const snapshotId = newId("topic_refresh_snapshot");
     this.db.prepare(`CREATE TEMP TABLE IF NOT EXISTS project_topic_refresh_snapshot_rows (
       snapshot_id TEXT NOT NULL, memory_id TEXT NOT NULL, row_json TEXT NOT NULL,
-      vectors_json TEXT NOT NULL, PRIMARY KEY (snapshot_id, memory_id)
+      vectors_json TEXT NOT NULL DEFAULT '[]', PRIMARY KEY (snapshot_id, memory_id)
     ) WITHOUT ROWID`).run();
-    const memories = this.hydrateMany((this.db.prepare(`SELECT * FROM memories WHERE ${built.where}`).all(...built.params) as MemorySqlRow[]).map(memoryFromSql));
-    const insert = this.db.prepare(`INSERT INTO project_topic_refresh_snapshot_rows (snapshot_id, memory_id, row_json, vectors_json) VALUES (?, ?, ?, ?)`);
-    for (const memory of memories) insert.run(snapshotId, memory.id, toJson(memory), toJson(attachedMemoryVectorEntries(memory)));
-    return memories.length > 0 ? snapshotId : undefined;
+    return this.db.transaction(() => {
+      this.db.prepare(`INSERT INTO project_topic_refresh_snapshot_rows (snapshot_id, memory_id, row_json)
+        SELECT ?, id, json_object(
+          'id', id, 'timeline', timeline, 'userId', user_id, 'conversationId', conversation_id,
+          'sessionId', session_id, 'agentId', agent_id, 'appId', app_id, 'memoryType', memory_type,
+          'status', status, 'visibility', visibility, 'memoryKey', memory_key, 'memoryValue', memory_value,
+          'tags', json(tags_json), 'info', json(info_json), 'properties', json(properties_json),
+          'memoryLayer', memory_layer, 'contentHash', content_hash, 'version', version,
+          'createdAt', created_at, 'updatedAt', updated_at, 'deletedAt', deleted_at)
+        FROM memories WHERE ${built.where}`).run(snapshotId, ...built.params);
+      let afterId: string | undefined;
+      for (;;) {
+        const ids = (this.db.prepare(`SELECT memory_id FROM project_topic_refresh_snapshot_rows
+          WHERE snapshot_id = ? AND (? IS NULL OR memory_id > ?) ORDER BY memory_id LIMIT 250`)
+          .all(snapshotId, afterId ?? null, afterId ?? null) as Array<{ memory_id: string }>).map((row) => row.memory_id);
+        if (ids.length === 0) break;
+        const vectors = this.vectors.getMany(ids);
+        const update = this.db.prepare(`UPDATE project_topic_refresh_snapshot_rows SET vectors_json = ? WHERE snapshot_id = ? AND memory_id = ?`);
+        for (const id of ids) update.run(toJson(vectors.get(id) ?? []), snapshotId, id);
+        afterId = ids[ids.length - 1];
+      }
+      const count = this.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ?`).get(snapshotId) as { count: number };
+      return count.count > 0 ? snapshotId : undefined;
+    })();
   }
 
   listEligibleL1SnapshotPage(_filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
