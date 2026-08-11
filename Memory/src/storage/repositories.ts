@@ -3725,19 +3725,19 @@ export class ProjectTopicRepository {
     if (!result.changes) throw new Error(`project topic not found: ${id}`);
     return this.getTopic(id, namespaceId)!;
   }
-  attachEvidence(evidence: ProjectTopicEvidenceRecord, capturedMemory?: MemoryRow): ProjectTopicEvidenceRecord {
-    if (!this.getTopic(evidence.topicId, evidence.namespaceId)) throw new Error("project topic namespace mismatch");
-    const memory = capturedMemory ?? (() => {
+  attachEvidence(evidence: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord {
+    return this.db.transaction(() => {
+      if (!this.getTopic(evidence.topicId, evidence.namespaceId)) throw new Error("project topic namespace mismatch");
       const row = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
-      return row ? memoryFromSql(row) : undefined;
-    })();
-    if (!memory || memory.id !== evidence.memoryId || memory.memoryLayer !== "L1" || memory.status !== "activated") throw new Error("project topic evidence must reference an activated L1 memory");
-    if (namespaceIdFromContext(namespaceForMemory(memory)) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
+      const memory = row ? memoryFromSql(row) : undefined;
+      if (!memory || memory.memoryLayer !== "L1" || memory.status !== "activated") throw new Error("project topic evidence must reference an activated L1 memory");
+      if (namespaceIdFromContext(namespaceForMemory(memory)) !== evidence.namespaceId) throw new Error("project topic evidence namespace mismatch");
     this.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(topic_id, memory_id) DO NOTHING`)
       .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);
     const stored = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND memory_id = ? AND namespace_id = ?`).get(evidence.topicId, evidence.memoryId, evidence.namespaceId) as EvidenceSqlRow | undefined;
     if (!stored) throw new Error("project topic evidence persistence failed");
-    return evidenceFromSql(stored);
+      return evidenceFromSql(stored);
+    })();
   }
 
   listEvidence(topicId: string, namespaceId: string): ProjectTopicEvidenceRecord[] {

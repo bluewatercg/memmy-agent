@@ -80,6 +80,19 @@ describe("project topic repository", () => {
     expect(() => repo.attachEvidence({ id: "archived-evidence", topicId: "topic-archived", namespaceId: "local:project-a", memoryId: "archived-l1", role: "source", summary: "archived", metadata: {}, createdAt: NOW })).toThrow(/activated L1/);
   }));
 
+  it("never authorizes evidence from a captured row when live state became ineligible", () => withRepo((repo, db) => {
+    repo.insertTopic(topic("local:project-a", "topic-live-auth"));
+    const evidence = (id: string): ProjectTopicEvidenceRecord => ({ id: `evidence-${id}`, topicId: "topic-live-auth", namespaceId: "local:project-a", memoryId: id, role: "source", summary: "captured", metadata: {}, createdAt: NOW });
+    for (const id of ["live-archived", "live-moved", "live-l2", "live-deleted"]) insertMemory(db.db, id, "project-a", "L1");
+    db.db.prepare(`UPDATE memories SET status = 'archived' WHERE id = 'live-archived'`).run();
+    db.db.prepare(`UPDATE memories SET app_id = 'project-b', info_json = '{"project_id":"project-b"}' WHERE id = 'live-moved'`).run();
+    db.db.prepare(`UPDATE memories SET memory_layer = 'L2' WHERE id = 'live-l2'`).run();
+    db.db.prepare(`DELETE FROM memories WHERE id = 'live-deleted'`).run();
+
+    for (const id of ["live-archived", "live-moved", "live-l2", "live-deleted"]) expect(() => repo.attachEvidence(evidence(id))).toThrow();
+    expect(repo.listEvidence("topic-live-auth", "local:project-a")).toEqual([]);
+  }));
+
 
   it("supersedes only a candidate from the same topic and keeps insertion atomic", () => withRepo((repo) => {
     repo.insertTopic(topic("local:project-a", "topic-a"));

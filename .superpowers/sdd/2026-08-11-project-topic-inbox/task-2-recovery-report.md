@@ -158,3 +158,29 @@ Duration  20.89s
 ### Concerns
 
 None. The unrelated untracked plan remains untouched.
+
+## Fix Round 5
+
+### Finding Addressed
+
+`ProjectTopicRepository.attachEvidence` no longer accepts captured memory authorization. It starts one database transaction, independently fetches the live memory row, and requires current existence, canonical namespace, L1 layer, and activated status before insertion. Direct tests cover live archived, moved-namespace, L2, and deleted states and prove no evidence persists.
+
+### Exact Verification
+
+From `Memory`:
+
+```text
+$ npm run typecheck
+> tsc -p tsconfig.json --noEmit
+(exit 0)
+
+$ npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts tests/service/worker/worker-runtime.test.ts
+Test Files  7 passed (7)
+Tests  66 passed (66)
+Duration  18.84s
+(exit 0)
+```
+
+### Concerns
+
+None. The unrelated untracked plan remains untouched.
