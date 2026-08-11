@@ -81,3 +81,9 @@ Exact fresh verification:
 Concern resolved: merge/split exact topic routes now use an explicit synchronous `atomicReplay` idempotency option. It wraps the topic callback and idempotency INSERT in the same `Repositories.transaction`; serialization/save failure rolls back the domain transaction via SQLite savepoint semantics. Async decision remains on its existing exact replay path.
 
 - `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts && npm run typecheck` -> PASS, 2 files / 36 tests and Memory typecheck.
+
+## Fix Round 5 Continuation
+
+- Added per-key in-process serialization around all idempotent operations (refresh, decision, merge, split and legacy callers). The first request runs and persists; same-key concurrent callers await the lock, reload the durable response, and receive exact or legacy replay semantics without ON CONFLICT overwrite.
+- Added a deterministic `Promise.all` decision replay regression asserting identical response, one mutation/audit, and stable-context exclusion.
+- `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 20 tests; `npm run typecheck` -> PASS.

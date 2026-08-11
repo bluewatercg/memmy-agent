@@ -258,6 +258,7 @@ function requireMemoryDb(options: MemoryServiceOptions): MemoryDb {
 }
 
 export class MemoryService {
+  private readonly idempotencyLocks = new Map<string, Promise<void>>();
   private readonly embeddingJobs: EmbeddingJobProcessor;
   private readonly evolutionJobs: EvolutionJobProcessor;
   private readonly feedbackExperience: FeedbackExperienceService;
@@ -710,43 +711,37 @@ export class MemoryService {
       lastMigrationId: capabilities.lastMigrationId
     };
   }
-
-  async idempotent<T>(
-    operation: string,
-    request: RequestEnvelope,
-    fingerprint: unknown,
-    run: () => T | Promise<T>,
-    options: { exactReplay?: boolean; atomicReplay?: boolean } = {}
-  ): Promise<T> {
-    if (!this.memoryAddEnabled()) {
-      return run();
-    }
-    const idempotencyKey = request.adapterId && request.requestId
-      ? `${operation}:${request.adapterId}:${request.requestId}`
-      : undefined;
-    if (!idempotencyKey) {
-      return run();
-    }
+  async idempotent<T>(operation: string, request: RequestEnvelope, fingerprint: unknown, run: () => T | Promise<T>, options: { exactReplay?: boolean; atomicReplay?: boolean } = {}): Promise<T> {
+    if (!this.memoryAddEnabled()) return run();
+    const idempotencyKey = request.adapterId && request.requestId ? `${operation}:${request.adapterId}:${request.requestId}` : undefined;
+    if (!idempotencyKey) return run();
     const requestHash = stableHash({ operation, fingerprint });
-    const existing = this.repos.runtime.getIdempotency(idempotencyKey);
-    if (existing) {
-      if (existing.requestHash !== requestHash) {
-        throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
+    const previous = this.idempotencyLocks.get(idempotencyKey) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.idempotencyLocks.set(idempotencyKey, previous.then(() => current));
+    await previous;
+    try {
+      const existing = this.repos.runtime.getIdempotency(idempotencyKey);
+      if (existing) {
+        if (existing.requestHash !== requestHash) throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
+        return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T;
       }
-      return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T;
+      if (options.atomicReplay) {
+        return this.repos.transaction(() => {
+          const value = run();
+          if (value && typeof (value as Promise<unknown>).then === "function") throw new MemoryServiceError("internal", "atomic idempotency requires a synchronous operation");
+          this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, value);
+          return value as T;
+        });
+      }
+      const response = await run();
+      this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
+      return response;
+    } finally {
+      release();
+      if (this.idempotencyLocks.get(idempotencyKey) === current) this.idempotencyLocks.delete(idempotencyKey);
     }
-    if (options.atomicReplay) {
-      const response = this.repos.transaction(() => {
-        const value = run();
-        if (value && typeof (value as Promise<unknown>).then === "function") throw new MemoryServiceError("internal", "atomic idempotency requires a synchronous operation");
-        this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, value);
-        return value;
-      });
-      return response as T;
-    }
-    const response = await run();
-    this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);
-    return response;
   }
 
   adapterActivate(request: RequestEnvelope & {

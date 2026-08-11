@@ -194,9 +194,11 @@ describe("MemoryService / REST contract", () => {
         return { candidate: service.listProjectTopicInbox(namespace).topics[0]!.candidates[0]!, auditId: audit.id };
       };
       const decisionPayload = JSON.stringify({ namespace, source: "desktop", adapterId: "runtime", requestId: "decision-replay", action: "reject", expectedVersion: 2, reason: "duplicate" });
-      const decisionOne = await fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/decision`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: decisionPayload });
+      const [decisionOne, decisionTwo] = await Promise.all([
+        fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/decision`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: decisionPayload }),
+        fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/decision`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: decisionPayload })
+      ]);
       const firstDecisionBody = await decisionOne.json();
-      const decisionTwo = await fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/decision`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: decisionPayload });
       expect(await decisionTwo.json()).toEqual(firstDecisionBody); expect(decisions).toBe(1);
       const auditRows = new Repositories(db.db).runtime.listAudit({ targetId: "candidate-1", limit: 10 }); expect(auditRows).toHaveLength(1); expect(auditRows[0]?.actor).toMatchObject({ source: "desktop", adapterId: "runtime", requestId: "decision-replay" });
       expect(service.renderStableProjectContext(namespace).markdown).not.toContain("Share schemas");
