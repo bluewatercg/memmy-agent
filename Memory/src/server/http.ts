@@ -788,7 +788,7 @@ async function routeRequest(
       return await service.idempotent("topic-inbox.topic.merge", request, { topicId, request }, () => {
         const result = service.mergeProjectTopics(request.namespace, topicId, { targetTopicId: requiredString(request.targetTopicId, "targetTopicId"), expectedVersion: positiveVersion(request.expectedVersion), targetExpectedVersion: positiveVersion(request.targetExpectedVersion), actor: decisionActor(request) });
         return { topic: topicSummary(result.topic, service.listProjectTopicInbox(request.namespace).topics.find((item) => item.topic.id === result.topic.id)), mergedTopicId: result.mergedTopicId, auditId: result.auditId, serverTime: new Date().toISOString() };
-      }, { exactReplay: true });
+      }, { exactReplay: true, atomicReplay: true });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;
@@ -805,7 +805,7 @@ async function routeRequest(
         const result = service.splitProjectTopic(request.namespace, topicId, { expectedVersion: positiveVersion(request.expectedVersion), title: requiredString(request.title, "title"), summary: typeof request.summary === "string" ? request.summary : "", evidenceMemoryIds: parseOptionalStringArray(request.evidenceMemoryIds, "evidenceMemoryIds") ?? [], actor: decisionActor(request) });
         const view = service.listProjectTopicInbox(request.namespace);
         return { topic: topicSummary(result.topic, view.topics.find((item) => item.topic.id === result.topic.id)), sourceTopic: topicSummary(result.sourceTopic, view.topics.find((item) => item.topic.id === result.sourceTopic.id)), auditId: result.auditId, serverTime: new Date().toISOString() };
-      }, { exactReplay: true });
+      }, { exactReplay: true, atomicReplay: true });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic version conflict", 409, undefined, { topicId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;

@@ -716,7 +716,7 @@ export class MemoryService {
     request: RequestEnvelope,
     fingerprint: unknown,
     run: () => T | Promise<T>,
-    options: { exactReplay?: boolean } = {}
+    options: { exactReplay?: boolean; atomicReplay?: boolean } = {}
   ): Promise<T> {
     if (!this.memoryAddEnabled()) {
       return run();
@@ -734,6 +734,15 @@ export class MemoryService {
         throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       }
       return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T;
+    }
+    if (options.atomicReplay) {
+      const response = this.repos.transaction(() => {
+        const value = run();
+        if (value && typeof (value as Promise<unknown>).then === "function") throw new MemoryServiceError("internal", "atomic idempotency requires a synchronous operation");
+        this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, value);
+        return value;
+      });
+      return response as T;
     }
     const response = await run();
     this.repos.runtime.saveIdempotency(idempotencyKey, requestHash, response);

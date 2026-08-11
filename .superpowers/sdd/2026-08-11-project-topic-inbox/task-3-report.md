@@ -78,4 +78,6 @@ Exact fresh verification:
 - `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 20 tests.
 - `cd App/backend && npm run typecheck` -> PASS, including contracts and Memory prerequisite builds.
 
-Concern: SQLite runtime idempotency write is currently performed after the domain callback; an injected idempotency save failure can leave a committed domain mutation. A full atomic merge/split replay-write rollback requires extending the existing repository transaction boundary and was not implemented in this round.
+Concern resolved: merge/split exact topic routes now use an explicit synchronous `atomicReplay` idempotency option. It wraps the topic callback and idempotency INSERT in the same `Repositories.transaction`; serialization/save failure rolls back the domain transaction via SQLite savepoint semantics. Async decision remains on its existing exact replay path.
+
+- `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts && npm run typecheck` -> PASS, 2 files / 36 tests and Memory typecheck.
