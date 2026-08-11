@@ -8,6 +8,7 @@ export interface StorageBackendCapabilities {
   backendId: "sqlite-local" | "openmem-cloud-rest";
   backend: StorageBackendKind;
   schemaVersion: string;
+  lastMigrationId?: string;
   fullText: "fts5" | "tsvector" | "remote" | "none";
   vector: "sidecar" | "native" | "remote" | "none";
   changeLog: boolean;
@@ -62,6 +63,7 @@ export function sqliteBackendCapabilities(db: MemoryDb): StorageBackendCapabilit
     backendId: "sqlite-local",
     backend: "sqlite",
     schemaVersion: String(schema.version),
+    lastMigrationId: schema.lastMigrationId,
     fullText: "fts5",
     vector: "native",
     changeLog: true,

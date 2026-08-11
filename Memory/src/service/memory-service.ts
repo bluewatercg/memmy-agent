@@ -686,7 +686,8 @@ export class MemoryService {
     const capabilities = this.storageCapabilities();
     const version = Number(capabilities.schemaVersion);
     return {
-      version: Number.isFinite(version) ? version : 0
+      version: Number.isFinite(version) ? version : 0,
+      lastMigrationId: capabilities.lastMigrationId
     };
   }
 

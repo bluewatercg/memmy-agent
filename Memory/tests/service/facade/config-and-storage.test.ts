@@ -49,6 +49,7 @@ describe("MemoryService / facade / config and storage", () => {
       importExport: true
     });
     const backendService = createTestMemoryService({ backend, mode: "dev" });
+    expect(backendService.health().storage.lastMigrationId).toBe(SCHEMA_MIGRATION_ID);
     expect(backendService.health().storage.backendId).toBe("sqlite-local");
     backend.close();
     const remoteBackend = createStorageBackend({
