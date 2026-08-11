@@ -33,23 +33,21 @@ export function TopicInboxSubPage(props: TopicInboxSubPageProps) {
   const [splitDrafts, setSplitDrafts] = useState<Record<string, { title: string; summary: string; selected: string[] }>>({});
   const [refreshQueued, setRefreshQueued] = useState(false);
 
-  async function load(selected = projectId) {
+  async function load(selected = projectId, signal?: AbortSignal) {
     if (!client || !selected) { setTopics([]); setState("ready"); return; }
     setTopics([]); setExpanded(new Set()); setEvidence({}); props.onPendingCountChange?.(0); setState("loading"); setMessage("");
     try {
       const output = await client.listTopicInbox({ namespace: namespace(selected) });
+      if (signal?.aborted || selected !== projectId) return;
       const scopedTopics = output.projects.flatMap((group) => group.namespace.projectId === selected ? group.topics : []);
-      setTopics(scopedTopics);
-      props.onPendingCountChange?.(scopedTopics.reduce((sum, topic) => sum + topic.candidateCounts.pending, 0));
-      setState("ready");
+      setTopics(scopedTopics); props.onPendingCountChange?.(scopedTopics.reduce((sum, topic) => sum + topic.candidateCounts.pending, 0)); setState("ready");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
-      setState("error");
+      if (signal?.aborted || selected !== projectId) return;
+      setMessage(error instanceof Error ? error.message : String(error)); setState("error");
       setRefreshQueued(false); setMergeTargets({}); setSplitDrafts({}); setEditing(null);
     }
   }
-  useEffect(() => { setTopics([]); setExpanded(new Set()); setEvidence({}); setRefreshQueued(false); setMergeTargets({}); setSplitDrafts({}); setEditing(null); }, [projectId]);
-  useEffect(() => { void load(projectId); }, [client, projectId]);
+  useEffect(() => { const controller = new AbortController(); void load(projectId, controller.signal); return () => controller.abort(); }, [client, projectId]);
   useEffect(() => { if (!projects.some((project) => project.id === projectId)) setProjectId(projects[0]?.id ?? ""); }, [projects, projectId]);
 
   const pendingCount = useMemo(() => topics.reduce((sum, topic) => sum + topic.candidateCounts.pending, 0), [topics]);
