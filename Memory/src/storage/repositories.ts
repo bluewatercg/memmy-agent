@@ -3700,6 +3700,24 @@ export class ProjectTopicRepository {
     const row = this.db.prepare(`SELECT * FROM project_topic_analysis_runs WHERE namespace_id = ? AND input_hash = ?`).get(namespaceId, inputHash) as RunSqlRow | undefined;
     return row ? analysisRunFromSql(row) : undefined;
   }
+
+  claimAnalysisRun(input: { id: string; namespaceId: string; inputHash: string; owner: string; at: string }): boolean {
+    return this.db.transaction(() => {
+      const existing = this.findAnalysisRun(input.namespaceId, input.inputHash);
+      if (existing && existing.status !== "failed") return false;
+      if (existing) {
+        const result = this.db.prepare(`UPDATE project_topic_analysis_runs SET status = 'claimed', result_json = ?, updated_at = ? WHERE namespace_id = ? AND input_hash = ? AND status = 'failed'`).run(toJson({ owner: input.owner }), input.at, input.namespaceId, input.inputHash);
+        return result.changes === 1;
+      }
+      this.recordAnalysisRun({ id: input.id, namespaceId: input.namespaceId, inputHash: input.inputHash, status: "claimed", result: { owner: input.owner }, createdAt: input.at, updatedAt: input.at });
+      return true;
+    })();
+  }
+
+  completeAnalysisRun(input: { namespaceId: string; inputHash: string; owner: string; status: "succeeded" | "failed"; topicId?: string; result: Record<string, unknown>; at: string }): boolean {
+    const result = this.db.prepare(`UPDATE project_topic_analysis_runs SET topic_id = ?, status = ?, result_json = ?, updated_at = ? WHERE namespace_id = ? AND input_hash = ? AND status = 'claimed' AND json_extract(result_json, '$.owner') = ?`).run(input.topicId ?? null, input.status, toJson(input.result), input.at, input.namespaceId, input.inputHash, input.owner);
+    return result.changes === 1;
+  }
 }
 
 interface TopicSqlRow { id: string; namespace_id: string; project_id: string | null; title: string; summary: string; status: ProjectTopicStatus; version: number; source_memory_ids_json: string; metadata_json: string; created_at: string; updated_at: string }

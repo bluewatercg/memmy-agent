@@ -88,3 +88,21 @@ Result: 4 files passed, 29 tests passed.
 `cd Memory && npm run typecheck`
 
 Result: TypeScript completed successfully with no diagnostics.
+
+## Review Fix Round 3
+
+- Added a durable unique analysis claim before the model call; only the owner may atomically persist results, failures release the claim for retry, and concurrent losers return unchanged.
+- Persisted topic embedding centroids from evidence, added Unicode-safe stable candidate slots independent of conclusion text, and retained atomic approval rollback behavior.
+- Refresh uses durable job state and corpus cursor dedupe; failed active jobs are requeued by the existing repository enqueue semantics.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts`
+
+Result: 2 files passed, 15 tests passed.
+
+`cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts`
+
+Result: 4 files passed, 29 tests passed.
+
+`cd Memory && npm run typecheck`
+
+Result: TypeScript completed successfully with no diagnostics.

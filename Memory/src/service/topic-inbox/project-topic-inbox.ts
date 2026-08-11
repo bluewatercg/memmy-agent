@@ -35,8 +35,15 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const primaryRole = match.roles[0] ?? "evidence";
     const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: rolesFromEvidence(item) })), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])].filter((item) => Boolean(item.memory));
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
-    if (this.deps.repos.topics.findAnalysisRun(namespaceId, inputHash)) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
-    const analysis = await analyzeProjectTopic({ llm: this.deps.llm, topic: match.topic, evidence });
+    const claimOwner = newId("topic_analysis_owner");
+    if (!this.deps.repos.topics.claimAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, owner: claimOwner, at })) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
+    let analysis;
+    try {
+      analysis = await analyzeProjectTopic({ llm: this.deps.llm, topic: match.topic, evidence });
+    } catch (error) {
+      this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "failed", result: { error: error instanceof Error ? error.message : String(error) }, at: nowIso() });
+      throw error;
+    }
     const createdCandidates: ProjectTopicCandidateRecord[] = [];
     this.deps.repos.transaction(() => {
       if (!match.topic) this.deps.repos.topics.insertTopic(topic);
@@ -44,7 +51,8 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       const sourceMemoryIds = evidence.map((item) => item.memory.id);
       const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
       const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
-      if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]) }, version: current.version + 1, updatedAt: at }, current.version);
+      const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
+      if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) }, version: current.version + 1, updatedAt: at }, current.version);
       const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
       const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
       const retained = new Set<string>();
@@ -60,7 +68,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
         if (policy.approved && !this.hasDuplicateMemory(record, namespace)) this.approve(record, true);
       }
       for (const obsolete of pending.filter((item) => !retained.has(item.id) && item.status === "pending")) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
-      this.deps.repos.topics.recordAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, topicId: topic.id, status: "succeeded", result: { topic: analysis.topic, candidates: analysis.candidates }, createdAt: at, updatedAt: at });
+      if (!this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "succeeded", topicId: topic.id, result: { topic: analysis.topic, candidates: analysis.candidates }, at })) throw new Error("topic analysis claim lost");
     });
     return { assigned: true, unchanged: false, topicId: topic.id, candidateIds: createdCandidates.map((item) => item.id) };
   }
@@ -165,9 +173,19 @@ function isRefreshRequest(value: unknown): value is { cursor: string; jobId: str
   return Boolean(value && typeof value === "object" && "cursor" in value && typeof value.cursor === "string" && "jobId" in value && typeof value.jobId === "string");
 }
 function candidateIdentity(candidate: { proposedLayer: string; title: string; conclusion: string; sensitiveCategories: string[] }): string {
-  const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  return stableHash({ layer: candidate.proposedLayer, title: normalize(candidate.title), conclusion: normalize(candidate.conclusion), category: [...candidate.sensitiveCategories].sort() }).slice(0, 32);
+  const normalizedTitle = candidate.title.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return stableHash({ layer: candidate.proposedLayer, title: normalizedTitle, category: [...candidate.sensitiveCategories].map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort() }).slice(0, 32);
 }
 function candidateIdentityFromRecord(candidate: ProjectTopicCandidateRecord): string {
   return stringField(candidate.metadata, "candidateIdentity") ?? candidateIdentity({ proposedLayer: candidate.proposedLayer, title: candidate.title, conclusion: candidate.conclusion, sensitiveCategories: stringArray(candidate.metadata.sensitiveCategories) });
+}
+function traceVector(memory: MemoryRow): number[] | null {
+  const trace = memory.properties.internal_info.trace;
+  if (!trace || typeof trace !== "object" || Array.isArray(trace) || !("vec_summary" in trace)) return null;
+  const value = trace.vec_summary;
+  return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : null;
+}
+function centroid(vectors: number[][]): number[] {
+  if (!vectors.length || vectors.some((vector) => vector.length !== vectors[0]!.length)) return [];
+  return vectors[0]!.map((_, index) => vectors.reduce((sum, vector) => sum + vector[index]!, 0) / vectors.length);
 }
