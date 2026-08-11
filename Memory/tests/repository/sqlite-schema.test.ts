@@ -516,6 +516,32 @@ describe("repository sqlite schema contract", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it("recovers only legacy claimed topic analysis rows with null leases", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-topic-claim-recovery-"));
+    const dbPath = join(root, "memory.sqlite");
+    try {
+      const seeded = new MemoryDb({ path: dbPath });
+      const insert = seeded.db.prepare(`INSERT INTO project_topic_analysis_runs
+        (id, namespace_id, input_hash, status, owner, lease_until, result_json, created_at, updated_at)
+        VALUES (?, 'local:project-a', ?, ?, ?, NULL, ?, ?, ?)`);
+      insert.run("claimed", "claimed-hash", "claimed", "lost-owner", '{"partial":true}', "2026-08-10T00:00:00.000Z", "2026-08-10T00:00:00.000Z");
+      insert.run("succeeded", "succeeded-hash", "succeeded", null, '{"kept":"success"}', "2026-08-10T00:00:00.000Z", "2026-08-10T00:00:00.000Z");
+      insert.run("failed", "failed-hash", "failed", null, '{"kept":"failure"}', "2026-08-10T00:00:00.000Z", "2026-08-10T00:00:00.000Z");
+      seeded.close();
+
+      const migrated = new MemoryDb({ path: dbPath });
+      const rows = migrated.db.prepare(`SELECT id, status, owner, lease_until, result_json FROM project_topic_analysis_runs ORDER BY id`).all();
+      expect(rows).toEqual([
+        { id: "claimed", status: "failed", owner: null, lease_until: null, result_json: '{"error":"legacy claim recovered"}' },
+        { id: "failed", status: "failed", owner: null, lease_until: null, result_json: '{"kept":"failure"}' },
+        { id: "succeeded", status: "succeeded", owner: null, lease_until: null, result_json: '{"kept":"success"}' }
+      ]);
+      migrated.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
 
   it("rejects an unknown schema without changing user data", () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-repo-incompatible-schema-"));

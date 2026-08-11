@@ -110,6 +110,27 @@ describe("project topic repository", () => {
     expect(repo.completeAnalysisRun({ namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-a", status: "succeeded", result: {}, at: "2026-08-11T00:01:01.000Z" })).toBe(false);
     expect(repo.completeAnalysisRun({ namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-b", status: "succeeded", result: { ok: true }, at: "2026-08-11T00:01:01.000Z" })).toBe(true);
   }));
+  it("reclaims legacy claimed analysis rows without a lease", () => withRepo((repo, db) => {
+    db.db.prepare(`INSERT INTO project_topic_analysis_runs
+      (id, namespace_id, input_hash, status, owner, lease_until, result_json, created_at, updated_at)
+      VALUES (?, ?, ?, 'claimed', NULL, NULL, '{}', ?, ?)`)
+      .run("legacy-claim", "local:project-a", "legacy-hash", NOW, NOW);
+
+    expect(repo.claimAnalysisRun({
+      id: "replacement-id",
+      namespaceId: "local:project-a",
+      inputHash: "legacy-hash",
+      owner: "recovery-owner",
+      at: "2026-08-11T00:02:00.000Z",
+      leaseUntil: "2026-08-11T00:03:00.000Z"
+    })).toBe(true);
+    expect(repo.findAnalysisRun("local:project-a", "legacy-hash")).toMatchObject({
+      id: "legacy-claim",
+      status: "claimed",
+      result: {}
+    });
+  }));
+
 
   it("converges genuinely competing writers on one canonical analysis run", async () => {
     const root = mkdtempSync(join(tmpdir(), "project-topic-analysis-race-"));

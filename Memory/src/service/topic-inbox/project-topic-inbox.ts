@@ -1,4 +1,5 @@
 import type { LlmClient } from "../../model/types.js";
+import { memoryVector } from "../../storage/memory-vector-state.js";
 import type { EvolutionJobRecord, Repositories } from "../../storage/repositories.js";
 import type { MemoryRow, ProjectTopicCandidateRecord, ProjectTopicRecord, RuntimeNamespace } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
@@ -58,7 +59,9 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
         const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
         const centroidChanged = !sameNumbers(numberArray(current.metadata.embeddingCentroid), embeddingCentroid);
         const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
-        if (materiallyChanged || centroidChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) }, version: current.version + 1, updatedAt: at }, current.version);
+        const metadata = { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) };
+        if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata, version: current.version + 1, updatedAt: at }, current.version);
+        else if (centroidChanged) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
         const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
         const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
         const retained = new Set<string>();
@@ -127,13 +130,22 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
 
   private eligibleCorpus(namespace: RuntimeNamespace): MemoryRow[] {
     const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
+    const filter = namespaceFilter(namespace);
+    const snapshotId = this.deps.repos.memories.eligibleL1SnapshotBoundary(filter);
+    if (!snapshotId) return [];
     const result: MemoryRow[] = [];
-    for (let offset = 0; ; offset += pageSize) {
-      const page = this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated", ...namespaceFilter(namespace) }, pageSize, offset);
-      result.push(...page);
-      if (page.length < pageSize) break;
+    let afterId: string | undefined;
+    try {
+      for (;;) {
+        const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);
+        result.push(...page);
+        if (page.length < pageSize) break;
+        afterId = page[page.length - 1]!.id;
+      }
+      return result;
+    } finally {
+      this.deps.repos.memories.releaseEligibleL1Snapshot(snapshotId);
     }
-    return result.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private newTopic(memory: MemoryRow, namespaceId: string, at: string): ProjectTopicRecord {
@@ -194,18 +206,19 @@ function isRefreshRequest(value: unknown): value is { cursor: string; jobId: str
   return Boolean(value && typeof value === "object" && "cursor" in value && typeof value.cursor === "string" && "jobId" in value && typeof value.jobId === "string");
 }
 function candidateIdentity(candidate: { proposedLayer: string; title: string; stableKey?: string; sourceEvidenceIds?: string[]; sensitiveCategories: string[] }): string {
-  const normalizedTitle = candidate.title.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-  const discriminator = candidate.stableKey?.normalize("NFKC").toLocaleLowerCase() ?? stableHash({ evidence: [...(candidate.sourceEvidenceIds ?? [])].sort(), category: [...candidate.sensitiveCategories].map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort() });
-  return stableHash({ layer: candidate.proposedLayer, title: normalizedTitle, discriminator }).slice(0, 32);
+  if (candidate.stableKey) return stableHash({ layer: candidate.proposedLayer, stableKey: candidate.stableKey.normalize("NFKC").toLocaleLowerCase() }).slice(0, 32);
+  return stableHash({
+    layer: candidate.proposedLayer,
+    title: candidate.title.normalize("NFKC").toLocaleLowerCase(),
+    evidence: [...(candidate.sourceEvidenceIds ?? [])].sort(),
+    sensitive: candidate.sensitiveCategories.map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort()
+  }).slice(0, 32);
 }
 function candidateIdentityFromRecord(candidate: ProjectTopicCandidateRecord): string {
   return stringField(candidate.metadata, "candidateIdentity") ?? candidateIdentity({ proposedLayer: candidate.proposedLayer, title: candidate.title, stableKey: stringField(candidate.metadata, "stableKey"), sourceEvidenceIds: candidate.sourceMemoryIds, sensitiveCategories: stringArray(candidate.metadata.sensitiveCategories) });
 }
 function traceVector(memory: MemoryRow): number[] | null {
-  const trace = memory.properties.internal_info.trace;
-  if (!trace || typeof trace !== "object" || Array.isArray(trace) || !("vec_summary" in trace)) return null;
-  const value = trace.vec_summary;
-  return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : null;
+  return memoryVector(memory, "vec_summary");
 }
 function centroid(vectors: number[][]): number[] {
   if (!vectors.length) return [];

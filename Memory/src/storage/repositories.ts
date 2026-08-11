@@ -583,6 +583,31 @@ export class MemoryRepository {
     return this.hydrateMany(rows.map(memoryFromSql));
   }
 
+  eligibleL1SnapshotBoundary(filter: MemoryFilter): string | undefined {
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "L1", status: "activated" });
+    const snapshotId = newId("topic_refresh_snapshot");
+    this.db.prepare(`CREATE TEMP TABLE IF NOT EXISTS project_topic_refresh_snapshot_ids (
+      snapshot_id TEXT NOT NULL, memory_id TEXT NOT NULL, PRIMARY KEY (snapshot_id, memory_id)
+    ) WITHOUT ROWID`).run();
+    this.db.prepare(`INSERT INTO project_topic_refresh_snapshot_ids (snapshot_id, memory_id)
+      SELECT ?, id FROM memories WHERE ${built.where}`).run(snapshotId, ...built.params);
+    const count = this.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_refresh_snapshot_ids WHERE snapshot_id = ?`).get(snapshotId) as { count: number };
+    return count.count > 0 ? snapshotId : undefined;
+  }
+
+  listEligibleL1SnapshotPage(filter: MemoryFilter, snapshotId: string, afterId: string | undefined, limit: number): MemoryRow[] {
+    const built = buildMemoryWhere({ ...filter, memoryLayer: "L1" });
+    const rows = this.db.prepare(`SELECT memories.* FROM memories
+      JOIN project_topic_refresh_snapshot_ids snapshot ON snapshot.memory_id = memories.id
+      WHERE ${built.where} AND snapshot.snapshot_id = ? AND (? IS NULL OR memories.id > ?)
+      ORDER BY memories.id ASC LIMIT ?`).all(...built.params, snapshotId, afterId ?? null, afterId ?? null, limit) as MemorySqlRow[];
+    return this.hydrateMany(rows.map(memoryFromSql));
+  }
+
+  releaseEligibleL1Snapshot(snapshotId: string): void {
+    this.db.prepare(`DELETE FROM project_topic_refresh_snapshot_ids WHERE snapshot_id = ?`).run(snapshotId);
+  }
+
   listPendingAgentSourceImportSummaries(limit = 10000, targetMemoryIds?: readonly string[]): MemoryRow[] {
     if (targetMemoryIds && targetMemoryIds.length === 0) return [];
     const targetClause = targetMemoryIds
@@ -3646,6 +3671,13 @@ export class ProjectTopicRepository {
     return topic;
   }
 
+  updateTopicMetadata(id: string, namespaceId: string, metadata: Record<string, unknown>, updatedAt: string): ProjectTopicRecord {
+    const result = this.db.prepare(`UPDATE project_topics SET metadata_json = ?, updated_at = ? WHERE id = ? AND namespace_id = ?`)
+      .run(toJson(metadata), updatedAt, id, namespaceId);
+    if (!result.changes) throw new Error(`project topic not found: ${id}`);
+    return this.getTopic(id, namespaceId)!;
+  }
+
   attachEvidence(evidence: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord {
     if (!this.getTopic(evidence.topicId, evidence.namespaceId)) throw new Error("project topic namespace mismatch");
     const memory = this.db.prepare(`SELECT * FROM memories WHERE id = ?`).get(evidence.memoryId) as MemorySqlRow | undefined;
@@ -3706,7 +3738,7 @@ export class ProjectTopicRepository {
       const result = this.db.prepare(`UPDATE project_topic_analysis_runs
         SET status = 'claimed', owner = ?, lease_until = ?, result_json = '{}', updated_at = ?
         WHERE namespace_id = ? AND input_hash = ?
-          AND (status = 'failed' OR (status = 'claimed' AND lease_until IS NOT NULL AND lease_until <= ?))`)
+          AND (status = 'failed' OR (status = 'claimed' AND (lease_until IS NULL OR lease_until <= ?)))`)
         .run(input.owner, input.leaseUntil, input.at, input.namespaceId, input.inputHash, input.at);
       if (result.changes === 1) return true;
       const inserted = this.db.prepare(`INSERT INTO project_topic_analysis_runs

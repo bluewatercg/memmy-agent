@@ -1,5 +1,6 @@
 import type { LlmClient } from "../../model/types.js";
 import type { MemoryRow, ProjectTopicEvidenceRecord, ProjectTopicRecord } from "../../types.js";
+import { memoryVectorEntries } from "../../storage/memory-vector-state.js";
 import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import type { TopicAnalysisResult, TopicCandidateAnalysis } from "./topic-inbox-types.js";
@@ -7,7 +8,7 @@ import type { TopicAnalysisResult, TopicCandidateAnalysis } from "./topic-inbox-
 export function topicAnalysisInputHash(topic: ProjectTopicRecord | undefined, evidence: Array<{ memory: MemoryRow; role: string | string[] }>): string {
   return stableHash({
     previous: topic ? { id: topic.id, version: topic.version, title: topic.title, summary: topic.summary } : null,
-    evidence: evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role })).sort((a, b) => a.id.localeCompare(b.id))
+    evidence: evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role, vectors: memoryVectorEntries(memory).map((entry) => ({ field: entry.vectorField, vector: entry.vector, model: entry.embeddingModel, provider: entry.embeddingProvider })) })).sort((a, b) => a.id.localeCompare(b.id))
   });
 }
 
@@ -27,9 +28,16 @@ function validateTopicAnalysis(value: unknown): TopicAnalysisResult {
   if (!isRecord(value) || !isRecord(value.topic) || typeof value.topic.title !== "string" || !value.topic.title.trim() || typeof value.topic.summary !== "string" || !value.topic.summary.trim() || !Array.isArray(value.candidates)) {
     throw new Error("invalid topic analysis result");
   }
+  const candidates = value.candidates.map(validateCandidate);
+  const slots = new Set<string>();
+  for (const candidate of candidates) {
+    const slot = candidateSlot(candidate);
+    if (slots.has(slot)) throw new Error(`duplicate topic candidate slot: ${slot}`);
+    slots.add(slot);
+  }
   return {
     topic: { title: value.topic.title.trim(), summary: value.topic.summary.trim() },
-    candidates: value.candidates.map(validateCandidate)
+    candidates
   };
 }
 
@@ -52,6 +60,16 @@ function enumValue<const T extends readonly string[]>(value: unknown, allowed: T
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error("invalid topic candidate array");
   return value.map((item) => item.trim()).filter(Boolean);
+}
+
+function candidateSlot(candidate: TopicCandidateAnalysis): string {
+  if (candidate.stableKey) return stableHash({ layer: candidate.proposedLayer, stableKey: candidate.stableKey.normalize("NFKC").toLocaleLowerCase() });
+  return stableHash({
+    layer: candidate.proposedLayer,
+    title: candidate.title.normalize("NFKC").toLocaleLowerCase(),
+    evidence: [...candidate.sourceEvidenceIds].sort(),
+    sensitive: candidate.sensitiveCategories.map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort()
+  });
 }
 
 function validatedStableKey(value: unknown): string {

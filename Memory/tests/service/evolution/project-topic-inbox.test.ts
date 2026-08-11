@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { EnqueueJobInput } from "../../../src/service/worker/job-handlers.js";
+import { attachMemoryVector } from "../../../src/storage/memory-vector-state.js";
 import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories, type LlmClient } from "../../../src/index.js";
 import { ProjectTopicInboxService } from "../../../src/service/topic-inbox/project-topic-inbox.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -100,6 +101,32 @@ describe("ProjectTopicInbox", () => {
     await inbox.processRefresh(namespace);
     expect(inbox.list(namespace).topics.reduce((count, item) => count + item.evidence.length, 0)).toBe(7);
   });
+  it("uses a captured keyset corpus when rows mutate between bounded pages", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const capturedIds = Array.from({ length: 7 }, (_, index) => insertTrace(service, `captured refresh trace ${index}`, `snapshot-${index}`));
+    const pageMethod = repos.memories.listEligibleL1SnapshotPage.bind(repos.memories);
+    let pages = 0;
+    repos.memories.listEligibleL1SnapshotPage = (filter, boundary, afterId, limit) => {
+      const page = pageMethod(filter, boundary, afterId, limit);
+      pages += 1;
+      if (pages === 1) {
+        insertTrace(service, "concurrent refresh insert", "snapshot-concurrent");
+        const changed = repos.memories.get(capturedIds[3]!)!;
+        repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nconcurrently updated`, updatedAt: new Date().toISOString() });
+      }
+      return page;
+    };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Snapshot", summary: "Captured corpus" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item), refreshPageSize: 3 });
+
+    await inbox.processRefresh({ source: "codex", profileId: "p", userId: "u", projectId: "project" });
+
+    const evidenceIds = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics.flatMap((item) => item.evidence.map((evidence) => evidence.memoryId));
+    expect(evidenceIds.sort()).toEqual(capturedIds.sort());
+    expect(new Set(evidenceIds).size).toBe(capturedIds.length);
+    expect(pages).toBeGreaterThan(1);
+  });
+
 
   it("keeps Unicode same-title candidates distinct while preserving stable-key lineage", async () => {
     const { db, service } = fixture.createTestService();
@@ -118,6 +145,62 @@ describe("ProjectTopicInbox", () => {
     expect(candidates.filter((item) => item.status === "pending").map((item) => item.metadata.stableKey).sort()).toEqual(["backend", "frontend"]);
     expect(candidates.find((item) => item.metadata.stableKey === "frontend" && item.status === "pending")?.supersedesId).toBeTruthy();
   });
+  it("uses stableKey as the title-independent Unicode candidate slot", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "中文候选槽位", "unicode-stable-key");
+    const base = { stableKey: "发布/前端", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([
+      { topic: { title: "发布", summary: "中文流程" }, candidates: [{ ...base, title: "检查前端", conclusion: "检查资源。" }] },
+      { topic: { title: "发布", summary: "中文流程更新" }, candidates: [{ ...base, title: "验证前端发布", conclusion: "检查资源和产物。" }] }
+    ]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const changed = repos.memories.get(memoryId)!;
+    repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nchanged`, updatedAt: new Date().toISOString() });
+    await inbox.ingest(memoryId);
+
+    const candidates = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics[0]!.candidates;
+    const current = candidates.find((item) => item.status === "pending")!;
+    expect(current.title).toBe("验证前端发布");
+    expect(current.supersedesId).toBe(candidates.find((item) => item.title === "检查前端")?.id);
+    expect(current.metadata.stableKey).toBe("发布/前端");
+  });
+
+  it("rejects duplicate candidate slots before topic, evidence, or candidate writes", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "duplicate slots", "duplicate-slots");
+    const base = { stableKey: "same-slot", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Duplicates", summary: "Invalid duplicate result" }, candidates: [{ ...base, title: "First", conclusion: "First result." }, { ...base, title: "Second", conclusion: "Second result." }] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+
+    await expect(inbox.ingest(memoryId)).rejects.toThrow("duplicate topic candidate slot");
+    expect(inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics).toEqual([]);
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_evidence`).get()).toEqual({ count: 0 });
+    expect(db.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_candidates`).get()).toEqual({ count: 0 });
+  });
+
+  it("recomputes centroid for vector-only changes without topic or candidate versions", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "vector centroid", "vector-centroid");
+    const firstMemory = attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [1, 0] });
+    repos.memories.updateMaintenance(firstMemory);
+    const response = { topic: { title: "Vectors", summary: "Vector centroid" }, candidates: [{ stableKey: "vector-policy", title: "Vector policy", conclusion: "Keep vectors current.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([response, response]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const before = inbox.list(namespace).topics[0]!;
+    const vectorOnly = attachMemoryVector(repos.memories.get(memoryId)!, { vectorField: "vec_summary", vector: [0, 1] });
+    repos.memories.updateMaintenance(vectorOnly);
+    await inbox.ingest(memoryId);
+    const after = inbox.list(namespace).topics[0]!;
+
+    expect(after.topic.metadata.embeddingCentroid).toEqual([0, 1]);
+    expect(after.topic.version).toBe(before.topic.version);
+    expect(after.candidates).toHaveLength(before.candidates.length);
+    expect(after.candidates[0]?.version).toBe(before.candidates[0]?.version);
+  });
+
 
   it("rolls back approval memory and candidate writes when persistence fails", async () => {
     const { db, service } = fixture.createTestService();
@@ -139,5 +222,46 @@ describe("ProjectTopicInbox", () => {
     await expect(inbox.decide(namespace, candidate.id, { decision: "approve" })).rejects.toThrow("injected approval persistence failure");
     expect(repos.memories.get("rollback-l2")).toBeUndefined();
     expect(inbox.list(namespace).topics[0]!.candidates.find((item) => item.id === candidate.id)?.status).toBe("pending");
+  });
+
+  it("rolls back approval supersession, relation, candidate, and audit after new-memory upsert", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "approval predecessor rollback", "approval-predecessor-rollback");
+    const source = repos.memories.get(memoryId)!;
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    let built = 0;
+    const inbox = new ProjectTopicInboxService({
+      repos,
+      llm: topicLlm([
+        { topic: { title: "Approval rollback", summary: "First conclusion" }, candidates: [{ stableKey: "approval-slot", title: "Approve first", conclusion: "First approved conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] },
+        { topic: { title: "Approval rollback", summary: "Second conclusion" }, candidates: [{ stableKey: "approval-slot", title: "Approve replacement", conclusion: "Replacement approved conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }
+      ]),
+      buildMemory: (input) => {
+        built += 1;
+        return { ...source, id: `rollback-approved-${built}`, memoryLayer: "L2", memoryKey: String(input.key), memoryValue: String(input.value), properties: { ...source.properties, internal_info: { ...source.properties.internal_info, memory_layer: "L2", memory_kind: "policy" } } };
+      },
+      upsertMemory: (memory) => repos.memories.upsertByKey(memory)
+    });
+    await inbox.ingest(memoryId);
+    const firstCandidate = inbox.list(namespace).topics[0]!.candidates.find((item) => item.status === "pending")!;
+    const firstDecision = await inbox.decide(namespace, firstCandidate.id, { decision: "approve" });
+    const firstMemory = firstDecision.memory!;
+    const changed = repos.memories.get(memoryId)!;
+    repos.memories.update({ ...changed, memoryValue: `${changed.memoryValue}\nreplacement`, updatedAt: new Date().toISOString() });
+    await inbox.ingest(memoryId);
+    const replacement = inbox.list(namespace).topics[0]!.candidates.find((item) => item.status === "pending")!;
+    const auditBefore = repos.runtime.listAudit({ limit: 100 }).length;
+    const originalInsertAudit = repos.runtime.insertAudit.bind(repos.runtime);
+    repos.runtime.insertAudit = () => { throw new Error("injected post-upsert approval failure"); };
+
+    await expect(inbox.decide(namespace, replacement.id, { decision: "approve" })).rejects.toThrow("injected post-upsert approval failure");
+
+    repos.runtime.insertAudit = originalInsertAudit;
+    expect(repos.memories.get(firstMemory.id)?.status).toBe("activated");
+    expect(repos.memories.get("rollback-approved-2")).toBeUndefined();
+    expect(repos.memories.relationsFor(firstMemory.id)).toEqual([]);
+    expect(inbox.list(namespace).topics[0]!.candidates.find((item) => item.id === replacement.id)?.status).toBe("pending");
+    expect(repos.runtime.listAudit({ limit: 100 })).toHaveLength(auditBefore);
   });
 });

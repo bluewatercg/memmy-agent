@@ -622,6 +622,10 @@ export function migrate(db: Database.Database): void {
       if (tableExists(db, "project_topic_analysis_runs")) {
         if (!columnExists(db, "project_topic_analysis_runs", "owner")) db.prepare(`ALTER TABLE project_topic_analysis_runs ADD COLUMN owner TEXT`).run();
         if (!columnExists(db, "project_topic_analysis_runs", "lease_until")) db.prepare(`ALTER TABLE project_topic_analysis_runs ADD COLUMN lease_until TEXT`).run();
+        db.prepare(`UPDATE project_topic_analysis_runs
+          SET status = 'failed', owner = NULL, result_json = '{"error":"legacy claim recovered"}', updated_at = ?
+          WHERE status = 'claimed' AND lease_until IS NULL`).run(now);
+
       }
       db.prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
