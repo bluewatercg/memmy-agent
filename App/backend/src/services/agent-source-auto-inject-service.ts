@@ -3,8 +3,26 @@ import type { AgentSourceAutoInjectResult, ScanPreferences } from "@memmy/local-
 import type { PermissionManager } from "../permission/index.js";
 import type { AgentSourceService } from "./agent-source-service.js";
 
-const AUTO_INJECT_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "pi", "opencode", "openclaw", "hermes", "workbuddy"]);
-const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "pi", "opencode", "openclaw", "hermes"]);
+const AUTO_INJECT_AGENT_SOURCE_IDS: Readonly<Record<string, true>> = {
+  cursor: true,
+  claude_code: true,
+  codex: true,
+  omp: true,
+  opencode: true,
+  openclaw: true,
+  hermes: true,
+  workbuddy: true,
+  freebuff: true
+};
+const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS: Readonly<Record<string, true>> = {
+  cursor: true,
+  claude_code: true,
+  codex: true,
+  omp: true,
+  opencode: true,
+  openclaw: true,
+  hermes: true
+};
 
 export interface AgentSourceAutoInjectService {
   runOnce(): Promise<AgentSourceAutoInjectResult>;
@@ -52,7 +70,7 @@ export function createAgentSourceAutoInjectService(
         const failed: Array<{ sourceId: string; reason: string }> = [];
 
         for (const source of sources) {
-          if (!AUTO_INJECT_AGENT_SOURCE_IDS.has(source.sourceId) || !source.builtin || !source.available || source.status !== "not_connected") {
+          if (!(source.sourceId in AUTO_INJECT_AGENT_SOURCE_IDS) || !source.builtin || !source.available || source.status !== "not_connected") {
             continue;
           }
 
@@ -61,7 +79,7 @@ export function createAgentSourceAutoInjectService(
           }
 
           try {
-            if (HOOK_OR_PLUGIN_AGENT_SOURCE_IDS.has(source.sourceId)) {
+            if (source.sourceId in HOOK_OR_PLUGIN_AGENT_SOURCE_IDS) {
               await options.agentSources.installPlugin(source.sourceId, { installType: "auto_inject" });
             } else {
               await options.agentSources.installSkill(source.sourceId);

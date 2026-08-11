@@ -1,24 +1,24 @@
-/** Pi source adapter module. */
+/** OMP source adapter for the Pi-compatible runtime format. */
 import { access } from "node:fs/promises";
-import { resolvePiSessionsDirectory } from "../../agent-paths.js";
+import { resolveOmpSessionsDirectory } from "../../agent-paths.js";
 import { collectConversationWindow, remainingMessageCapacity } from "../conversation-window.js";
 import { redactSecrets } from "../secret-redactor.js";
 import type { ConversationMessage, ScanOptions, SourceAdapter, SourceDescriptor } from "../types.js";
-import { discoverPiSessions } from "./session-discovery.js";
-import { readPiSession, type RawPiMessage } from "./session-reader.js";
+import { discoverOmpSessions } from "./session-discovery.js";
+import { readOmpSession, type RawOmpMessage } from "./session-reader.js";
 
-const PI_SOURCE_ID = "pi";
+const OMP_SOURCE_ID = "omp";
 
-export interface CreatePiSourceAdapterDeps {
+export interface CreateOmpSourceAdapterDeps {
   sessionsRoot?: string;
   descriptor?: SourceDescriptor;
 }
 
-export function createPiSourceAdapter(deps: CreatePiSourceAdapterDeps = {}): SourceAdapter {
-  const sessionsRoot = deps.sessionsRoot ?? resolvePiSessionsDirectory();
+export function createOmpSourceAdapter(deps: CreateOmpSourceAdapterDeps = {}): SourceAdapter {
+  const sessionsRoot = deps.sessionsRoot ?? resolveOmpSessionsDirectory();
   const descriptor = deps.descriptor ?? Object.freeze({
-    sourceId: PI_SOURCE_ID,
-    displayName: "Pi",
+    sourceId: OMP_SOURCE_ID,
+    displayName: "OMP",
     builtin: true,
     dataPath: sessionsRoot
   });
@@ -39,7 +39,7 @@ export function createPiSourceAdapter(deps: CreatePiSourceAdapterDeps = {}): Sou
     async *scan(options: ScanOptions) {
       throwIfAborted(options.signal);
       options.onProgress?.({ sourceId: descriptor.sourceId, phase: "discover", current: 0, total: 1 });
-      const sessions = await discoverPiSessions({
+      const sessions = await discoverOmpSessions({
         root: sessionsRoot,
         order: options.order === "recent_first" ? "recent_first" : "path_asc",
         maxSessions: options.maxScanTargets
@@ -60,7 +60,7 @@ export function createPiSourceAdapter(deps: CreatePiSourceAdapterDeps = {}): Sou
           message: session.sessionFilePath
         });
         const messages = await collectConversationWindow(
-          readPiSession(session.sessionFilePath, options.signal),
+          readOmpSession(session.sessionFilePath, options.signal),
           options.since,
           options.signal,
           remainingMessageCapacity(options.maxMessages, emittedMessages)
@@ -81,7 +81,7 @@ export function createPiSourceAdapter(deps: CreatePiSourceAdapterDeps = {}): Sou
 
 function toConversationMessage(
   sourceId: string,
-  rawMessage: RawPiMessage,
+  rawMessage: RawOmpMessage,
   workspacePath: string | null,
   gitRoot: string | null
 ): ConversationMessage {
@@ -97,7 +97,7 @@ function toConversationMessage(
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
-    throw new DOMException("Pi source scan aborted", "AbortError");
+    throw new DOMException("OMP source scan aborted", "AbortError");
   }
 }
 

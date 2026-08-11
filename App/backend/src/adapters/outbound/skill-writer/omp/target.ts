@@ -1,16 +1,16 @@
-/** Pi skill target module. */
+/** OMP skill target module. */
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { resolvePiHomeDirectory } from "../../agent-paths.js";
+import { resolveOmpHomeDirectory } from "../../agent-paths.js";
 import { readMemmyMemoryServiceConfig } from "../memmy-runtime-config.js";
 import { removeMemmySkillDirectory, replaceMemmySkillDirectory } from "../skill-directory.js";
-import { renderMemmyPiExtension } from "../templates/memmy-pi-extension.js";
+import { renderMemmyOmpExtension } from "../templates/memmy-pi-extension.js";
 import { renderMemmyPluginSkillManifest } from "../templates/memmy-plugin.js";
 import { renderMemmySkillBootstrapManifest } from "../templates/memmy-skill-directory.js";
 import type { SkillManifest, SkillTarget } from "../types.js";
 
-const PI_TARGET_ID = "pi";
+const OMP_TARGET_ID = "omp";
 const START_MARKER = "<!-- memmy:start v=1 -->";
 const END_MARKER = "<!-- memmy:end v=1 -->";
 const TARGET_FILE_NAME = "AGENTS.md";
@@ -18,23 +18,23 @@ const EXTENSION_DIRECTORY_NAME = "extensions";
 const EXTENSION_FILE_NAME = "memmy-memory.ts";
 const CONFIG_FILE_NAME = "memmy-memory-config.json";
 
-export interface CreatePiSkillTargetDeps {
+export interface CreateOmpSkillTargetDeps {
   rootDirectory?: string;
   memmyConfigPath?: string;
 }
 
-export function createPiSkillTarget(deps: CreatePiSkillTargetDeps = {}): SkillTarget {
-  const rootDirectory = deps.rootDirectory ?? resolvePiHomeDirectory();
+export function createOmpSkillTarget(deps: CreateOmpSkillTargetDeps = {}): SkillTarget {
+  const rootDirectory = deps.rootDirectory ?? resolveOmpHomeDirectory();
   const memmyConfigPath = deps.memmyConfigPath ?? join(homedir(), ".memmy", "config.yaml");
 
   return {
-    targetId: PI_TARGET_ID,
-    displayName: "Pi",
+    targetId: OMP_TARGET_ID,
+    displayName: "OMP",
     async resolveRootDirectory() {
       return resolveExistingDirectory(rootDirectory);
     },
     async install(manifest) {
-      const root = await requirePiRoot(rootDirectory);
+      const root = await requireOmpRoot(rootDirectory);
       await installSkill(root, manifest);
     },
     async uninstall() {
@@ -49,10 +49,10 @@ export function createPiSkillTarget(deps: CreatePiSkillTargetDeps = {}): SkillTa
       return (await readTextFile(join(root, TARGET_FILE_NAME))).includes(START_MARKER);
     },
     async installPlugin() {
-      const root = await requirePiRoot(rootDirectory);
+      const root = await requireOmpRoot(rootDirectory);
       const extensionDirectory = join(root, EXTENSION_DIRECTORY_NAME);
       await mkdir(extensionDirectory, { recursive: true });
-      await writeFileAtomically(join(extensionDirectory, EXTENSION_FILE_NAME), renderMemmyPiExtension());
+      await writeFileAtomically(join(extensionDirectory, EXTENSION_FILE_NAME), renderMemmyOmpExtension());
       await writeFileAtomically(
         join(extensionDirectory, CONFIG_FILE_NAME),
         `${JSON.stringify({
@@ -60,7 +60,7 @@ export function createPiSkillTarget(deps: CreatePiSkillTargetDeps = {}): SkillTa
           ...(await readMemmyMemoryServiceConfig(memmyConfigPath))
         }, null, 2)}\n`
       );
-      await installSkill(root, renderMemmyPluginSkillManifest(PI_TARGET_ID));
+      await installSkill(root, renderMemmyPluginSkillManifest(OMP_TARGET_ID));
     },
     async uninstallPlugin() {
       const root = await resolveExistingDirectory(rootDirectory);
@@ -101,9 +101,9 @@ function markerPattern(): RegExp {
   return new RegExp(`${escapeRegExp(START_MARKER)}\\n[\\s\\S]*?${escapeRegExp(END_MARKER)}\\n?`, "m");
 }
 
-async function requirePiRoot(directory: string): Promise<string> {
+async function requireOmpRoot(directory: string): Promise<string> {
   const root = await resolveExistingDirectory(directory);
-  if (!root) throw new Error("Pi is not installed or its directory is unavailable");
+  if (!root) throw new Error("OMP is not installed or its directory is unavailable");
   return root;
 }
 

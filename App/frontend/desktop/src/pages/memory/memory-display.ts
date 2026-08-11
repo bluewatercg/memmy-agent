@@ -148,10 +148,10 @@ function isInternalMetricLine(value: string): boolean {
 }
 
 function normalizedAgentSource(value: string | undefined): string | undefined {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/[\s_]+/gu, "-");
   if (normalized === "claude") return "claude-code";
   if (normalized === "open-code") return "opencode";
-  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy"].includes(normalized ?? "")
+  return ["hermes", "openclaw", "codex", "cursor", "claude-code", "opencode", "workbuddy", "omp", "freebuff"].includes(normalized ?? "")
     ? normalized
     : undefined;
 }

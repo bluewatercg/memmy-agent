@@ -180,7 +180,7 @@ The LLM may intentionally drop every candidate. If its output is invalid or the 
 
 ## How Context Is Injected
 
-When the workspace resolves to a project, `turn.start` prepends a separate `<memmy_project_context>` block before recalled memory. This block contains only confirmed project authority: the active goal, its constraints, and the selected work item and next step. Agent source and profile identify provenance but do not split the project, so Codex, Pi, and other installed integrations in the same workspace receive the same confirmed state. See [Agent Sources & Scanning](/en/memory/sources) for Hook and plugin behavior.
+When the workspace resolves to a project, `turn.start` prepends a separate `<memmy_project_context>` block before recalled memory. This block contains only confirmed project authority: the active goal, its constraints, and the selected work item and next step. Agent source and profile identify provenance but do not split the project, so Codex, OMP, and other installed integrations in the same workspace receive the same confirmed state. See [Agent Sources & Scanning](/en/memory/sources) for Hook and plugin behavior.
 
 Hits are rendered in this order:
 

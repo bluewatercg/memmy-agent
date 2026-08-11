@@ -54,4 +54,5 @@ export interface ScanOptions {
   order?: "source_default" | "recent_first";
   signal?: AbortSignal;
   onProgress?: (progress: ScanProgress) => void;
+  onError?: (error: { conversationId: string; reason: string }) => void;
 }

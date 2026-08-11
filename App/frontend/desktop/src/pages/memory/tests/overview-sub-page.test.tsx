@@ -62,6 +62,19 @@ describe("OverviewSubPage", () => {
     expect(html).not.toContain("今日新增");
   });
 
+  it.each([
+    ["omp", "OMP"],
+    ["freebuff", "FreeBuff"]
+  ])("使用来源 agent 的显示名渲染 %s 分组", (source, displayName) => {
+    const html = renderOverview({
+      ...panelOverviewFixture,
+      sourceDistribution: [{ source, count: 1, percentage: 100 }]
+    });
+
+    expect(html).toContain(`>${displayName}</span>`);
+    expect(html).not.toContain(`>${source}</span>`);
+  });
+
   it("跨年同月的活动月份标签使用唯一 key", () => {
     const html = renderOverview({
       ...panelOverviewFixture,

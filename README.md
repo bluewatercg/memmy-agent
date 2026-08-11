@@ -53,7 +53,8 @@ branch `actions/windows-package/remote-memory`.
 
 Changes in this fork that are not part of the original upstream README:
 
-- Added the shared `memmy.agent.v1` lifecycle protocol for external adapters, including Codex, Claude Code, and Pi hook templates.
+- Added the shared `memmy.agent.v1` lifecycle protocol for external adapters, including Codex, Claude Code, and the OMP extension running on the Pi-compatible runtime.
+- Added first-class OMP history/plugin support and FreeBuff history scanning plus `.agents/skills` installation.
 - Added provenance capture for Memory writes: source agent, adapter id, request id, workspace path, project id, source memory ids, and Git repository / branch / commit where available.
 - Added project-scoped Memory isolation so different workspaces are separated while agents in the same project can share context.
 - Added Memory governance features: Markdown audit export/import, stable supersession relations, and detailed provenance/supersession fields in read models.

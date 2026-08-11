@@ -39,15 +39,16 @@ describe("agent source auto inject service", () => {
     await expect(service.runOnce()).resolves.toEqual({
       ok: true,
       skipped: false,
-      installed: ["cursor", "pi", "opencode", "openclaw", "workbuddy"],
+      installed: ["cursor", "omp", "opencode", "openclaw", "workbuddy", "freebuff"],
       failed: []
     });
     expect(calls).toEqual([
       "plugin:cursor:auto_inject",
-      "plugin:pi:auto_inject",
+      "plugin:omp:auto_inject",
       "plugin:opencode:auto_inject",
       "plugin:openclaw:auto_inject",
       "skill:workbuddy",
+      "skill:freebuff",
     ]);
   });
 
@@ -114,10 +115,11 @@ function createAgentSources(calls: string[]) {
       return [
         source("cursor", "not_connected", true),
         source("codex", "skill_installed", true),
-        source("pi", "not_connected", true),
+        source("omp", "not_connected", true),
         source("opencode", "not_connected", true),
         source("openclaw", "not_connected", true),
         source("workbuddy", "not_connected", true),
+        source("freebuff", "not_connected", true),
         source("custom", "not_connected", false)
       ];
     },

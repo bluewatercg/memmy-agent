@@ -1,9 +1,13 @@
 /** Cloud client tests. */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHttpCloudClient } from "../index.js";
 
 let server: ReturnType<typeof createServer> | undefined;
+
+beforeEach(() => {
+  vi.stubEnv("MEMMY_APP_EDITION", "cn");
+});
 
 afterEach(async () => {
   vi.unstubAllEnvs();

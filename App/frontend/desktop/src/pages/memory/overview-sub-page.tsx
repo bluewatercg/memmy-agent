@@ -4,6 +4,7 @@ import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
 import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { useTranslation } from "../../i18n/use-translation.js";
+import { agentSourceDisplayName } from "../agent-source-logos.js";
 import { BarChart3, BrainCircuit, Globe2, Layers, Sparkles, Wand2 } from "./memory-prototype-icons.js";
 import {
   memoryPanelCacheKey,
@@ -322,7 +323,7 @@ function SourceDistributionCard(props: { values: PanelOverviewOutput["sourceDist
                 className="grid items-center gap-x-3"
                 style={{ gridTemplateColumns: "96px minmax(0, 1fr) 96px" }}
               >
-                <span className="min-w-0 text-xs text-text-ink/70 truncate">{item.source}</span>
+                <span className="min-w-0 text-xs text-text-ink/70 truncate">{agentSourceDisplayName(item.source)}</span>
                 <div className="h-3 rounded-pill bg-canvas-oat overflow-hidden">
                   <div className="h-full rounded-pill" style={{ width: `${item.percentage}%`, backgroundColor: sourceBarColor(index) }} />
                 </div>

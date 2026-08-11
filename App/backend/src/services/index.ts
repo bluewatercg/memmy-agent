@@ -12,10 +12,11 @@ import type { MemmyAgentAdminClient } from "../adapters/outbound/memmy-agent-adm
 import { createClaudeCodeSkillTarget } from "../adapters/outbound/skill-writer/claude-code/index.js";
 import { createCodexSkillTarget } from "../adapters/outbound/skill-writer/codex/index.js";
 import { createCursorSkillTarget } from "../adapters/outbound/skill-writer/cursor/index.js";
+import { createFreebuffSkillTarget } from "../adapters/outbound/skill-writer/freebuff/index.js";
 import { createHermesSkillTarget } from "../adapters/outbound/skill-writer/hermes/index.js";
 import { createOpenclawSkillTarget } from "../adapters/outbound/skill-writer/openclaw/index.js";
 import { createOpencodeSkillTarget } from "../adapters/outbound/skill-writer/opencode/index.js";
-import { createPiSkillTarget } from "../adapters/outbound/skill-writer/pi/index.js";
+import { createOmpSkillTarget } from "../adapters/outbound/skill-writer/omp/index.js";
 import { createWorkbuddySkillTarget } from "../adapters/outbound/skill-writer/workbuddy/index.js";
 import { createSkillTargetRegistry, type SkillTargetRegistry } from "../adapters/outbound/skill-writer/target-registry.js";
 import type { CloudClient } from "../adapters/outbound/cloud-client/index.js";
@@ -133,11 +134,12 @@ export function createBackendServices(options: CreateBackendServicesOptions): Ba
       createCursorSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createClaudeCodeSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createCodexSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createPiSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
+      createOmpSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createOpencodeSkillTarget(),
       createOpenclawSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
       createHermesSkillTarget({ memmyConfigPath: options.memmyConfigPath }),
-      createWorkbuddySkillTarget()
+      createWorkbuddySkillTarget(),
+      createFreebuffSkillTarget()
     ]);
   const skillDistributionService =
     options.skillDistributionService ??

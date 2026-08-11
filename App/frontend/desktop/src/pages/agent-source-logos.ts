@@ -12,11 +12,12 @@ export const MEMORY_AGENT_SOURCE_VALUES = [
   "cursor",
   "claude_code",
   "codex",
-  "pi",
   "opencode",
   "openclaw",
   "hermes",
-  "workbuddy"
+  "workbuddy",
+  "omp",
+  "freebuff"
 ] as const;
 
 const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
@@ -29,7 +30,9 @@ const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
-  workbuddy: "WorkBuddy"
+  workbuddy: "WorkBuddy",
+  omp: "OMP",
+  freebuff: "FreeBuff"
 };
 
 export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {

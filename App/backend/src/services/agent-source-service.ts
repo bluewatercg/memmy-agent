@@ -578,7 +578,10 @@ async function collectSourceMessages(
           total: 0,
           message: progress.message
         });
-      }
+      },
+      onError(error) {
+        collected.errors.push(error);
+      },
     })) {
       scanOptions.signal?.throwIfAborted();
       collected.messages.push(message);

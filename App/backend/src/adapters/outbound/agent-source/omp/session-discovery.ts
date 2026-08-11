@@ -1,25 +1,25 @@
-/** Pi session discovery module. */
+/** OMP session discovery for the Pi-compatible JSONL format. */
 import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { readJsonlObjects } from "../jsonl-lines.js";
 import { readDirectoryIfExists } from "../read-directory.js";
 
-export interface PiSessionFile {
+export interface OmpSessionFile {
   sessionFilePath: string;
   workspacePath: string | null;
   gitRoot: string | null;
 }
 
-export interface DiscoverPiSessionsOptions {
+export interface DiscoverOmpSessionsOptions {
   root: string;
   order?: "path_asc" | "recent_first";
   maxSessions?: number;
 }
 
-export async function discoverPiSessions(options: DiscoverPiSessionsOptions): Promise<PiSessionFile[]> {
+export async function discoverOmpSessions(options: DiscoverOmpSessionsOptions): Promise<OmpSessionFile[]> {
   const files = await listSessionFiles(options.root, options.order ?? "path_asc", options.maxSessions);
-  const sessions: PiSessionFile[] = [];
+  const sessions: OmpSessionFile[] = [];
 
   for (const sessionFilePath of files) {
     const workspacePath = await readSessionCwd(sessionFilePath);

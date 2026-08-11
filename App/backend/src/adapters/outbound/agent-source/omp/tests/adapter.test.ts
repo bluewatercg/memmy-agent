@@ -1,11 +1,11 @@
-/** Pi source adapter tests. */
+/** OMP source adapter tests for the Pi-compatible runtime format. */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createPiSourceAdapter } from "../index.js";
-import { discoverPiSessions } from "../session-discovery.js";
-import { readPiSession } from "../session-reader.js";
+import { createOmpSourceAdapter } from "../index.js";
+import { discoverOmpSessions } from "../session-discovery.js";
+import { readOmpSession } from "../session-reader.js";
 
 let tempDirectory: string | undefined;
 
@@ -16,10 +16,10 @@ afterEach(() => {
   }
 });
 
-describe("Pi source adapter", () => {
+describe("OMP source adapter", () => {
   it("reads the active branch with text and tool traces but excludes thinking", async () => {
     const fixture = createFixture();
-    const messages = await collect(readPiSession(fixture.sessionPath));
+    const messages = await collect(readOmpSession(fixture.sessionPath));
 
     expect(messages).toEqual([
       expect.objectContaining({ messageId: "pi-session-1:user-1", role: "user", content: expect.stringContaining("sk-abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN") }),
@@ -33,14 +33,14 @@ describe("Pi source adapter", () => {
 
   it("discovers nested sessions and streams redacted messages", async () => {
     const fixture = createFixture();
-    const adapter = createPiSourceAdapter({ sessionsRoot: fixture.sessionsRoot });
+    const adapter = createOmpSourceAdapter({ sessionsRoot: fixture.sessionsRoot });
 
-    await expect(discoverPiSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
+    await expect(discoverOmpSessions({ root: fixture.sessionsRoot })).resolves.toEqual([
       expect.objectContaining({ sessionFilePath: fixture.sessionPath, workspacePath: fixture.workspacePath })
     ]);
     const messages = await collect(adapter.scan({}));
     expect(messages[0]).toEqual(expect.objectContaining({
-      sourceId: "pi",
+      sourceId: "omp",
       conversationId: "pi-session-1",
       content: "Use OPENAI_API_KEY=[REDACTED:openai_api_key]",
       workspacePath: fixture.workspacePath
@@ -48,19 +48,19 @@ describe("Pi source adapter", () => {
   });
 
   it("treats a missing sessions directory as empty history", async () => {
-    const sessionsRoot = join(tmpdir(), `memmy-missing-pi-${crypto.randomUUID()}`);
-    await expect(discoverPiSessions({ root: sessionsRoot })).resolves.toEqual([]);
-    await expect(collect(createPiSourceAdapter({ sessionsRoot }).scan({}))).resolves.toEqual([]);
+    const sessionsRoot = join(tmpdir(), `memmy-missing-omp-${crypto.randomUUID()}`);
+    await expect(discoverOmpSessions({ root: sessionsRoot })).resolves.toEqual([]);
+    await expect(collect(createOmpSourceAdapter({ sessionsRoot }).scan({}))).resolves.toEqual([]);
   });
 
   it("honors scan limits and aborts", async () => {
     const fixture = createFixture();
-    const adapter = createPiSourceAdapter({ sessionsRoot: fixture.sessionsRoot });
+    const adapter = createOmpSourceAdapter({ sessionsRoot: fixture.sessionsRoot });
     await expect(collect(adapter.scan({ maxMessages: 2 }))).resolves.toHaveLength(2);
 
     const controller = new AbortController();
     controller.abort();
-    await expect(collect(adapter.scan({ signal: controller.signal }))).rejects.toThrow("Pi source scan aborted");
+    await expect(collect(adapter.scan({ signal: controller.signal }))).rejects.toThrow("OMP source scan aborted");
   });
 
   it("skips entries already handled by the live extension", async () => {
@@ -75,12 +75,12 @@ describe("Pi source adapter", () => {
       }
     ]);
 
-    await expect(collect(readPiSession(fixture.sessionPath))).resolves.toEqual([]);
+    await expect(collect(readOmpSession(fixture.sessionPath))).resolves.toEqual([]);
   });
 });
 
 function createFixture(extraRows: Array<Record<string, unknown>> = []): { sessionsRoot: string; sessionPath: string; workspacePath: string } {
-  tempDirectory = mkdtempSync(join(tmpdir(), "memmy-pi-source-"));
+  tempDirectory = mkdtempSync(join(tmpdir(), "memmy-omp-source-"));
   const sessionsRoot = join(tempDirectory, "sessions");
   const workspacePath = join(tempDirectory, "workspace");
   const sessionDirectory = join(sessionsRoot, "--workspace--");

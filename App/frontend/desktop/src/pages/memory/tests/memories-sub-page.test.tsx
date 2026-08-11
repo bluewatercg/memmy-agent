@@ -68,19 +68,24 @@ describe("MemoriesSubPage", () => {
       "Cursor",
       "Claude Code",
       "Codex",
-      "Pi",
       "OpenCode",
       "OpenClaw",
       "Hermes",
-      "WorkBuddy"
+      "WorkBuddy",
+      "OMP",
+      "FreeBuff"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");
     expect(agentSourceDisplayName("OPENCLAW")).toBe("OpenClaw");
+    expect(agentSourceDisplayName("OMP")).toBe("OMP");
+    expect(agentSourceDisplayName("freebuff")).toBe("FreeBuff");
   });
 
   it("从导入 trace 的 tags 中识别来源 agent", () => {
     expect(memoryDisplaySource({ tags: ["trace", "cursor", "agent-source", "摘要排队中"] })).toBe("cursor");
+    expect(memoryDisplaySource({ tags: ["trace", "OMP", "agent-source"] })).toBe("omp");
+    expect(memoryDisplaySource({ tags: ["trace", "freebuff", "agent-source"] })).toBe("freebuff");
   });
 
   it("优先使用列表项 metadata.source 展示来源 agent", () => {

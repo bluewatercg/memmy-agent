@@ -267,8 +267,8 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceConnectionAction(createSource("hermes", "skill_installed"))).toBe("install_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("hermes", "plugin_installed"))).toBe("remove_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("opencode", "plugin_installed"))).toBe("remove_plugin");
-    expect(resolveAgentSourceConnectionAction(createSource("pi", "not_connected"))).toBe("install_plugin");
-    expect(resolveAgentSourceConnectionAction(createSource("pi", "plugin_installed"))).toBe("remove_plugin");
+    expect(resolveAgentSourceConnectionAction(createSource("omp", "not_connected"))).toBe("install_plugin");
+    expect(resolveAgentSourceConnectionAction(createSource("omp", "plugin_installed"))).toBe("remove_plugin");
     expect(resolveAgentSourceConnectionAction(createSource("cursor", "not_connected"))).toBe("install_hook");
     expect(resolveAgentSourceConnectionAction(createSource("codex", "skill_installed"))).toBe("install_hook");
     expect(resolveAgentSourceConnectionAction(createSource("claude_code", "plugin_installed"))).toBe("remove_hook");
@@ -297,6 +297,7 @@ describe("SourcesSubPage", () => {
     expect(resolveAgentSourceStatusLabelKey(createSource("claude_code", "not_connected"))).toBe("memory.hookNotInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("codex", "not_connected"))).toBe("memory.hookNotInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("openclaw", "not_connected"))).toBe("memory.pluginNotInstalled");
+    expect(resolveAgentSourceStatusLabelKey(createSource("omp", "not_connected"))).toBe("memory.pluginNotInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("opencode", "not_connected"))).toBe("memory.pluginNotInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("codex", "skill_installed"))).toBe("memory.skillInstalled");
     expect(resolveAgentSourceStatusLabelKey(createSource("cursor", "plugin_installed"))).toBe("memory.hookInstalled");

@@ -13,7 +13,9 @@ const BUILTIN_AGENT_KINDS = [
   "opencode",
   "openclaw",
   "hermes",
-  "workbuddy"
+  "workbuddy",
+  "omp",
+  "freebuff"
 ] as const satisfies readonly BuiltinAgentKind[];
 
 /** Parses parse agent adapter plugin manifest. */

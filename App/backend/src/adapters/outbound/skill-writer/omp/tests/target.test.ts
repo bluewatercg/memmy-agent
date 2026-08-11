@@ -1,10 +1,10 @@
-/** Pi skill target tests. */
+/** OMP skill target tests. */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { createPiSkillTarget } from "../index.js";
+import { createOmpSkillTarget } from "../index.js";
 import { renderMemmyDefaultSkillManifest } from "../../templates/memmy-default.js";
 
 let tempDirectory: string | undefined;
@@ -16,14 +16,14 @@ afterEach(() => {
   }
 });
 
-describe("Pi skill target", () => {
-  it("installs the Pi extension, config, bootstrap, and skill idempotently", async () => {
+describe("OMP skill target", () => {
+  it("installs the OMP extension, config, bootstrap, and skill idempotently", async () => {
     const fixture = createFixture();
-    const target = createPiSkillTarget(fixture);
+    const target = createOmpSkillTarget(fixture);
     writeFileSync(join(fixture.rootDirectory, "AGENTS.md"), "manual instructions\n", "utf8");
 
-    await target.installPlugin?.("pi");
-    await target.installPlugin?.("pi");
+    await target.installPlugin?.("omp");
+    await target.installPlugin?.("omp");
 
     const extension = readFileSync(join(fixture.rootDirectory, "extensions", "memmy-memory.ts"), "utf8");
     expect(extension).toContain('pi.on("before_agent_start"');
@@ -31,6 +31,9 @@ describe("Pi skill target", () => {
     expect(extension).toContain('pi.on("input"');
     expect(extension).toContain('pi.registerCommand("memmy-resume"');
     expect(extension).not.toContain('pi.on("agent_end"');
+    expect(extension).toContain('const SOURCE = "omp";');
+    expect(extension).toContain('const ADAPTER_ID = "memmy-omp-extension";');
+    expect(extension).toContain("const FETCH_TIMEOUT_MS = 25000;");
     const config = JSON.parse(readFileSync(join(fixture.rootDirectory, "extensions", "memmy-memory-config.json"), "utf8"));
     expect(config).toEqual({
       memmy_config_path: fixture.memmyConfigPath,
@@ -68,8 +71,8 @@ describe("Pi skill target", () => {
       return jsonResponse({}, 404);
     };
 
-    const target = createPiSkillTarget(fixture);
-    await target.installPlugin?.("pi");
+    const target = createOmpSkillTarget(fixture);
+    await target.installPlugin?.("omp");
 
     try {
       const extensionPath = join(fixture.rootDirectory, "extensions", "memmy-memory.ts");
@@ -101,12 +104,12 @@ describe("Pi skill target", () => {
 
   it("uninstalls only Memmy-owned files", async () => {
     const fixture = createFixture();
-    const target = createPiSkillTarget(fixture);
+    const target = createOmpSkillTarget(fixture);
     const unrelatedExtension = join(fixture.rootDirectory, "extensions", "unrelated.ts");
     writeFileSync(unrelatedExtension, "export default () => {};\n", "utf8");
-    await target.installPlugin?.("pi");
+    await target.installPlugin?.("omp");
 
-    await target.uninstallPlugin?.("pi");
+    await target.uninstallPlugin?.("omp");
 
     expect(existsSync(unrelatedExtension)).toBe(true);
     expect(existsSync(join(fixture.rootDirectory, "extensions", "memmy-memory.ts"))).toBe(false);
@@ -114,11 +117,11 @@ describe("Pi skill target", () => {
     expect(readFileSync(join(fixture.rootDirectory, "AGENTS.md"), "utf8")).toBe("");
   });
 
-  it("does not create the Pi directory when Pi is unavailable", async () => {
-    tempDirectory = mkdtempSync(join(tmpdir(), "memmy-pi-missing-"));
+  it("does not create the OMP runtime directory when OMP is unavailable", async () => {
+    tempDirectory = mkdtempSync(join(tmpdir(), "memmy-omp-missing-"));
     const rootDirectory = join(tempDirectory, ".pi", "agent");
-    const target = createPiSkillTarget({ rootDirectory });
-    await expect(target.install(renderMemmyDefaultSkillManifest("pi"))).rejects.toThrow("Pi is not installed");
+    const target = createOmpSkillTarget({ rootDirectory });
+    await expect(target.install(renderMemmyDefaultSkillManifest("omp"))).rejects.toThrow("OMP is not installed");
     expect(existsSync(rootDirectory)).toBe(false);
   });
 
@@ -147,8 +150,8 @@ describe("Pi skill target", () => {
       }
       return jsonResponse({}, 404);
     };
-    const target = createPiSkillTarget(fixture);
-    await target.installPlugin?.("pi");
+    const target = createOmpSkillTarget(fixture);
+    await target.installPlugin?.("omp");
 
     try {
       const extensionPath = join(fixture.rootDirectory, "extensions", "memmy-memory.ts");
@@ -187,10 +190,16 @@ describe("Pi skill target", () => {
       await settledPromise;
 
       expect(requests.find((item) => item.path.endsWith("/start"))?.body.query).toBe("First [REDACTED:openai_api_key]");
+      expect(requests.find((item) => item.path.endsWith("/start"))?.body).toMatchObject({
+        source: "omp",
+        adapterId: "memmy-omp-extension"
+      });
       expect(requests.find((item) => item.path.endsWith("/complete"))?.body).toMatchObject({
         query: "First [REDACTED:openai_api_key]\n\nFollow-up password=[REDACTED:password]",
         answer: "Partial answer",
-        status: "failed"
+        status: "failed",
+        source: "omp",
+        adapterId: "memmy-omp-extension"
       });
       expect(markers).toEqual([expect.objectContaining({
         customType: "memmy-memory-capture",
@@ -215,8 +224,8 @@ describe("Pi skill target", () => {
       });
       throw new Error(`Unexpected request: ${path}`);
     };
-    const target = createPiSkillTarget(fixture);
-    await target.installPlugin?.("pi");
+    const target = createOmpSkillTarget(fixture);
+    await target.installPlugin?.("omp");
     const extensionPath = join(fixture.rootDirectory, "extensions", "memmy-memory.ts");
     const extensionModule = await import(`${pathToFileURL(extensionPath).href}?test=${crypto.randomUUID()}`) as {
       default: (pi: unknown) => void;

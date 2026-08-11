@@ -1,20 +1,20 @@
-/** Pi Memmy extension template. */
-
+/** OMP extension template module. */
+import { readFile } from "node:fs/promises";
 import { MEMMY_AGENT_PROTOCOL_VERSION } from "./memmy-agent-protocol.js";
 
-export function renderMemmyPiExtension(): string {
+export function renderMemmyOmpExtension(): string {
   return String.raw`import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-const SOURCE = "pi";
-const ADAPTER_ID = "memmy-pi-extension";
+const SOURCE = "omp";
+const ADAPTER_ID = "memmy-omp-extension";
 const MEMMY_PROTOCOL_VERSION = ${JSON.stringify(MEMMY_AGENT_PROTOCOL_VERSION)};
 const CONFIG_URL = new URL("./memmy-memory-config.json", import.meta.url);
 const DEFAULT_MEMMY_CONFIG_PATH = join(homedir(), ".memmy", "config.yaml");
-const FETCH_TIMEOUT_MS = 45000;
+const FETCH_TIMEOUT_MS = 25000;
 const SEARCH_LIMIT = 20;
 const DISPLAY_LIMIT = 5;
 const RESUME_STATE_TTL_MS = 10 * 60 * 1000;
@@ -36,7 +36,7 @@ export default function memmyPiExtension(pi: ExtensionAPI): void {
     selectedResumeContext = "";
     const startParentId = ctx.sessionManager.getLeafId();
     turnSequence += 1;
-    const requestedTurnId = "pi-turn-" + hashText([
+    const requestedTurnId = "omp-turn-" + hashText([
       ctx.sessionManager.getSessionId(),
       startParentId || "root",
       query,
@@ -44,9 +44,9 @@ export default function memmyPiExtension(pi: ExtensionAPI): void {
     ].join("\u0000"));
     try {
       const memmy = await createMemmyClient();
-      const externalSessionId = "pi-memory-" + ctx.sessionManager.getSessionId();
+      const externalSessionId = "omp-memory-" + ctx.sessionManager.getSessionId();
       const workspacePath = ctx.cwd || undefined;
-      const openRequestId = "pi-open:" + externalSessionId;
+      const openRequestId = "omp-open:" + externalSessionId;
       const openProvenance = buildProtocolProvenance({
         requestId: openRequestId,
         sessionId: externalSessionId,
@@ -67,7 +67,7 @@ export default function memmyPiExtension(pi: ExtensionAPI): void {
       });
       const sessionId = normalizeText(opened.sessionId) || externalSessionId;
       const projectId = normalizeText(opened.projectId) || undefined;
-      const startRequestId = "pi-start:" + requestedTurnId;
+      const startRequestId = "omp-start:" + requestedTurnId;
       const provenance = buildProtocolProvenance({
         requestId: startRequestId,
         sessionId,
@@ -248,7 +248,7 @@ async function completeTurn(
   status: "succeeded" | "failed"
 ): Promise<void> {
   const memmy = await createMemmyClient();
-  const requestId = "pi-complete:" + turn.turnId + ":" + hashText(answer);
+  const requestId = "omp-complete:" + turn.turnId + ":" + hashText(answer);
   await memmy.post("/api/v1/turns/" + encodeURIComponent(turn.turnId) + "/complete", {
     protocolVersion: MEMMY_PROTOCOL_VERSION,
     adapterId: ADAPTER_ID,
@@ -395,7 +395,7 @@ function buildResumeContext(candidate: ResumeCandidate, detail: Record<string, u
 
 function renderMemoryContext(markdown: string, query: string): string {
   return [
-    "<memmy_memory_context source=\"pi\">",
+    "<memmy_memory_context source=\"omp\">",
     markdown,
     "</memmy_memory_context>",
     "",

@@ -1,8 +1,8 @@
-/** Pi session reader module. */
+/** OMP session reader for the Pi-compatible JSONL format. */
 import { basename } from "node:path";
 import { readJsonlObjects, type JsonObject } from "../jsonl-lines.js";
 
-export interface RawPiMessage {
+export interface RawOmpMessage {
   messageId: string;
   conversationId: string;
   role: "user" | "assistant" | "tool" | "system";
@@ -10,14 +10,14 @@ export interface RawPiMessage {
   createdAt: string;
 }
 
-interface PiEntry {
+interface OmpEntry {
   id: string;
   parentId: string | null;
   record: JsonObject;
 }
 
-export async function* readPiSession(filePath: string, signal?: AbortSignal): AsyncIterable<RawPiMessage> {
-  const entries: PiEntry[] = [];
+export async function* readOmpSession(filePath: string, signal?: AbortSignal): AsyncIterable<RawOmpMessage> {
+  const entries: OmpEntry[] = [];
   const handledEntryIds = new Set<string>();
   let sessionId = basename(filePath, ".jsonl");
 
@@ -40,7 +40,7 @@ export async function* readPiSession(filePath: string, signal?: AbortSignal): As
     if (!activeEntryIds.has(entry.id) || handledEntryIds.has(entry.id)) {
       continue;
     }
-    const message = toRawPiMessage(entry.record, sessionId, entry.id);
+    const message = toRawOmpMessage(entry.record, sessionId, entry.id);
     if (message) {
       yield message;
     }
@@ -59,7 +59,7 @@ function collectHandledEntryIds(record: JsonObject, handledEntryIds: Set<string>
   }
 }
 
-function collectActiveBranchIds(entries: readonly PiEntry[]): Set<string> {
+function collectActiveBranchIds(entries: readonly OmpEntry[]): Set<string> {
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const activeIds = new Set<string>();
   let current = entries.at(-1);
@@ -70,7 +70,7 @@ function collectActiveBranchIds(entries: readonly PiEntry[]): Set<string> {
   return activeIds;
 }
 
-function toRawPiMessage(record: JsonObject, sessionId: string, entryId: string): RawPiMessage | null {
+function toRawOmpMessage(record: JsonObject, sessionId: string, entryId: string): RawOmpMessage | null {
   if (record.type !== "message" || !isRecord(record.message)) {
     return null;
   }

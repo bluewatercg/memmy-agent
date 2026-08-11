@@ -2,19 +2,22 @@ import { describe, expect, it } from "vitest";
 import { createBuiltinAgentSourceRegistry } from "../builtin-agent-source-registry.js";
 
 describe("built-in agent source registry", () => {
-  it("keeps WorkBuddy available to both the main service and scan worker", () => {
+  it("exposes OMP and FreeBuff without duplicating the Pi-compatible runtime", () => {
     const registry = createBuiltinAgentSourceRegistry();
 
     expect(registry.list().map((adapter) => adapter.descriptor.sourceId)).toEqual([
       "cursor",
       "claude_code",
       "codex",
-      "pi",
+      "omp",
       "opencode",
       "openclaw",
       "hermes",
-      "workbuddy"
+      "workbuddy",
+      "freebuff"
     ]);
-    expect(registry.require("workbuddy").descriptor.displayName).toBe("WorkBuddy");
+    expect(registry.get("pi")).toBeUndefined();
+    expect(registry.require("omp").descriptor.displayName).toBe("OMP");
+    expect(registry.require("freebuff").descriptor.displayName).toBe("FreeBuff");
   });
 });

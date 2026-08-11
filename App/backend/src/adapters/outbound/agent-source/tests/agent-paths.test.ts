@@ -6,14 +6,15 @@ import {
   resolveCodexHomeDirectory,
   resolveCodexSessionsDirectory,
   resolveCursorDataPaths,
+  resolveFreebuffHomeDirectory,
   resolveHermesHomeDirectory,
+  resolveOmpHomeDirectory,
+  resolveOmpSessionsDirectory,
   resolveOpencodeConfigDirectory,
   resolveOpencodeDataDirectory,
   resolveOpencodeDatabasePath,
   resolveOpenclawConfigPath,
   resolveOpenclawStateDirectory,
-  resolvePiHomeDirectory,
-  resolvePiSessionsDirectory,
   resolveWorkbuddyHomeDirectory,
   resolveWorkbuddyProjectsDirectory
 } from "../../agent-paths.js";
@@ -23,6 +24,7 @@ const ENVIRONMENT_VARIABLES = [
   "CLAUDE_CONFIG_DIR",
   "CODEBUDDY_CONFIG_DIR",
   "CODEX_HOME",
+  "FREEBUFF_CONFIG_DIR",
   "HERMES_HOME",
   "OPENCODE_CONFIG_DIR",
   "OPENCLAW_CONFIG_PATH",
@@ -52,8 +54,9 @@ describe("agent paths", () => {
     process.env.HERMES_HOME = "/tmp/hermes-home";
     process.env.OPENCLAW_STATE_DIR = "/tmp/openclaw-state";
     process.env.OPENCLAW_CONFIG_PATH = "/tmp/openclaw-config.json";
-    process.env.PI_CODING_AGENT_DIR = "/tmp/pi-home";
-    process.env.PI_CODING_AGENT_SESSION_DIR = "/tmp/pi-sessions";
+    process.env.PI_CODING_AGENT_DIR = "/tmp/omp-home";
+    process.env.PI_CODING_AGENT_SESSION_DIR = "/tmp/omp-sessions";
+    process.env.FREEBUFF_CONFIG_DIR = "/tmp/freebuff-home";
     process.env.WORKBUDDY_CONFIG_DIR = "/tmp/workbuddy-home";
 
     expect(resolveClaudeCodeHomeDirectory()).toBe("/tmp/claude-home");
@@ -61,8 +64,9 @@ describe("agent paths", () => {
     expect(resolveHermesHomeDirectory()).toBe("/tmp/hermes-home");
     expect(resolveOpenclawStateDirectory()).toBe("/tmp/openclaw-state");
     expect(resolveOpenclawConfigPath()).toBe("/tmp/openclaw-config.json");
-    expect(resolvePiHomeDirectory()).toBe("/tmp/pi-home");
-    expect(resolvePiSessionsDirectory()).toBe("/tmp/pi-sessions");
+    expect(resolveOmpHomeDirectory()).toBe("/tmp/omp-home");
+    expect(resolveOmpSessionsDirectory()).toBe("/tmp/omp-sessions");
+    expect(resolveFreebuffHomeDirectory()).toBe("/tmp/freebuff-home");
     expect(resolveWorkbuddyHomeDirectory()).toBe("/tmp/workbuddy-home");
   });
 
@@ -88,7 +92,7 @@ describe("agent paths", () => {
     expect(resolveOpencodeConfigDirectory()).toBe("/tmp/custom-opencode");
   });
 
-  it("resolves all eight Agent source paths on macOS", () => {
+  it("resolves all nine Agent source paths on macOS", () => {
     const options = {
       platform: "darwin" as const,
       homeDirectory: "/Users/alice",
@@ -101,22 +105,24 @@ describe("agent paths", () => {
       codex: resolveCodexSessionsDirectory(options),
       opencode: resolveOpencodeDatabasePath(options),
       openclaw: resolveOpenclawStateDirectory(options),
-      pi: resolvePiSessionsDirectory(options),
+      omp: resolveOmpSessionsDirectory(options),
       hermes: resolveHermesHomeDirectory(options),
-      workbuddy: resolveWorkbuddyProjectsDirectory(options)
+      workbuddy: resolveWorkbuddyProjectsDirectory(options),
+      freebuff: resolveFreebuffHomeDirectory(options)
     }).toEqual({
       cursor: "/Users/alice/Library/Application Support/Cursor/User/workspaceStorage",
       claudeCode: "/Users/alice/.claude/projects",
       codex: "/Users/alice/.codex/sessions",
       opencode: "/Users/alice/.local/share/opencode/opencode.db",
       openclaw: "/Users/alice/.openclaw",
-      pi: "/Users/alice/.pi/agent/sessions",
+      omp: "/Users/alice/.pi/agent/sessions",
       hermes: "/Users/alice/.hermes",
-      workbuddy: "/Users/alice/.workbuddy/projects"
+      workbuddy: "/Users/alice/.workbuddy/projects",
+      freebuff: "/Users/alice/.config/manicode"
     });
   });
 
-  it("resolves all eight Agent source paths on Windows", () => {
+  it("resolves all nine Agent source paths on Windows", () => {
     const options = {
       platform: "win32",
       homeDirectory: "C:\\Users\\alice",
@@ -131,18 +137,20 @@ describe("agent paths", () => {
       codex: resolveCodexSessionsDirectory(options),
       opencode: resolveOpencodeDatabasePath(options),
       openclaw: resolveOpenclawStateDirectory(options),
-      pi: resolvePiSessionsDirectory(options),
+      omp: resolveOmpSessionsDirectory(options),
       hermes: resolveHermesHomeDirectory(options),
-      workbuddy: resolveWorkbuddyProjectsDirectory(options)
+      workbuddy: resolveWorkbuddyProjectsDirectory(options),
+      freebuff: resolveFreebuffHomeDirectory(options)
     }).toEqual({
       cursor: "C:\\Users\\alice\\AppData\\Roaming\\Cursor\\User\\workspaceStorage",
       claudeCode: "C:\\Users\\alice\\.claude\\projects",
       codex: "C:\\Users\\alice\\.codex\\sessions",
       opencode: "C:\\Users\\alice\\.local\\share\\opencode\\opencode.db",
       openclaw: "C:\\Users\\alice\\.openclaw",
-      pi: "C:\\Users\\alice\\.pi\\agent\\sessions",
+      omp: "C:\\Users\\alice\\.pi\\agent\\sessions",
       hermes: "C:\\Users\\alice\\.hermes",
-      workbuddy: "C:\\Users\\alice\\.workbuddy\\projects"
+      workbuddy: "C:\\Users\\alice\\.workbuddy\\projects",
+      freebuff: "C:\\Users\\alice\\.config\\manicode"
     });
   });
 
