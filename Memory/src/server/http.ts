@@ -769,8 +769,10 @@ async function routeRequest(
     const candidateId = decodeMatchSegment(topicDecision, 1);
     const decision = { ...request, actor: decisionActor(request) } as TopicCandidateDecision;
     try {
-      const result = await service.idempotent("topic-inbox.candidate.decision", request, { candidateId, request }, () => service.decideProjectTopicCandidate(request.namespace, candidateId, decision));
-      return { candidate: topicCandidateCard(result.candidate), memoryId: result.memory?.id, auditId: result.auditId, serverTime: new Date().toISOString() };
+      return service.idempotent("topic-inbox.candidate.decision", request, { candidateId, request }, async () => {
+        const result = await service.decideProjectTopicCandidate(request.namespace, candidateId, decision);
+        return { candidate: topicCandidateCard(result.candidate), memoryId: result.memory?.id, auditId: result.auditId, serverTime: new Date().toISOString() };
+      });
     } catch (error) {
       if (error instanceof TopicVersionConflictError) throw new MemoryServiceError("conflict", "topic candidate version conflict", 409, undefined, { candidateId: error.entityId, currentVersion: error.currentVersion, currentStatus: error.currentStatus });
       throw error;

@@ -87,16 +87,22 @@ describe("ProjectTopicInbox", () => {
     expect(view.topics.find((item) => item.topic.id === result.topic.id)?.evidence.map((item) => item.memoryId)).toEqual([movedMemoryId]);
   });
 
-  it("moves all source evidence on merge and marks source merged", async () => {
-    const { db, service } = fixture.createTestService(); const repos = new Repositories(db.db);
-    const ids = [insertTrace(service, "merge alpha evidence", "merge-alpha"), insertTrace(service, "completely distinct beta evidence", "merge-beta")];
-    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Alpha", summary: "A" }, candidates: [] }, { topic: { title: "Beta", summary: "B" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
-    await inbox.ingest(ids[0]!); await inbox.ingest(ids[1]!);
-    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" }; const topics = inbox.list(namespace).topics;
-    if (topics.length < 2) return;
-    const source = topics[0]!, target = topics[1]!;
-    inbox.merge(namespace, source.topic.id, { targetTopicId: target.topic.id, expectedVersion: source.topic.version, targetExpectedVersion: target.topic.version });
-    const view = inbox.list(namespace); expect(view.topics.find((item) => item.topic.id === source.topic.id)?.evidence).toEqual([]); expect(view.topics.find((item) => item.topic.id === source.topic.id)?.topic.status).toBe("merged");
+  it("moves merge evidence exactly and rolls back conflicts", () => {
+    const { db, service } = fixture.createTestService(); const repos = new Repositories(db.db); const at = new Date().toISOString(); const namespaceId = "local:project";
+    const requested = [insertTrace(service, "isolated alpha evidence", "merge-source-1"), insertTrace(service, "unrelated omega evidence", "merge-source-2"), insertTrace(service, "separate target evidence", "merge-target-1")];
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const ids = requested;
+    const topic = (id: string, sourceIds: string[]) => ({ id, namespaceId, projectId: "project", title: id, summary: id, status: "active" as const, version: 1, sourceMemoryIds: sourceIds, metadata: {}, createdAt: at, updatedAt: at });
+    repos.topics.insertTopic(topic("source-topic", ids.slice(0, 2))); repos.topics.insertTopic(topic("target-topic", ids.slice(2)));
+    ids.slice(0, 2).forEach((memoryId, index) => repos.topics.attachEvidence({ id: `se-${index}`, topicId: "source-topic", namespaceId, memoryId, role: "evidence", summary: "source", metadata: {}, createdAt: at }));
+    repos.topics.attachEvidence({ id: "te-1", topicId: "target-topic", namespaceId, memoryId: ids[2]!, role: "evidence", summary: "target", metadata: {}, createdAt: at });
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    expect(() => inbox.merge(namespace, "source-topic", { targetTopicId: "target-topic", expectedVersion: 2, targetExpectedVersion: 1 })).toThrow("conflict");
+    expect(repos.topics.listEvidence("source-topic", namespaceId)).toHaveLength(2);
+    inbox.merge(namespace, "source-topic", { targetTopicId: "target-topic", expectedVersion: 1, targetExpectedVersion: 1 });
+    expect(repos.topics.getTopic("source-topic", namespaceId)).toMatchObject({ status: "merged", sourceMemoryIds: [] });
+    expect(repos.topics.listEvidence("source-topic", namespaceId)).toEqual([]);
+    expect(new Set(repos.topics.listEvidence("target-topic", namespaceId).map((item) => item.memoryId)).size).toBe(3);
   });
 
   it("preserves the prior topic version when model output is invalid", async () => {

@@ -57,3 +57,8 @@ Exact fresh verification:
 
 - Continued round 2: local error envelope explicitly maps `MemoryLayerError.details`; exact local 409 regression passed (12/12 route tests). Embedded topic operations now report a read/write-neutral 503 message.
 - Clean generated-artifact proof: `mv App/backend/local-api-contracts/dist /tmp/memmy-contracts-dist-round2 && npm run build -w @memmy/local-api-contracts && npm --prefix Memory run typecheck && rm -rf /tmp/memmy-contracts-dist-round2` -> PASS; contracts dist was rebuilt from absence before Memory typecheck.
+
+- Final round 2 closure: deterministic merge fixture asserts conflict rollback, exact source evidence removal, merged status/empty source IDs, and target unique evidence cardinality. Decision idempotency now stores the complete HTTP response, preserving exact `serverTime`/`auditId`; regression asserts one mutation/audit and runtime actor provenance. Stable context directly excludes the pending candidate.
+- Embedded list/evidence exact `memory_layer_unavailable` 503 status/message assertion passes.
+- Fresh verification: `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/evolution/project-topic-inbox.test.ts` -> PASS, 2 files / 35 tests.
+- Fresh verification: `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/outbound/memory-client/tests/memos-sqlite-memory-client.test.ts -t "topic|structured|explicit 503" src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts && npm run typecheck` -> PASS, 4 files / 6 focused tests (95 skipped by filter), backend typecheck and prerequisite builds pass.

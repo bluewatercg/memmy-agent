@@ -58,6 +58,14 @@ describe("createMemosSqliteMemoryClient", { timeout: 10_000 }, () => {
     expect(state.goals.map((item) => item.id)).toEqual([goal.id]);
     expect(state.goals[0]?.title).toBe("Task 4");
   });
+
+  it("returns explicit 503 for embedded topic inbox reads", async () => {
+    const client = createMemosSqliteMemoryClient({ sources: [] });
+    const namespace = { source: "codex", profileId: "default", projectId: "project-4" };
+    for (const operation of [client.listTopicInbox({ namespace }), client.topicEvidence("topic-1", { namespace, limit: 20 })]) {
+      await expect(operation).rejects.toMatchObject({ code: "memory_layer_unavailable", status: 503, message: "topic inbox requires the Memory service topic repository" });
+    }
+  });
   it("preserves Span memory kinds in panel responses", async () => {
     const dbPath = createMemoryDatabase({
       id: "span_sqlite_1",
