@@ -112,3 +112,27 @@ npm run typecheck -- --pretty false
 ```
 
 Output: completed successfully.
+
+## Fix Round 4
+
+Replaced the sequential two-connection check with two Node worker threads. Each worker opens an independent `better-sqlite3` connection to the same temporary database, waits until both connections are ready, and then rendezvous on a shared atomic barrier immediately before each of 32 calls to the actual `ProjectTopicRepository.recordAnalysisRun` method. For every shared namespace/input hash, both calls complete and return the same canonical row; a final independent connection observes exactly 32 rows.
+
+This distinguishes the atomic upsert from the old find-then-insert implementation because both workers begin each repository call concurrently. With no row present at the barrier, repeated rounds provide genuine read/write overlap: the old implementation can let both connections observe absence and then race plain inserts, exposing a unique-constraint error, while the targeted `ON CONFLICT(namespace_id, input_hash) DO NOTHING` serializes the conflicting writes and reads back the winner.
+
+```bash
+cd Memory
+npm test -- --run tests/repository/project-topic-repository.test.ts
+```
+
+```text
+Test Files  1 passed (1)
+Tests       6 passed (6)
+Duration    4.71s
+```
+
+```bash
+cd Memory
+npm run typecheck -- --pretty false
+```
+
+Output: completed successfully.

@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { describe, expect, it } from "vitest";
 import { MemoryDb } from "../../src/storage/db.js";
 import { ProjectTopicRepository, Repositories } from "../../src/storage/repositories.js";
@@ -90,24 +91,51 @@ describe("project topic repository", () => {
     expect(() => repo.recordAnalysisRun({ ...run, namespaceId: "local:project-b", inputHash: "other" })).toThrow();
   }));
 
-  it("converges competing connections on one canonical analysis run", () => {
+  it("converges genuinely competing writers on one canonical analysis run", async () => {
     const root = mkdtempSync(join(tmpdir(), "project-topic-analysis-race-"));
     const path = join(root, "memory.sqlite");
-    const firstDb = new MemoryDb({ path });
-    const secondDb = new MemoryDb({ path });
+    const setupDb = new MemoryDb({ path });
+    setupDb.close();
+    const rounds = 32;
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 3);
+    const barrierState = new Int32Array(barrier);
+    const workerUrl = new URL("./project-topic-analysis-writer.mjs", import.meta.url);
+    const runWriter = (writer: string): { ready: Promise<void>; results: Promise<Array<{ id: string; inputHash: string }>> } => {
+      let markReady!: () => void;
+      let resolveResults!: (value: Array<{ id: string; inputHash: string }>) => void;
+      let rejectResults!: (reason: unknown) => void;
+      // Promise executors are required here because this package targets ES2022, before Promise.withResolvers.
+      const ready = new Promise<void>((resolve) => { markReady = resolve; });
+      const results = new Promise<Array<{ id: string; inputHash: string }>>((resolve, reject) => { resolveResults = resolve; rejectResults = reject; });
+      const worker = new Worker(workerUrl, { execArgv: ["--import", "tsx"], workerData: { barrier, now: NOW, path, rounds, writer } });
+      worker.on("message", (message: { error?: string; ready?: boolean; results?: Array<{ id: string; inputHash: string }> }) => {
+        if (message.ready) markReady();
+        else if (message.error) rejectResults(new Error(message.error));
+        else resolveResults(message.results ?? []);
+      });
+      worker.once("error", rejectResults);
+      return { ready, results };
+    };
+
     try {
-      const firstRepo = new Repositories(firstDb.db).topics;
-      const secondRepo = new Repositories(secondDb.db).topics;
-      const first = { id: "run-first", namespaceId: "local:project-a", inputHash: "shared-hash", status: "completed", result: { writer: "first" }, createdAt: NOW, updatedAt: NOW };
-      const second = { ...first, id: "run-second", result: { writer: "second" } };
-      expect(firstRepo.recordAnalysisRun(first)).toEqual(first);
-      expect(secondRepo.recordAnalysisRun(second)).toEqual(first);
-      expect(firstRepo.findAnalysisRun(first.namespaceId, first.inputHash)).toEqual(first);
-      expect(secondRepo.findAnalysisRun(first.namespaceId, first.inputHash)).toEqual(first);
-      expect(firstDb.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_analysis_runs WHERE namespace_id = ? AND input_hash = ?`).get(first.namespaceId, first.inputHash)).toEqual({ count: 1 });
+      const firstWriter = runWriter("first");
+      const secondWriter = runWriter("second");
+      await Promise.all([firstWriter.ready, secondWriter.ready]);
+      Atomics.store(barrierState, 2, 1);
+      Atomics.notify(barrierState, 2, 2);
+      const [firstResults, secondResults] = await Promise.all([firstWriter.results, secondWriter.results]);
+      expect(firstResults).toHaveLength(rounds);
+      expect(secondResults).toHaveLength(rounds);
+      for (let round = 0; round < rounds; round += 1) {
+        expect(secondResults[round]).toEqual(firstResults[round]);
+      }
+      const verificationDb = new MemoryDb({ path });
+      try {
+        expect(verificationDb.db.prepare(`SELECT COUNT(*) AS count FROM project_topic_analysis_runs WHERE namespace_id = ?`).get("local:project-a")).toEqual({ count: rounds });
+      } finally {
+        verificationDb.close();
+      }
     } finally {
-      secondDb.close();
-      firstDb.close();
       rmSync(root, { recursive: true, force: true });
     }
   });
