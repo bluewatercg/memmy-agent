@@ -175,8 +175,17 @@ describe("MemoryService / REST contract", () => {
       expect((await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify({ namespace }) })).status).toBe(403);
       const refresh = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace }) });
       expect(await refresh.json()).toEqual({ jobId: "job-1", unchanged: true });
-      const evidence = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=500`, { headers: { authorization: "Bearer reader" } });
+      expect((await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=500`, { headers: { authorization: "Bearer reader" } })).status).toBe(400);
+      const evidence = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=100`, { headers: { authorization: "Bearer reader" } });
       const expanded = await evidence.json() as { items: unknown[]; limit: number }; expect(expanded.limit).toBe(100); expect(expanded.items).toHaveLength(100);
+      const malformed = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace, unknown: true }) });
+      expect(malformed.status).toBe(400);
+      const badStatus = await fetch(`${base}/api/v1/topic-inbox?namespace=${encoded}&statuses=invalid`, { headers: { authorization: "Bearer reader" } });
+      expect(badStatus.status).toBe(400);
+      const replayBody = JSON.stringify({ namespace, requestId: "refresh-replay" });
+      const replayOne = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: replayBody });
+      const replayTwo = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: replayBody });
+      expect(await replayTwo.json()).toEqual(await replayOne.json());
     });
     db.close();
   });

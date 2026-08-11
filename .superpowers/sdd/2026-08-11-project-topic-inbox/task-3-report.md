@@ -43,3 +43,5 @@ Exact fresh verification:
 
 - `cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/contract/memory-rest-service.test.ts` -> PASS, 2 files / 35 tests.
 - `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts && npm run typecheck` -> PASS, 3 files / 84 tests; backend typecheck and prerequisite Memory/contracts builds passed.
+
+- Exact REST regression extension: strict unknown fields and invalid statuses return 400; evidence limit above 100 returns 400; identical refresh `requestId` replays the same response. `cd Memory && npm test -- --run tests/contract/memory-rest-service.test.ts` -> PASS, 1 file / 19 tests.
