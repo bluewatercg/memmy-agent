@@ -2209,11 +2209,16 @@ export class RuntimeRepository {
     return (parseJson<Record<string, unknown>>(row.response_json, {}).__memmyIdempotencyInflight === true) ? "inflight" : "complete";
   }
   claimLegacyIdempotency(legacyKey: string, newKey: string, requestHash: string): "inflight" | "complete" | "conflict" | "missing" {
-    const row = this.db.prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`).get(legacyKey) as { request_hash: string; response_json: string } | undefined;
-    if (!row) return "missing";
-    if (row.request_hash !== requestHash) return "conflict";
-    this.db.prepare(`INSERT OR IGNORE INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at) SELECT ?, request_hash, response_json, created_at, expires_at FROM idempotency_keys WHERE key = ?`).run(newKey, legacyKey);
-    return parseJson<Record<string, unknown>>(row.response_json, {}).__memmyIdempotencyInflight === true ? "inflight" : "complete";
+    return this.db.transaction(() => {
+      const legacy = this.db.prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`).get(legacyKey) as { request_hash: string; response_json: string } | undefined;
+      if (!legacy) return "missing";
+      if (legacy.request_hash !== requestHash) return "conflict";
+      if (parseJson<Record<string, unknown>>(legacy.response_json, {}).__memmyIdempotencyInflight === true) return "inflight";
+      this.db.prepare(`INSERT OR IGNORE INTO idempotency_keys (key, request_hash, response_json, created_at, expires_at) SELECT ?, request_hash, response_json, created_at, expires_at FROM idempotency_keys WHERE key = ?`).run(newKey, legacyKey);
+      const scoped = this.db.prepare(`SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?`).get(newKey) as { request_hash: string; response_json: string } | undefined;
+      if (!scoped || scoped.request_hash !== requestHash) return "conflict";
+      return parseJson<Record<string, unknown>>(scoped.response_json, {}).__memmyIdempotencyInflight === true ? "inflight" : "complete";
+    })();
   }
 
   completeIdempotency(key: string, requestHash: string, response: unknown): void {

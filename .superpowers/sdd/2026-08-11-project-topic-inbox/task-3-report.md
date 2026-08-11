@@ -103,3 +103,9 @@ Residual risk: the durable lease marker currently has no explicit owner/expiry c
 
 - Namespace-scoped idempotency now checks the pre-upgrade `${operation}:${adapterId}:${requestId}` key when the new scoped key is absent, validates the request hash, and aliases the completed/in-flight row without rerunning side effects. New writes remain immutable first-writer claims; mismatched legacy payloads conflict.
 - `cd Memory && npm run typecheck && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts` -> PASS, 2 files / 23 tests.
+
+## Compatibility Repair
+
+- Legacy migration is now a repository transaction that re-reads legacy state, never aliases an in-flight marker, inserts a completed scoped alias only if absent, then re-reads and validates the actual scoped winner. Service followers poll the legacy identity until completion before migration/replay; hash races conflict deterministically.
+- `cd Memory && npm run typecheck && npm test -- --run tests/contract/memory-rest-service.test.ts tests/service/session/session-lifecycle.test.ts` -> PASS, 2 files / 23 tests.
+- `npm --prefix App/backend run typecheck` -> PASS, including contracts and Memory prerequisite builds. An initial backend command from `Memory/` used the wrong relative prefix and failed ENOENT before the corrected root command passed.

@@ -719,9 +719,11 @@ export class MemoryService {
     const legacyKey = request.adapterId && request.requestId ? `${operation}:${request.adapterId}:${request.requestId}` : undefined;
     const requestHash = stableHash({ operation, fingerprint });
     if (legacyKey && legacyKey !== idempotencyKey && !this.repos.runtime.getIdempotency(idempotencyKey)) {
-      const legacy = this.repos.runtime.claimLegacyIdempotency(legacyKey, idempotencyKey, requestHash);
+      let legacy = this.repos.runtime.claimLegacyIdempotency(legacyKey, idempotencyKey, requestHash);
+      for (let attempt = 0; legacy === "inflight" && attempt < 200; attempt += 1) { await new Promise<void>((resolve) => setTimeout(resolve, 5)); legacy = this.repos.runtime.claimLegacyIdempotency(legacyKey, idempotencyKey, requestHash); }
       if (legacy === "conflict") throw new MemoryServiceError("conflict", "idempotency key reused with different request body");
       if (legacy === "complete") { const existing = this.repos.runtime.getIdempotency(idempotencyKey); if (!existing) throw new MemoryServiceError("internal", "legacy idempotency migration failed"); return (options.exactReplay ? existing.response : withDuplicateFlag(existing.response)) as T; }
+      if (legacy === "inflight") throw new MemoryServiceError("conflict", "legacy idempotency request is still in progress");
     }
     const entry = { tail: Promise.resolve() };
     const prior = this.idempotencyLocks.get(idempotencyKey); let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; }); entry.tail = (prior?.tail ?? Promise.resolve()).then(() => gate); this.idempotencyLocks.set(idempotencyKey, entry); await (prior?.tail ?? Promise.resolve());
