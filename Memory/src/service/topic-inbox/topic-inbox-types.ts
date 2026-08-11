@@ -12,6 +12,7 @@ export type TopicVerificationStatus = "unverified" | "failed" | "verified";
 
 export interface TopicCandidateAnalysis {
   title: string;
+  stableKey?: string;
   conclusion: string;
   proposedLayer: "L2" | "L3" | "Skill";
   risk: TopicRisk;

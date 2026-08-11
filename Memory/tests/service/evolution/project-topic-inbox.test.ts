@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import type { EnqueueJobInput } from "../../../src/service/worker/job-handlers.js";
 import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories, type LlmClient } from "../../../src/index.js";
 import { ProjectTopicInboxService } from "../../../src/service/topic-inbox/project-topic-inbox.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
@@ -78,5 +79,43 @@ describe("ProjectTopicInbox", () => {
     repos.memories.update({ ...changed, version: changed.version + 1, memoryValue: `${changed.memoryValue}\nchanged`, updatedAt: new Date().toISOString() });
     await expect(inbox.ingest(memoryId)).rejects.toThrow("invalid topic analysis result");
     expect(inbox.list(namespace).topics[0]!.topic.version).toBe(before.version);
+  });
+
+  it("paginates the full refresh corpus and requeues a failed same-cursor job", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    for (let index = 0; index < 7; index += 1) insertTrace(service, `independent refresh trace ${index}`, `refresh-${index}`);
+    const enqueueJob = (input: EnqueueJobInput) => repos.runtime.enqueueJob({
+      id: `refresh-job-${Date.now()}-${Math.random()}`, jobType: input.jobType, status: "queued", dedupeKey: input.dedupeKey ?? `topic_refresh:${String(input.payload?.namespaceId)}:${String(input.payload?.evidenceCursor)}`,
+      userId: input.userId, payload: input.payload ?? {}, attempts: 0, maxAttempts: 3, createdAt: input.createdAt ?? new Date().toISOString(), updatedAt: input.createdAt ?? new Date().toISOString()
+    });
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([{ topic: { title: "Refresh", summary: "Refresh corpus" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item), enqueueJob, refreshPageSize: 3 });
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const first = await inbox.refresh(namespace);
+    expect((repos.runtime.getJob(first.jobId)?.payload as { evidenceCursor?: string }).evidenceCursor).toBeTruthy();
+    repos.runtime.failJob(first.jobId, "transient");
+    const retried = await inbox.refresh(namespace);
+    expect(retried).toEqual({ jobId: first.jobId, unchanged: false });
+    expect(repos.runtime.getJob(first.jobId)?.status).toBe("queued");
+    await inbox.processRefresh(namespace);
+    expect(inbox.list(namespace).topics.reduce((count, item) => count + item.evidence.length, 0)).toBe(7);
+  });
+
+  it("keeps Unicode same-title candidates distinct while preserving stable-key lineage", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "中文发布流程", "unicode-candidates");
+    const base = { title: "发布检查", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] };
+    const inbox = new ProjectTopicInboxService({ repos, llm: topicLlm([
+      { topic: { title: "发布", summary: "中文流程" }, candidates: [{ ...base, stableKey: "frontend", conclusion: "检查前端。" }, { ...base, stableKey: "backend", conclusion: "检查后端。" }] },
+      { topic: { title: "发布", summary: "中文流程更新" }, candidates: [{ ...base, stableKey: "backend", conclusion: "检查后端。" }, { ...base, stableKey: "frontend", conclusion: "检查前端和资源。" }] }
+    ]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item) => repos.memories.upsertByKey(item) });
+    await inbox.ingest(memoryId);
+    const changed = repos.memories.get(memoryId)!;
+    repos.memories.update({ ...changed, version: changed.version + 1, memoryValue: `${changed.memoryValue}\nupdated`, updatedAt: new Date().toISOString() });
+    await inbox.ingest(memoryId);
+    const candidates = inbox.list({ source: "codex", profileId: "p", userId: "u", projectId: "project" }).topics[0]!.candidates;
+    expect(candidates.filter((item) => item.status === "pending").map((item) => item.metadata.stableKey).sort()).toEqual(["backend", "frontend"]);
+    expect(candidates.find((item) => item.metadata.stableKey === "frontend" && item.status === "pending")?.supersedesId).toBeTruthy();
   });
 });

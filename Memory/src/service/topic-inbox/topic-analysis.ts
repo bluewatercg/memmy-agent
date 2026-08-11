@@ -40,7 +40,8 @@ function validateCandidate(value: unknown): TopicCandidateAnalysis {
   const confidence = enumValue(value.confidence, ["low", "medium", "high"] as const, "confidence");
   const verificationStatus = enumValue(value.verificationStatus, ["unverified", "failed", "verified"] as const, "verificationStatus");
   if (typeof value.title !== "string" || !value.title.trim() || typeof value.conclusion !== "string" || !value.conclusion.trim() || typeof value.verificationEvidence !== "string") throw new Error("invalid topic candidate fields");
-  return { title: value.title.trim(), conclusion: value.conclusion.trim(), proposedLayer, risk, confidence, verificationStatus, verificationEvidence: value.verificationEvidence.trim(), sourceEvidenceIds: stringArray(value.sourceEvidenceIds), conflicts: stringArray(value.conflicts), sensitiveCategories: stringArray(value.sensitiveCategories) };
+  const stableKey = value.stableKey === undefined ? undefined : validatedStableKey(value.stableKey);
+  return { title: value.title.trim(), ...(stableKey ? { stableKey } : {}), conclusion: value.conclusion.trim(), proposedLayer, risk, confidence, verificationStatus, verificationEvidence: value.verificationEvidence.trim(), sourceEvidenceIds: stringArray(value.sourceEvidenceIds), conflicts: stringArray(value.conflicts), sensitiveCategories: stringArray(value.sensitiveCategories) };
 }
 
 function enumValue<const T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {
@@ -51,5 +52,12 @@ function enumValue<const T extends readonly string[]>(value: unknown, allowed: T
 function stringArray(value: unknown): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error("invalid topic candidate array");
   return value.map((item) => item.trim()).filter(Boolean);
+}
+
+function validatedStableKey(value: unknown): string {
+  if (typeof value !== "string") throw new Error("invalid topic candidate stableKey");
+  const normalized = value.normalize("NFKC").trim();
+  if (!normalized || normalized.length > 128 || !/^[\p{L}\p{N}_.:/ -]+$/u.test(normalized)) throw new Error("invalid topic candidate stableKey");
+  return normalized;
 }
 

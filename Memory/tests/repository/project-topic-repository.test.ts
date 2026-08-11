@@ -103,6 +103,14 @@ describe("project topic repository", () => {
     expect(() => repo.recordAnalysisRun({ ...run, namespaceId: "local:project-b", inputHash: "other" })).toThrow();
   }));
 
+  it("reclaims expired analysis claims and rejects stale owner completion", () => withRepo((repo) => {
+    expect(repo.claimAnalysisRun({ id: "run-lease", namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-a", at: NOW, leaseUntil: "2026-08-11T00:01:00.000Z" })).toBe(true);
+    expect(repo.claimAnalysisRun({ id: "run-other", namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-b", at: "2026-08-11T00:00:30.000Z", leaseUntil: "2026-08-11T00:02:00.000Z" })).toBe(false);
+    expect(repo.claimAnalysisRun({ id: "run-other", namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-b", at: "2026-08-11T00:01:00.000Z", leaseUntil: "2026-08-11T00:02:00.000Z" })).toBe(true);
+    expect(repo.completeAnalysisRun({ namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-a", status: "succeeded", result: {}, at: "2026-08-11T00:01:01.000Z" })).toBe(false);
+    expect(repo.completeAnalysisRun({ namespaceId: "local:project-a", inputHash: "lease-hash", owner: "owner-b", status: "succeeded", result: { ok: true }, at: "2026-08-11T00:01:01.000Z" })).toBe(true);
+  }));
+
   it("converges genuinely competing writers on one canonical analysis run", async () => {
     const root = mkdtempSync(join(tmpdir(), "project-topic-analysis-race-"));
     const path = join(root, "memory.sqlite");

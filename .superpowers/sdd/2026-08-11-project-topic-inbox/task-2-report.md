@@ -106,3 +106,16 @@ Result: 4 files passed, 29 tests passed.
 `cd Memory && npm run typecheck`
 
 Result: TypeScript completed successfully with no diagnostics.
+
+## Fix Round 4
+
+- Added explicit owner and lease expiry columns for analysis claims, compatible migration of existing v7 databases, deterministic expired-claim recovery, and stale-owner completion guards.
+- Refresh now paginates the complete eligible L1 corpus through an injected bounded page size and only treats queued, leased, or succeeded same-cursor jobs as unchanged; failed jobs are durably requeued.
+- Topic centroids update whenever vector evidence changes, independently from text/source changes. Mixed dimensions deterministically use the most common dimension (largest dimension breaks ties).
+- Candidate slots accept a validated Unicode-normalized model `stableKey`; absent a key, source evidence and category form the deterministic discriminator, preserving changed-conclusion lineage while separating same-title candidates.
+
+`cd Memory && npm run typecheck && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/service/evolution/project-topic-worker.test.ts tests/service/evolution/orchestration.test.ts tests/service/evolution/policy-induction.test.ts tests/repository/project-topic-repository.test.ts tests/repository/sqlite-schema.test.ts`
+
+Result: TypeScript completed successfully with no diagnostics. 6 test files passed, 46 tests passed.
+
+Dedicated WorkerRunner retry/dead-letter tests and an injected approval rollback test remain to be added; existing production worker failure handling and transaction behavior are unchanged and the focused suites pass.

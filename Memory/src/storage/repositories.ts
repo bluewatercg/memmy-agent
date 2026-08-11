@@ -3701,21 +3701,24 @@ export class ProjectTopicRepository {
     return row ? analysisRunFromSql(row) : undefined;
   }
 
-  claimAnalysisRun(input: { id: string; namespaceId: string; inputHash: string; owner: string; at: string }): boolean {
+  claimAnalysisRun(input: { id: string; namespaceId: string; inputHash: string; owner: string; at: string; leaseUntil: string }): boolean {
     return this.db.transaction(() => {
-      const existing = this.findAnalysisRun(input.namespaceId, input.inputHash);
-      if (existing && existing.status !== "failed") return false;
-      if (existing) {
-        const result = this.db.prepare(`UPDATE project_topic_analysis_runs SET status = 'claimed', result_json = ?, updated_at = ? WHERE namespace_id = ? AND input_hash = ? AND status = 'failed'`).run(toJson({ owner: input.owner }), input.at, input.namespaceId, input.inputHash);
-        return result.changes === 1;
-      }
-      this.recordAnalysisRun({ id: input.id, namespaceId: input.namespaceId, inputHash: input.inputHash, status: "claimed", result: { owner: input.owner }, createdAt: input.at, updatedAt: input.at });
-      return true;
+      const result = this.db.prepare(`UPDATE project_topic_analysis_runs
+        SET status = 'claimed', owner = ?, lease_until = ?, result_json = '{}', updated_at = ?
+        WHERE namespace_id = ? AND input_hash = ?
+          AND (status = 'failed' OR (status = 'claimed' AND lease_until IS NOT NULL AND lease_until <= ?))`)
+        .run(input.owner, input.leaseUntil, input.at, input.namespaceId, input.inputHash, input.at);
+      if (result.changes === 1) return true;
+      const inserted = this.db.prepare(`INSERT INTO project_topic_analysis_runs
+        (id, namespace_id, input_hash, status, owner, lease_until, result_json, created_at, updated_at)
+        VALUES (?, ?, ?, 'claimed', ?, ?, '{}', ?, ?) ON CONFLICT(namespace_id, input_hash) DO NOTHING`)
+        .run(input.id, input.namespaceId, input.inputHash, input.owner, input.leaseUntil, input.at, input.at);
+      return inserted.changes === 1;
     })();
   }
 
   completeAnalysisRun(input: { namespaceId: string; inputHash: string; owner: string; status: "succeeded" | "failed"; topicId?: string; result: Record<string, unknown>; at: string }): boolean {
-    const result = this.db.prepare(`UPDATE project_topic_analysis_runs SET topic_id = ?, status = ?, result_json = ?, updated_at = ? WHERE namespace_id = ? AND input_hash = ? AND status = 'claimed' AND json_extract(result_json, '$.owner') = ?`).run(input.topicId ?? null, input.status, toJson(input.result), input.at, input.namespaceId, input.inputHash, input.owner);
+    const result = this.db.prepare(`UPDATE project_topic_analysis_runs SET topic_id = ?, status = ?, owner = NULL, lease_until = NULL, result_json = ?, updated_at = ? WHERE namespace_id = ? AND input_hash = ? AND status = 'claimed' AND owner = ?`).run(input.topicId ?? null, input.status, toJson(input.result), input.at, input.namespaceId, input.inputHash, input.owner);
     return result.changes === 1;
   }
 }

@@ -16,6 +16,9 @@ export interface ProjectTopicInboxDeps {
   buildMemory(input: Record<string, unknown>): MemoryRow;
   upsertMemory(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
   enqueueJob?(input: EnqueueJobInput): EvolutionJobRecord;
+  now?: () => string;
+  analysisLeaseMs?: number;
+  refreshPageSize?: number;
 }
 
 export class ProjectTopicInboxService implements ProjectTopicInbox {
@@ -28,7 +31,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const namespaceId = namespaceIdFromContext(namespace);
     const match = matchProjectTopic(memory, this.deps.repos.topics.listTopics(namespaceId, ["active"]));
     if (match.confidence === "ambiguous") return { assigned: false, unchanged: true, candidateIds: [] };
-    const at = nowIso();
+    const at = this.now();
     const topic = match.topic ?? this.newTopic(memory, namespaceId, at);
     const existingEvidence = this.deps.repos.topics.listEvidence(topic.id, namespaceId);
     const alreadyAttached = existingEvidence.some((item) => item.memoryId === memory.id);
@@ -36,40 +39,47 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const evidence = [...existingEvidence.map((item) => ({ memory: this.deps.repos.memories.get(item.memoryId)!, role: rolesFromEvidence(item) })), ...(!alreadyAttached ? [{ memory, role: match.roles }] : [])].filter((item) => Boolean(item.memory));
     const inputHash = topicAnalysisInputHash(match.topic, evidence);
     const claimOwner = newId("topic_analysis_owner");
-    if (!this.deps.repos.topics.claimAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, owner: claimOwner, at })) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
+    const leaseUntil = new Date(Date.parse(at) + (this.deps.analysisLeaseMs ?? 5 * 60_000)).toISOString();
+    if (!this.deps.repos.topics.claimAnalysisRun({ id: newId("topic_analysis"), namespaceId, inputHash, owner: claimOwner, at, leaseUntil })) return { assigned: true, unchanged: true, topicId: topic.id, candidateIds: [] };
     let analysis;
     try {
       analysis = await analyzeProjectTopic({ llm: this.deps.llm, topic: match.topic, evidence });
     } catch (error) {
-      this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "failed", result: { error: error instanceof Error ? error.message : String(error) }, at: nowIso() });
+      this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "failed", result: { error: error instanceof Error ? error.message : String(error) }, at: this.now() });
       throw error;
     }
     const createdCandidates: ProjectTopicCandidateRecord[] = [];
-    this.deps.repos.transaction(() => {
-      if (!match.topic) this.deps.repos.topics.insertTopic(topic);
-      if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
-      const sourceMemoryIds = evidence.map((item) => item.memory.id);
-      const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
-      const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
-      const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
-      if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) }, version: current.version + 1, updatedAt: at }, current.version);
-      const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
-      const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
-      const retained = new Set<string>();
-      for (const candidate of analysis.candidates) {
-        const identity = candidateIdentity(candidate);
-        const predecessor = pendingByIdentity.get(identity);
-        if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) { retained.add(predecessor.id); continue; }
-        const policy = evaluateTopicAutoApproval(candidate, evidence.map((item) => item.memory));
-        const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, candidateIdentity: identity, policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
-        this.deps.repos.topics.insertCandidate(record);
-        createdCandidates.push(record);
-        retained.add(record.id);
-        if (policy.approved && !this.hasDuplicateMemory(record, namespace)) this.approve(record, true);
-      }
-      for (const obsolete of pending.filter((item) => !retained.has(item.id) && item.status === "pending")) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
-      if (!this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "succeeded", topicId: topic.id, result: { topic: analysis.topic, candidates: analysis.candidates }, at })) throw new Error("topic analysis claim lost");
-    });
+    try {
+      this.deps.repos.transaction(() => {
+        if (!match.topic) this.deps.repos.topics.insertTopic(topic);
+        if (!alreadyAttached) this.deps.repos.topics.attachEvidence({ id: newId("topic_evidence"), topicId: topic.id, namespaceId, memoryId: memory.id, role: primaryRole, summary: memory.memoryValue.slice(0, 500), metadata: { roles: match.roles, contentHash: memory.contentHash, episodeId: stringField(memory.properties.internal_info, "episode_id") }, createdAt: at });
+        const sourceMemoryIds = evidence.map((item) => item.memory.id);
+        const current = this.deps.repos.topics.getTopic(topic.id, namespaceId)!;
+        const embeddingCentroid = centroid(evidence.map((item) => traceVector(item.memory)).filter((vector): vector is number[] => Boolean(vector)));
+        const centroidChanged = !sameNumbers(numberArray(current.metadata.embeddingCentroid), embeddingCentroid);
+        const materiallyChanged = current.title !== analysis.topic.title || current.summary !== analysis.topic.summary || !sameStrings(current.sourceMemoryIds, sourceMemoryIds);
+        if (materiallyChanged || centroidChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata: { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), ...(embeddingCentroid.length ? { embeddingCentroid } : {}) }, version: current.version + 1, updatedAt: at }, current.version);
+        const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
+        const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
+        const retained = new Set<string>();
+        for (const candidate of analysis.candidates) {
+          const identity = candidateIdentity(candidate);
+          const predecessor = pendingByIdentity.get(identity);
+          if (predecessor && predecessor.conclusion === candidate.conclusion && predecessor.proposedLayer === candidate.proposedLayer) { retained.add(predecessor.id); continue; }
+          const policy = evaluateTopicAutoApproval(candidate, evidence.map((item) => item.memory));
+          const record: ProjectTopicCandidateRecord = { id: newId("topic_candidate"), topicId: topic.id, namespaceId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: "pending", version: 1, supersedesId: predecessor?.id, sourceMemoryIds: candidate.sourceEvidenceIds, metadata: { ...candidate, candidateIdentity: identity, ...(candidate.stableKey ? { stableKey: candidate.stableKey } : {}), policyVersion: policy.policyVersion, autoApprovalRejectionReasons: policy.rejectionReasons, verifiedEvidenceIds: policy.verifiedEvidenceIds, model: this.deps.llm.config.model ?? this.deps.llm.config.provider }, createdAt: at, updatedAt: at };
+          this.deps.repos.topics.insertCandidate(record);
+          createdCandidates.push(record);
+          retained.add(record.id);
+          if (policy.approved && !this.hasDuplicateMemory(record, namespace)) this.approve(record, true);
+        }
+        for (const obsolete of pending.filter((item) => !retained.has(item.id) && item.status === "pending")) this.deps.repos.topics.updateCandidate({ ...obsolete, status: "superseded", version: obsolete.version + 1, updatedAt: at }, obsolete.version);
+        if (!this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "succeeded", topicId: topic.id, result: { topic: analysis.topic, candidates: analysis.candidates }, at })) throw new Error("topic analysis claim lost");
+      });
+    } catch (error) {
+      this.deps.repos.topics.completeAnalysisRun({ namespaceId, inputHash, owner: claimOwner, status: "failed", result: { error: error instanceof Error ? error.message : String(error) }, at: this.now() });
+      throw error;
+    }
     return { assigned: true, unchanged: false, topicId: topic.id, candidateIds: createdCandidates.map((item) => item.id) };
   }
 
@@ -93,11 +103,13 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     if (!this.deps.enqueueJob) throw new Error("topic refresh requires a durable job queue");
     const normalized = normalizeNamespace(namespace);
     const namespaceId = namespaceIdFromContext(normalized);
-    const corpus = this.eligibleCorpus(normalized);
-    const cursor = corpusCursor(corpus);
+    const cursor = corpusCursor(this.eligibleCorpus(normalized));
     const requestKey = `topic_refresh_request:${namespaceId}`;
     const prior = this.deps.repos.runtime.getKv(requestKey)?.value;
-    if (isRefreshRequest(prior) && prior.cursor === cursor) return { jobId: prior.jobId, unchanged: true };
+    if (isRefreshRequest(prior) && prior.cursor === cursor) {
+      const job = this.deps.repos.runtime.getJob(prior.jobId);
+      if (job && (job.status === "queued" || job.status === "leased" || job.status === "succeeded")) return { jobId: prior.jobId, unchanged: true };
+    }
     const job = this.deps.enqueueJob({ jobType: "topic_refresh", userId: normalized.userId, payload: { namespace: normalized, namespaceId, evidenceCursor: cursor } });
     this.deps.repos.runtime.setKv(requestKey, { cursor, jobId: job.id });
     return { jobId: job.id, unchanged: false };
@@ -114,7 +126,14 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
   }
 
   private eligibleCorpus(namespace: RuntimeNamespace): MemoryRow[] {
-    return this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated", ...namespaceFilter(namespace) }, 10_000).sort((a, b) => a.id.localeCompare(b.id));
+    const pageSize = Math.max(1, this.deps.refreshPageSize ?? 1000);
+    const result: MemoryRow[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = this.deps.repos.memories.list({ memoryLayer: "L1", status: "activated", ...namespaceFilter(namespace) }, pageSize, offset);
+      result.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return result.sort((a, b) => a.id.localeCompare(b.id));
   }
 
   private newTopic(memory: MemoryRow, namespaceId: string, at: string): ProjectTopicRecord {
@@ -152,6 +171,8 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
     const normalized = candidate.conclusion.trim().toLowerCase();
     return this.deps.repos.memories.list({ memoryLayer: "L2", ...namespaceFilter(namespace) }, 10_000).some((memory) => memory.status !== "archived" && memory.memoryValue.trim().toLowerCase() === normalized);
   }
+
+  private now(): string { return this.deps.now?.() ?? nowIso(); }
 }
 
 function namespaceFilter(namespace: RuntimeNamespace): { tenantId: string; projectId: string } {
@@ -172,12 +193,13 @@ function corpusCursor(memories: MemoryRow[]): string {
 function isRefreshRequest(value: unknown): value is { cursor: string; jobId: string } {
   return Boolean(value && typeof value === "object" && "cursor" in value && typeof value.cursor === "string" && "jobId" in value && typeof value.jobId === "string");
 }
-function candidateIdentity(candidate: { proposedLayer: string; title: string; conclusion: string; sensitiveCategories: string[] }): string {
+function candidateIdentity(candidate: { proposedLayer: string; title: string; stableKey?: string; sourceEvidenceIds?: string[]; sensitiveCategories: string[] }): string {
   const normalizedTitle = candidate.title.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
-  return stableHash({ layer: candidate.proposedLayer, title: normalizedTitle, category: [...candidate.sensitiveCategories].map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort() }).slice(0, 32);
+  const discriminator = candidate.stableKey?.normalize("NFKC").toLocaleLowerCase() ?? stableHash({ evidence: [...(candidate.sourceEvidenceIds ?? [])].sort(), category: [...candidate.sensitiveCategories].map((item) => item.normalize("NFKC").toLocaleLowerCase()).sort() });
+  return stableHash({ layer: candidate.proposedLayer, title: normalizedTitle, discriminator }).slice(0, 32);
 }
 function candidateIdentityFromRecord(candidate: ProjectTopicCandidateRecord): string {
-  return stringField(candidate.metadata, "candidateIdentity") ?? candidateIdentity({ proposedLayer: candidate.proposedLayer, title: candidate.title, conclusion: candidate.conclusion, sensitiveCategories: stringArray(candidate.metadata.sensitiveCategories) });
+  return stringField(candidate.metadata, "candidateIdentity") ?? candidateIdentity({ proposedLayer: candidate.proposedLayer, title: candidate.title, stableKey: stringField(candidate.metadata, "stableKey"), sourceEvidenceIds: candidate.sourceMemoryIds, sensitiveCategories: stringArray(candidate.metadata.sensitiveCategories) });
 }
 function traceVector(memory: MemoryRow): number[] | null {
   const trace = memory.properties.internal_info.trace;
@@ -186,6 +208,12 @@ function traceVector(memory: MemoryRow): number[] | null {
   return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : null;
 }
 function centroid(vectors: number[][]): number[] {
-  if (!vectors.length || vectors.some((vector) => vector.length !== vectors[0]!.length)) return [];
-  return vectors[0]!.map((_, index) => vectors.reduce((sum, vector) => sum + vector[index]!, 0) / vectors.length);
+  if (!vectors.length) return [];
+  const dimensionCounts = new Map<number, number>();
+  for (const vector of vectors) dimensionCounts.set(vector.length, (dimensionCounts.get(vector.length) ?? 0) + 1);
+  const dimension = [...dimensionCounts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0]![0];
+  const compatible = vectors.filter((vector) => vector.length === dimension);
+  return compatible[0]!.map((_, index) => compatible.reduce((sum, vector) => sum + vector[index]!, 0) / compatible.length);
 }
+function numberArray(value: unknown): number[] { return Array.isArray(value) && value.every((item) => typeof item === "number" && Number.isFinite(item)) ? value : []; }
+function sameNumbers(left: number[], right: number[]): boolean { return left.length === right.length && left.every((value, index) => value === right[index]); }

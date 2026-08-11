@@ -581,6 +581,8 @@ const statements = [
     input_hash TEXT NOT NULL,
     topic_id TEXT,
     status TEXT NOT NULL,
+    owner TEXT,
+    lease_until TEXT,
     result_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result_json)),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -616,6 +618,10 @@ export function migrate(db: Database.Database): void {
       }
       for (const statement of statements) {
         db.prepare(statement).run();
+      }
+      if (tableExists(db, "project_topic_analysis_runs")) {
+        if (!columnExists(db, "project_topic_analysis_runs", "owner")) db.prepare(`ALTER TABLE project_topic_analysis_runs ADD COLUMN owner TEXT`).run();
+        if (!columnExists(db, "project_topic_analysis_runs", "lease_until")) db.prepare(`ALTER TABLE project_topic_analysis_runs ADD COLUMN lease_until TEXT`).run();
       }
       db.prepare(
         `CREATE UNIQUE INDEX IF NOT EXISTS uq_evolution_jobs_active_dedupe
