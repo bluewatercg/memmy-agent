@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { EnqueueJobInput } from "../../../src/service/worker/job-handlers.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage } from "../../../src/model/types.js";
+import type { MemoryRow } from "../../../src/types.js";
 import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories } from "../../../src/index.js";
 import { ProjectTopicInboxService } from "../../../src/service/topic-inbox/project-topic-inbox.js";
 import { attachMemoryVector } from "../../../src/storage/memory-vector-state.js";
@@ -182,6 +183,23 @@ describe("ProjectTopicInbox", () => {
     expect(seenValues.has(capturedIds[5]!)).toBe(false);
     expect(seenValues.get(capturedIds[6]!)).toBe(capturedValues.get(capturedIds[6]!));
     expect(pages).toBeGreaterThan(1);
+  });
+
+  it("resumes after an injected mid-page failure without duplicate evidence", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    for (let index = 0; index < 5; index += 1) insertTrace(service, `resume trace ${index}`, `resume-${index}`);
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    let failed = false;
+    const deps = { repos, llm: topicLlm([{ topic: { title: "Resume", summary: "All rows" }, candidates: [] }]), buildMemory: () => { throw new Error("unused"); }, upsertMemory: (item: MemoryRow) => repos.memories.upsertByKey(item), refreshPageSize: 3, onRefreshMemory: (_memory: MemoryRow, pageIndex: number) => { if (!failed && pageIndex === 1) { failed = true; throw new Error("injected mid-page failure"); } } };
+    const inbox = new ProjectTopicInboxService(deps);
+    await expect(inbox.processRefresh(namespace)).rejects.toThrow("injected mid-page failure");
+    const resumed = new ProjectTopicInboxService({ ...deps, onRefreshMemory: undefined });
+    await resumed.processRefresh(namespace);
+    const view = resumed.list(namespace);
+    const evidenceIds = view.topics.flatMap((item) => item.evidence.map((evidence) => evidence.memoryId));
+    expect(new Set(evidenceIds).size).toBe(5);
+    expect(evidenceIds).toHaveLength(5);
   });
 
 

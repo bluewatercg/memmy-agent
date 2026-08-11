@@ -20,6 +20,7 @@ export interface ProjectTopicInboxDeps {
   now?: () => string;
   analysisLeaseMs?: number;
   refreshPageSize?: number;
+  onRefreshMemory?: (memory: MemoryRow, pageIndex: number) => void;
 }
 
 export class ProjectTopicInboxService implements ProjectTopicInbox {
@@ -222,7 +223,10 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       for (;;) {
         const page = this.deps.repos.memories.listEligibleL1SnapshotPage(filter, snapshotId, afterId, pageSize);
         if (page.length === 0) break;
-        for (const memory of page) await this.ingestMemory(memory, capturedMemory);
+        for (const [pageIndex, memory] of page.entries()) {
+          this.deps.onRefreshMemory?.(memory, pageIndex);
+          await this.ingestMemory(memory, capturedMemory);
+        }
         afterId = page[page.length - 1]!.id;
         this.deps.repos.runtime.setKv(progressKey, { cursor, afterId, completed: false });
         if (page.length < pageSize) break;
