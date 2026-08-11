@@ -52,6 +52,7 @@ interface ErrorEnvelope {
   code: ApiErrorCode;
   status: number;
   message: string;
+  details?: unknown;
 }
 
 /** Handles with error envelope. */
@@ -68,7 +69,8 @@ export function withErrorEnvelope<Reply>(
           code: envelope.code,
           message: envelope.message,
           requestId: extractRequestId(request)
-        }
+        },
+        ...(envelope.details === undefined ? {} : { details: envelope.details })
       });
     }
   };
@@ -89,7 +91,8 @@ function toErrorEnvelope(error: unknown): ErrorEnvelope {
     return {
       code,
       status: error.status,
-      message: error.message
+      message: error.message,
+      details: error.details
     };
   }
 

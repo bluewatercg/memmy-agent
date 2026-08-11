@@ -54,3 +54,6 @@ Exact fresh verification:
 - `cd Memory && npm test -- --run tests/service/evolution/project-topic-inbox.test.ts tests/contract/memory-rest-service.test.ts` -> PASS, 2 files / 35 tests.
 - `cd App/backend && npx vitest run src/tests/memory-runtime-contracts.test.ts src/adapters/outbound/memory-client/tests/http-memory-client.test.ts src/adapters/inbound/local-api/tests/agent-runtime-routes.test.ts` -> PASS, 3 files / 84 tests.
 - `npm run build -w @memmy/local-api-contracts && npm --prefix Memory run typecheck && npm --prefix App/backend run typecheck` -> PASS.
+
+- Continued round 2: local error envelope explicitly maps `MemoryLayerError.details`; exact local 409 regression passed (12/12 route tests). Embedded topic operations now report a read/write-neutral 503 message.
+- Clean generated-artifact proof: `mv App/backend/local-api-contracts/dist /tmp/memmy-contracts-dist-round2 && npm run build -w @memmy/local-api-contracts && npm --prefix Memory run typecheck && rm -rf /tmp/memmy-contracts-dist-round2` -> PASS; contracts dist was rebuilt from absence before Memory typecheck.

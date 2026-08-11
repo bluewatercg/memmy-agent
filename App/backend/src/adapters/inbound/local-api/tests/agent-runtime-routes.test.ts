@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createProgressBus } from "../../../../services/progress-bus.js";
 import { createLocalApiServer } from "../server.js";
+import { MemoryLayerError } from "../../../outbound/memory-client/errors.js";
 import type { FastifyInstance } from "fastify";
 import type { PermissionManager } from "../../../../permission/index.js";
 import type { BackendServices } from "../../../../services/index.js";
@@ -370,6 +371,13 @@ describe("agent runtime local api routes", () => {
     ];
     for (const request of requests) expect((await app.inject({ ...request, headers })).statusCode).toBe(200);
     expect(calls).toEqual(["listTopicInbox", "refreshTopicInbox", "decideTopicCandidate", "mergeTopics", "splitTopic", "topicEvidence"]);
+  });
+
+  it("preserves structured topic conflict details through the local route", async () => {
+    app = createServer({ panel: { async decideTopicCandidate() { throw new MemoryLayerError("conflict", 409, "topic candidate version conflict", undefined, { candidateId: "candidate-1", currentVersion: 3, currentStatus: "pending" }); } } });
+    const response = await app.inject({ method: "POST", url: "/api/v1/topic-inbox/candidates/candidate-1/decision", headers: { "x-memmy-local-token": "test-token", "x-request-id": "conflict-request" }, payload: { namespace: projectNamespace(), action: "reject", expectedVersion: 1 } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({ error: { code: "conflict", message: "topic candidate version conflict", requestId: "conflict-request" }, details: { candidateId: "candidate-1", currentVersion: 3, currentStatus: "pending" } });
   });
 });
 

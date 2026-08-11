@@ -415,12 +415,12 @@ export function createMemosSqliteMemoryClient(options: CreateMemosSqliteMemoryCl
       return requireProjectContextService(memoryService).selectProjectWorkItem(input) ?? null;
     },
 
-    async listTopicInbox() { return readOnlyOperationUnavailable(); },
-    async refreshTopicInbox() { return readOnlyOperationUnavailable(); },
-    async decideTopicCandidate() { return readOnlyOperationUnavailable(); },
-    async mergeTopics() { return readOnlyOperationUnavailable(); },
-    async splitTopic() { return readOnlyOperationUnavailable(); },
-    async topicEvidence() { return readOnlyOperationUnavailable(); },
+    async listTopicInbox() { return topicInboxUnavailable(); },
+    async refreshTopicInbox() { return topicInboxUnavailable(); },
+    async decideTopicCandidate() { return topicInboxUnavailable(); },
+    async mergeTopics() { return topicInboxUnavailable(); },
+    async splitTopic() { return topicInboxUnavailable(); },
+    async topicEvidence() { return topicInboxUnavailable(); },
 
     async panelItems(input: PanelItemsInput): Promise<PanelItemsOutput> {
       const pageSize = 20;
@@ -551,6 +551,10 @@ function requireProjectContextService(service: EmbeddedProjectContextService | u
  */
 function readOnlyOperationUnavailable(): never {
   throw new MemoryLayerError("memory_layer_unavailable", 503, "local sqlite memory source does not support this write operation");
+}
+
+function topicInboxUnavailable(): never {
+  throw new MemoryLayerError("memory_layer_unavailable", 503, "topic inbox requires the Memory service topic repository");
 }
 
 function listMemoryRows(sources: readonly MemosSqliteSource[]): MemoryRow[] {
