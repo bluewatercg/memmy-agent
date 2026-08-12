@@ -5,6 +5,7 @@ import type { MemoryRow } from "../../../src/types.js";
 import { DEFAULT_MEMMY_CONFIG, MemoryService, Repositories } from "../../../src/index.js";
 import { ProjectTopicInboxService } from "../../../src/service/topic-inbox/project-topic-inbox.js";
 import { attachMemoryVector } from "../../../src/storage/memory-vector-state.js";
+import { analyzeProjectTopic } from "../../../src/service/topic-inbox/topic-analysis.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
 
 const fixture = createMemoryServiceFixture();
@@ -58,6 +59,51 @@ describe("ProjectTopicInbox", () => {
     const candidates = inbox.list(namespace).topics[0]!.candidates;
     expect(candidates.some((candidate) => candidate.status === "superseded")).toBe(true);
     expect(candidates.some((candidate) => candidate.status === "pending")).toBe(true);
+  });
+
+  it("repairs valid JSON that does not match the topic analysis schema", async () => {
+    const malformed = {
+      topic: "regulatory-skill-review-result-v1",
+      candidates: [{
+        id: "trace-1",
+        name: "regulatory-skill-review",
+        decision: "approve",
+        verification: ["regression"]
+      }]
+    };
+    const repaired = {
+      topic: { title: "Regulatory skill review", summary: "The review passed its evidence-bound checks." },
+      candidates: [{
+        title: "Preserve review gates",
+        stableKey: "regulatory-skill-review",
+        conclusion: "Keep the evidence-bound approval gates.",
+        proposedLayer: "L2",
+        risk: "low",
+        confidence: "high",
+        verificationStatus: "verified",
+        verificationEvidence: "Regression checks passed.",
+        sourceEvidenceIds: ["trace-1"],
+        conflicts: [],
+        sensitiveCategories: []
+      }]
+    };
+    const calls: LlmMessage[][] = [];
+    let callIndex = 0;
+    const llm: LlmClient = {
+      ...topicLlm([]),
+      completeJson: async <T extends Record<string, unknown>>(messages: LlmMessage[]) => {
+        calls.push(messages);
+        return (callIndex++ === 0 ? malformed : repaired) as unknown as T;
+      }
+    };
+
+    const result = await analyzeProjectTopic({ llm, evidence: [] });
+
+    expect(result).toEqual(repaired);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.[0]?.content).toContain('"verificationStatus"');
+    expect(calls[1]?.at(-1)?.content).toContain("invalid topic analysis result");
+    expect(calls[1]?.at(-1)?.content).toContain(JSON.stringify(malformed));
   });
 
   it("fails closed when deciding a candidate from another namespace", async () => {
@@ -393,5 +439,145 @@ describe("ProjectTopicInbox", () => {
     expect(repos.memories.relationsFor(firstMemory.id)).toEqual([]);
     expect(inbox.list(namespace).topics[0]!.candidates.find((item) => item.id === replacement.id)?.status).toBe("pending");
     expect(repos.runtime.listAudit({ limit: 100 })).toHaveLength(auditBefore);
+  });
+
+  it("prevents concurrent analysis claims for the same input", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "concurrent claim test", "concurrent-claim");
+    let llmCallCount = 0;
+    const llm: LlmClient = {
+      ...topicLlm([{ topic: { title: "Concurrent", summary: "Concurrent claim test" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]),
+      completeJson: async <T extends Record<string, unknown>>() => {
+        llmCallCount += 1;
+        return { topic: { title: "Concurrent", summary: "Concurrent claim test" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] } as unknown as T;
+      }
+    };
+    const inbox1 = new ProjectTopicInboxService({ repos, llm, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (memory) => repos.memories.upsertByKey(memory) });
+    const inbox2 = new ProjectTopicInboxService({ repos, llm, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (memory) => repos.memories.upsertByKey(memory) });
+
+    // Start both ingests concurrently
+    const [result1, result2] = await Promise.all([inbox1.ingest(memoryId), inbox2.ingest(memoryId)]);
+
+    // One should succeed with analysis, the other should be unchanged
+    expect(result1.assigned).toBe(true);
+    expect(result2.assigned).toBe(true);
+    // Only one LLM call should happen (the other sees the claim)
+    expect(llmCallCount).toBe(1);
+    // At least one should report unchanged (the loser of the race)
+    expect(result1.unchanged || result2.unchanged).toBe(true);
+  });
+
+  it("reclaims analysis run after lease expires", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "lease expiry test", "lease-expiry");
+    let currentTime = new Date("2026-01-01T00:00:00.000Z").getTime();
+    const now = () => new Date(currentTime).toISOString();
+    let llmCallCount = 0;
+    const llm: LlmClient = {
+      ...topicLlm([{ topic: { title: "Lease", summary: "Lease expiry test" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]),
+      completeJson: async <T extends Record<string, unknown>>() => {
+        llmCallCount += 1;
+        if (llmCallCount === 1) {
+          // First call: advance time past lease expiry
+          currentTime += 10_000; // 10 seconds
+          throw new Error("simulated analysis failure");
+        }
+        return { topic: { title: "Lease", summary: "Lease expiry test" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] } as unknown as T;
+      }
+    };
+    const inbox = new ProjectTopicInboxService({
+      repos,
+      llm,
+      now,
+      analysisLeaseMs: 1000, // 1 second lease
+      buildMemory: () => { throw new Error("unused"); },
+      upsertMemory: (memory) => repos.memories.upsertByKey(memory)
+    });
+
+    // First ingest fails after claiming
+    await expect(inbox.ingest(memoryId)).rejects.toThrow("simulated analysis failure");
+
+    // Second ingest should succeed because lease expired
+    const result = await inbox.ingest(memoryId);
+    expect(result.assigned).toBe(true);
+    expect(result.unchanged).toBe(false);
+    expect(llmCallCount).toBe(2);
+  });
+
+  it("rolls back when evidence is deleted during analysis", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    const memoryId = insertTrace(service, "evidence deletion during analysis", "evidence-deletion");
+    const llm: LlmClient = {
+      ...topicLlm([{ topic: { title: "Evidence deletion", summary: "Evidence deleted during analysis" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] }]),
+      completeJson: async <T extends Record<string, unknown>>() => {
+        // Delete the evidence memory during LLM call
+        const memory = repos.memories.get(memoryId)!;
+        repos.memories.update({ ...memory, status: "archived", updatedAt: new Date().toISOString() });
+        return { topic: { title: "Evidence deletion", summary: "Evidence deleted during analysis" }, candidates: [{ title: "Test candidate", conclusion: "Test conclusion.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memoryId], conflicts: [], sensitiveCategories: [] }] } as unknown as T;
+      }
+    };
+    const inbox = new ProjectTopicInboxService({ repos, llm, buildMemory: () => { throw new Error("unused"); }, upsertMemory: (memory) => repos.memories.upsertByKey(memory) });
+
+    // Ingest should fail because evidence is no longer eligible
+    await expect(inbox.ingest(memoryId)).rejects.toThrow("project topic evidence no longer eligible");
+
+    // Topic should not be created
+    const namespace = { source: "codex", profileId: "p", userId: "u", projectId: "project" };
+    const view = inbox.list(namespace);
+    expect(view.topics).toHaveLength(0);
+  });
+
+  it("isolates topics across different namespaces", async () => {
+    const { db, service } = fixture.createTestService();
+    const repos = new Repositories(db.db);
+    // Create evidence in two different namespaces (different projectId)
+    const memory1 = service.addMemory({
+      namespace: { source: "codex", profileId: "p", userId: "u", projectId: "project-a" },
+      adapterId: "test", requestId: "ns-1", layer: "L1", source: "codex", title: "namespace A evidence",
+      content: "## user\n\nnamespace A evidence\n\n## assistant\n\nresponse A",
+      tags: ["test"], turnId: "ns-1"
+    }).id;
+    const memory2 = service.addMemory({
+      namespace: { source: "codex", profileId: "p", userId: "u", projectId: "project-b" },
+      adapterId: "test", requestId: "ns-2", layer: "L1", source: "codex", title: "namespace B evidence",
+      content: "## user\n\nnamespace B evidence\n\n## assistant\n\nresponse B",
+      tags: ["test"], turnId: "ns-2"
+    }).id;
+    const inbox = new ProjectTopicInboxService({
+      repos,
+      llm: topicLlm([
+        { topic: { title: "Namespace A", summary: "Topic in namespace A" }, candidates: [{ title: "Candidate A", conclusion: "Conclusion A.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memory1], conflicts: [], sensitiveCategories: [] }] },
+        { topic: { title: "Namespace B", summary: "Topic in namespace B" }, candidates: [{ title: "Candidate B", conclusion: "Conclusion B.", proposedLayer: "L2", risk: "medium", confidence: "high", verificationStatus: "verified", verificationEvidence: "passed", sourceEvidenceIds: [memory2], conflicts: [], sensitiveCategories: [] }] }
+      ]),
+      buildMemory: () => { throw new Error("unused"); },
+      upsertMemory: (memory) => repos.memories.upsertByKey(memory)
+    });
+
+    // Ingest evidence in both namespaces
+    await inbox.ingest(memory1);
+    await inbox.ingest(memory2);
+
+    // Each namespace should have its own topic
+    const namespaceA = { source: "codex", profileId: "p", userId: "u", projectId: "project-a" };
+    const namespaceB = { source: "codex", profileId: "p", userId: "u", projectId: "project-b" };
+    const viewA = inbox.list(namespaceA);
+    const viewB = inbox.list(namespaceB);
+
+    expect(viewA.topics).toHaveLength(1);
+    expect(viewA.topics[0]!.topic.title).toBe("Namespace A");
+    expect(viewA.topics[0]!.evidence).toHaveLength(1);
+    expect(viewA.topics[0]!.evidence[0]!.memoryId).toBe(memory1);
+
+    expect(viewB.topics).toHaveLength(1);
+    expect(viewB.topics[0]!.topic.title).toBe("Namespace B");
+    expect(viewB.topics[0]!.evidence).toHaveLength(1);
+    expect(viewB.topics[0]!.evidence[0]!.memoryId).toBe(memory2);
+
+    // Cross-namespace operations should fail
+    const candidateA = viewA.topics[0]!.candidates[0]!;
+    await expect(inbox.decide(namespaceB, candidateA.id, { action: "approve", expectedVersion: candidateA.version })).rejects.toThrow("not found in namespace");
   });
 });

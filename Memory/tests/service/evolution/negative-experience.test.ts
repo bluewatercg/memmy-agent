@@ -164,7 +164,8 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(operations).toEqual([
       "capture.summarize",
       "reward.reward.r_human.v7",
-      "topic.inbox.analyze"
+      "topic.inbox.analyze",
+      "topic.inbox.analyze.repair"
     ]);
     const negativePolicy = (detail.metadata.properties as {
       internal_info: {
@@ -278,7 +279,8 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(operations).toEqual([
       "capture.summarize",
       "reward.reward.r_human.v7",
-      "topic.inbox.analyze"
+      "topic.inbox.analyze",
+      "topic.inbox.analyze.repair"
     ]);
     db.close();
   });
@@ -528,4 +530,76 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(result.hits.some((hit) => hit.id === crossUserPolicy?.id)).toBe(true);
     db.close();
   }, 30_000);
+
+  it("covers topic inbox workflow with successful analysis", async () => {
+    const operations: string[] = [];
+    const llm = createCountingLlm(operations, {
+      goal_achievement: 0.5,
+      process_quality: 0.5,
+      user_satisfaction: 0.5,
+      reason: "Positive outcome with correct TLS configuration."
+    });
+    const { db, service } = createTestService({
+      llm,
+      skillLlm: llm,
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          capture: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            embedAfterCapture: false,
+            synthReflection: false
+          },
+          feedback: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.feedback,
+            useLlm: false,
+            attachToPolicy: false
+          },
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            useLlm: false
+          },
+          l3Abstraction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
+            useLlm: false
+          },
+          skill: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
+            useLlm: false
+          }
+        }
+      }
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "topic-inbox-success-user",
+      projectId: "topic-inbox-project-1"
+    };
+    const session = service.openSession({ namespace });
+    const turn = service.completeTurn("topic-inbox-success-turn", {
+      sessionId: session.sessionId,
+      episodeId: "topic-inbox-success-episode",
+      query: "Configure TLS with proper certificate verification.",
+      answer: "Configured port 443 with TLS 1.3 and certificate pinning."
+    });
+    await service.feedback({
+      sessionId: session.sessionId,
+      episodeId: turn.episodeId,
+      l1MemoryId: turn.l1MemoryId,
+      channel: "explicit",
+      polarity: "positive",
+      magnitude: 1,
+      rationale: "Excellent TLS configuration with proper verification."
+    });
+
+    await service.runWorkerOnce(50);
+    await service.runWorkerOnce(50);
+
+    // Topic inbox should trigger analyze when L1 memory is captured
+    expect(operations).toContain("topic.inbox.analyze");
+    db.close();
+  });
+
 });

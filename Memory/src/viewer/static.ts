@@ -271,6 +271,21 @@ export function memoryPanelHtml(): string {
     .review-card-head, .review-card-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
     .review-card h4 { margin: 0; font-size: 13px; }
     .review-card p { margin: 9px 0; color: var(--ink-secondary); line-height: 1.55; white-space: pre-wrap; }
+    .topic-toolbar { display: grid; grid-template-columns: minmax(240px, 420px) auto minmax(0, 1fr); gap: 8px; align-items: center; margin-bottom: 10px; }
+    .topic-summary { color: var(--muted); text-align: right; }
+    .topic-list { display: grid; gap: 10px; }
+    .topic-card { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); overflow: hidden; }
+    .topic-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px; background: var(--surface-soft); border-bottom: 1px solid var(--line); }
+    .topic-card-head h3 { font-size: 14px; }
+    .topic-card-head p { margin-top: 5px; color: var(--ink-secondary); line-height: 1.5; }
+    .topic-actions, .candidate-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .topic-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .candidate-list { display: grid; gap: 8px; padding: 10px 12px; }
+    .candidate-card { padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+    .candidate-card p { margin: 7px 0; color: var(--ink-secondary); line-height: 1.5; }
+    .topic-evidence { padding: 0 12px 12px; }
+    .evidence-item { padding: 9px 0; border-top: 1px solid var(--line); }
+    .evidence-item p { margin-top: 4px; color: var(--ink-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
     .review-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
     .review-card-actions { justify-content: flex-end; margin-top: 10px; }
     .context-pack-head { align-items: flex-start; }
@@ -376,6 +391,7 @@ export function memoryPanelHtml(): string {
       </div>
       <nav class="nav" role="tablist" aria-label="控制台视图">
         <button id="navDashboard" class="nav-item active" role="tab" aria-selected="true">概览</button>
+        <button id="navTopicInbox" class="nav-item" role="tab" aria-selected="false">主题收件箱</button>
         <button id="navMemories" class="nav-item" role="tab" aria-selected="false">记忆</button>
         <button id="navActivity" class="nav-item" role="tab" aria-selected="false">活动</button>
         <button id="navTasks" class="nav-item" role="tab" aria-selected="false">任务</button>
@@ -444,6 +460,15 @@ export function memoryPanelHtml(): string {
               <div id="isolationAudit" class="data-panel-body audit-summary"></div>
             </section>
           </div>
+        </section>
+
+        <section id="viewTopicInbox" class="view" role="tabpanel">
+          <div class="topic-toolbar">
+            <select id="topicInboxProject" aria-label="主题收件箱项目"><option value="">选择项目 / Workspace</option></select>
+            <button id="refreshTopicInbox" class="primary" disabled>刷新主题分析</button>
+            <span id="topicInboxSummary" class="topic-summary">请选择项目</span>
+          </div>
+          <div id="topicInboxList" class="topic-list"><div class="empty">选择项目后查看稳定主题和待审核候选</div></div>
         </section>
 
         <section id="viewMemories" class="view" role="tabpanel">
@@ -585,6 +610,8 @@ export function memoryPanelHtml(): string {
       total: 0,
       totalPages: 1,
       selectedMemoryId: undefined,
+      topicInbox: { projects: [] },
+      topicEvidence: {},
       namespaceOptions: [],
       detailJson: {},
       selectedActivityId: undefined,
@@ -615,6 +642,7 @@ export function memoryPanelHtml(): string {
     const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch]));
     const viewMeta = {
       dashboard: ["Memory 概览", "存储、检索与演化状态"],
+      topicInbox: ["主题收件箱", "按项目整理 L1 证据并审核稳定主题"],
       memories: ["Memories", "搜索、检查与治理记忆"],
       activity: ["活动日志", "Codex、Pi 与工具调用"],
       tasks: ["任务与 Episodes", "对话批次、Turn 与关联记忆"],
@@ -690,6 +718,20 @@ export function memoryPanelHtml(): string {
       if (namespace.projectId) return "project:" + namespace.projectId;
       return "";
     }
+    function namespaceFromOption(value) { return state.namespaceOptions.find((namespace) => namespaceOptionValue(namespace) === value); }
+    function topicNamespace(namespace) {
+      const projectId = namespace.label && namespace.workspaceId && namespace.projectId === namespace.workspaceId ? namespace.label : namespace.projectId;
+      const projected = {
+        tenantId: namespace.tenantId || "local",
+        projectId: projectId || "unscoped",
+        source: namespace.source || "unknown",
+        profileId: namespace.profileId || "default"
+      };
+      if (namespace.workspaceId) projected.workspaceId = namespace.workspaceId;
+      if (namespace.workspacePath) projected.workspacePath = namespace.workspacePath;
+      return projected;
+    }
+    function topicMutation(namespace) { return { namespace, requestId: "web-topic-" + Date.now(), adapterId: "memory-console", source: "memory-console" }; }
     function jsonText(value) { return JSON.stringify(value || {}, null, 2); }
     function copyJson(value) { return navigator.clipboard.writeText(jsonText(value)).then(() => showToast("已复制")); }
     function requestBody(reason) { return JSON.stringify({ requestId: "panel-" + Date.now(), adapterId: "memory-console", reason }); }
@@ -759,6 +801,7 @@ export function memoryPanelHtml(): string {
 
     function renderNamespaces(overview) {
       const allNamespaces = overview.namespaceDistribution || [];
+      state.namespaceOptions = allNamespaces;
       const namespaces = allNamespaces.slice(0, 8);
       const total = allNamespaces.reduce((sum, namespace) => sum + Number(namespace.count || 0), 0);
       $("namespaceTotal").textContent = formatNumber(total);
@@ -772,6 +815,10 @@ export function memoryPanelHtml(): string {
       const currentContextScope = $("contextPackScope").value;
       $("contextPackScope").innerHTML = options;
       $("contextPackScope").value = currentContextScope;
+      const currentTopicScope = $("topicInboxProject").value;
+      $("topicInboxProject").innerHTML = '<option value="">选择项目 / Workspace</option>' + allNamespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>').join("");
+      $("topicInboxProject").value = currentTopicScope;
+      $("refreshTopicInbox").disabled = !currentTopicScope;
     }
 
     function renderLayerFilter(overview) {
@@ -1330,6 +1377,59 @@ export function memoryPanelHtml(): string {
       state.selectedTaskId = undefined; state.taskJson = {}; $("deleteTask").disabled = true; $("taskDetailTitle").textContent = "选择一个任务"; $("taskDetailId").textContent = ""; $("taskDetailContent").innerHTML = '<div class="empty">任务已删除</div>'; showToast("任务已删除"); await loadTasks();
     }
 
+    function topicCount(topic, status) { return Number(valueAt(topic, ["candidateCounts", status], 0)); }
+    function renderTopicInbox(result) {
+      state.topicInbox = result || { projects: [] };
+      const topics = (result.projects || []).flatMap((project) => project.topics || []);
+      const pending = topics.reduce((sum, topic) => sum + topicCount(topic, "pending"), 0);
+      $("topicInboxSummary").textContent = formatNumber(topics.length) + " 个主题 · " + formatNumber(pending) + " 个待审核";
+      $("topicInboxList").innerHTML = topics.length ? topics.map(renderTopicCard).join("") : '<div class="empty">当前项目还没有主题。点击“刷新主题分析”从 L1 证据生成。</div>';
+      bindTopicInboxActions();
+    }
+    function renderTopicCard(topic) {
+      const candidates = (topic.candidates || []).filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
+      const evidence = state.topicEvidence[topic.id];
+      const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">没有待审核候选</div>';
+      const evidenceHtml = evidence ? '<div class="topic-evidence">' + (evidence.items || []).map((item) => '<article class="evidence-item"><div class="tag-list"><span class="pill mono">' + esc(item.memoryId) + '</span><span class="pill">' + esc(item.role) + '</span></div><p>' + esc(item.summary || item.rawText || "") + '</p></article>').join("") + '</div>' : '';
+      return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
+    }
+    function selectedTopicNamespace() { const namespace = namespaceFromOption($("topicInboxProject").value); if (!namespace) throw new Error("请先选择项目 / Workspace"); return topicNamespace(namespace); }
+    async function loadTopicInbox() {
+      const namespace = selectedTopicNamespace();
+      const query = new URLSearchParams({ namespace: JSON.stringify(namespace) });
+      renderTopicInbox(await api("/api/v1/topic-inbox?" + query.toString()));
+    }
+    async function refreshTopicInbox() {
+      const namespace = selectedTopicNamespace();
+      $("refreshTopicInbox").disabled = true;
+      try { const result = await api("/api/v1/topic-inbox/refresh", { method: "POST", body: JSON.stringify(topicMutation(namespace)) }); showToast(result.unchanged ? "主题已是最新" : "主题分析已进入队列"); await loadTopicInbox(); }
+      finally { $("refreshTopicInbox").disabled = false; }
+    }
+    function findTopic(topicId) { return (state.topicInbox.projects || []).flatMap((project) => project.topics || []).find((topic) => topic.id === topicId); }
+    function findCandidate(candidateId) { for (const topic of (state.topicInbox.projects || []).flatMap((project) => project.topics || [])) { const candidate = (topic.candidates || []).find((item) => item.id === candidateId); if (candidate) return candidate; } }
+    async function decideTopicCandidate(action, candidateId) {
+      const namespace = selectedTopicNamespace(); const candidate = findCandidate(candidateId); if (!candidate) return;
+      let input = { ...topicMutation(namespace), action, expectedVersion: candidate.version };
+      if (action === "edit_and_approve") { const title = prompt("候选标题", candidate.title); if (!title) return; const conclusion = prompt("候选结论", candidate.conclusion); if (!conclusion) return; const proposedLayer = prompt("目标层级：L2、L3 或 Skill", candidate.proposedLayer); if (!proposedLayer || !["L2", "L3", "Skill"].includes(proposedLayer)) return; input = { ...input, title, conclusion, proposedLayer }; }
+      if (action === "reject" || action === "defer") input.reason = prompt(action === "reject" ? "拒绝原因（可选）" : "延后原因（可选）", "") || undefined;
+      await topicActionRequest("/api/v1/topic-inbox/candidates/" + encodeURIComponent(candidateId) + "/decision", input, action === "approve" || action === "edit_and_approve" ? "候选已批准" : action === "defer" ? "候选已延后" : "候选已拒绝");
+    }
+    async function toggleTopicEvidence(topicId) {
+      if (state.topicEvidence[topicId]) { delete state.topicEvidence[topicId]; renderTopicInbox(state.topicInbox); return; }
+      const query = new URLSearchParams({ namespace: JSON.stringify(selectedTopicNamespace()), limit: "20" });
+      state.topicEvidence[topicId] = await api("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/evidence?" + query.toString()); renderTopicInbox(state.topicInbox);
+    }
+    async function mergeTopic(topicId) {
+      const topic = findTopic(topicId); if (!topic) return; const targetId = prompt("输入目标主题 ID"); if (!targetId || targetId === topicId) return; const target = findTopic(targetId); if (!target) throw new Error("目标主题不在当前项目中");
+      await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/merge", { ...topicMutation(selectedTopicNamespace()), targetTopicId: targetId, expectedVersion: topic.version, targetExpectedVersion: target.version }, "主题已合并");
+    }
+    async function splitTopic(topicId) {
+      const topic = findTopic(topicId); if (!topic) return; const evidenceIds = prompt("输入要拆出的 Memory ID，多个用逗号分隔"); if (!evidenceIds) return; const title = prompt("新主题标题"); if (!title) return; const summary = prompt("新主题摘要", "") || "";
+      await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
+    }
+    async function topicActionRequest(path, input, success) { try { await api(path, { method: "POST", body: JSON.stringify(input) }); showToast(success); state.topicEvidence = {}; await loadTopicInbox(); } catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } }
+    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "evidence" ? toggleTopicEvidence(button.dataset.topicId) : action === "merge" ? mergeTopic(button.dataset.topicId) : action === "split" ? splitTopic(button.dataset.topicId) : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId); Promise.resolve(task).catch(showError); }; }
+
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }
     function renderConnectionStatus(status) {
       const health = status.health || {};
@@ -1363,6 +1463,8 @@ export function memoryPanelHtml(): string {
       clearError();
       try {
         if (state.view === "dashboard") await loadDashboard();
+        else if (state.view === "topicInbox") { if ($("topicInboxProject").value) await loadTopicInbox(); }
+
         else if (state.view === "memories") await loadMemories();
         else if (state.view === "activity") await loadApiActivity();
         else if (state.view === "tasks") await loadTasks();
@@ -1381,8 +1483,10 @@ export function memoryPanelHtml(): string {
     function applyTheme(theme) { document.documentElement.classList.toggle("dark", theme === "dark"); if (typeof localStorage !== "undefined") localStorage.setItem("memmyMemoryTheme", theme); }
     function initTheme() { const stored = typeof localStorage !== "undefined" ? localStorage.getItem("memmyMemoryTheme") : ""; const preferred = typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; applyTheme(stored || preferred); }
 
-    $("navDashboard").onclick = () => setView("dashboard"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navTokenStats").onclick = () => setView("tokenStats"); $("navAudit").onclick = () => setView("audit"); $("navSystem").onclick = () => setView("system");
+    $("navDashboard").onclick = () => setView("dashboard"); $("navTopicInbox").onclick = () => setView("topicInbox"); $("navMemories").onclick = () => setView("memories"); $("navActivity").onclick = () => setView("activity"); $("navTasks").onclick = () => setView("tasks"); $("navTokenStats").onclick = () => setView("tokenStats"); $("navAudit").onclick = () => setView("audit"); $("navSystem").onclick = () => setView("system");
     $("refresh").onclick = refreshCurrentView; $("openActivity").onclick = () => setView("activity");
+    $("topicInboxProject").onchange = () => { state.topicEvidence = {}; $("refreshTopicInbox").disabled = !$("topicInboxProject").value; if ($("topicInboxProject").value) loadTopicInbox().catch(showError); else { $("topicInboxSummary").textContent = "请选择项目"; $("topicInboxList").innerHTML = '<div class="empty">选择项目后查看稳定主题和待审核候选</div>'; } };
+    $("refreshTopicInbox").onclick = () => refreshTopicInbox().catch(showError);
     $("search").onclick = applyFilters; $("clearFilters").onclick = () => { $("query").value = ""; $("layer").value = ""; $("status").value = ""; $("sourceAgent").value = ""; $("projectScope").value = ""; $("contextPackScope").value = ""; renderContextPack(state.contextPack || {}); applyFilters(); };
     $("prevPage").onclick = () => { if (state.page > 1) { state.page -= 1; loadMemories(); } }; $("nextPage").onclick = () => { if (state.page < state.totalPages) { state.page += 1; loadMemories(); } };
     $("pageInput").onkeydown = (event) => { if (event.key === "Enter") goToPage(); }; $("pageInput").onfocus = () => $("pageInput").select(); $("pageInput").onchange = goToPage;

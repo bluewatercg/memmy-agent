@@ -46,7 +46,7 @@ services:
       start_period: 30s
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=128m
+      - /tmp:rw,noexec,nosuid,size=512m
     cap_drop:
       - ALL
     security_opt:

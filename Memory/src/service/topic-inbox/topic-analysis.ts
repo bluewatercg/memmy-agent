@@ -5,6 +5,25 @@ import { stableHash } from "../../utils/id.js";
 import { isRecord } from "../../utils/json.js";
 import type { TopicAnalysisResult, TopicCandidateAnalysis } from "./topic-inbox-types.js";
 
+const TOPIC_ANALYSIS_SCHEMA = `Return exactly one JSON object with this shape:
+{
+  "topic": { "title": "non-empty string", "summary": "non-empty string" },
+  "candidates": [{
+    "title": "non-empty string",
+    "stableKey": "optional stable identifier string",
+    "conclusion": "non-empty string",
+    "proposedLayer": "L2 | L3 | Skill",
+    "risk": "low | medium | high",
+    "confidence": "low | medium | high",
+    "verificationStatus": "unverified | failed | verified",
+    "verificationEvidence": "string; may be empty",
+    "sourceEvidenceIds": ["evidence id"],
+    "conflicts": ["string"],
+    "sensitiveCategories": ["string"]
+  }]
+}
+Use only these field names and enum values. Use an empty candidates array when no governed candidate is warranted.`;
+
 export function topicAnalysisInputHash(topic: ProjectTopicRecord | undefined, evidence: Array<{ memory: MemoryRow; role: string | string[] }>): string {
   return stableHash(evidence.map(({ memory, role }) => ({ id: memory.id, contentHash: memory.contentHash, version: memory.version, quality: memory.info.quality_rating, verification: memory.info.verification_status, role })).sort((a, b) => a.id.localeCompare(b.id)));
 }
@@ -21,11 +40,22 @@ export async function analyzeProjectTopic(input: {
   topic?: ProjectTopicRecord;
   evidence: Array<{ memory: MemoryRow; role: string | string[] }>;
 }): Promise<TopicAnalysisResult> {
-  const result = await input.llm.completeJson<Record<string, unknown>>([
-    { role: "system", content: "Aggregate project L1 evidence into one topic and zero or more governed candidates. Preserve error, fix, and verification order. Return JSON only." },
-    { role: "user", content: JSON.stringify({ topic: input.topic, evidence: input.evidence.map(({ memory, role }) => ({ id: memory.id, role, timeline: memory.timeline, value: memory.memoryValue, tags: memory.tags })) }) }
-  ], { operation: "topic.inbox.analyze", temperature: 0, jsonMode: true });
-  return validateTopicAnalysis(result);
+  const messages = [
+    { role: "system" as const, content: `Aggregate project L1 evidence into one topic and zero or more governed candidates. Preserve error, fix, and verification order. ${TOPIC_ANALYSIS_SCHEMA}` },
+    { role: "user" as const, content: JSON.stringify({ topic: input.topic, evidence: input.evidence.map(({ memory, role }) => ({ id: memory.id, role, timeline: memory.timeline, value: memory.memoryValue, tags: memory.tags })) }) }
+  ];
+  const result = await input.llm.completeJson<Record<string, unknown>>(messages, { operation: "topic.inbox.analyze", temperature: 0, jsonMode: true });
+  try {
+    return validateTopicAnalysis(result);
+  } catch (error) {
+    const validationError = error instanceof Error ? error.message : String(error);
+    const repaired = await input.llm.completeJson<Record<string, unknown>>([
+      ...messages,
+      { role: "assistant", content: JSON.stringify(result) },
+      { role: "user", content: `The previous JSON failed schema validation: ${validationError}. Return a corrected JSON object only. Previous JSON: ${JSON.stringify(result)}\n${TOPIC_ANALYSIS_SCHEMA}` }
+    ], { operation: "topic.inbox.analyze.repair", temperature: 0, jsonMode: true });
+    return validateTopicAnalysis(repaired);
+  }
 }
 
 function validateTopicAnalysis(value: unknown): TopicAnalysisResult {

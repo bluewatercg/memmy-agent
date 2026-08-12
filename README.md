@@ -249,3 +249,263 @@ This fork builds on [MemTensor/memmy-agent](https://github.com/MemTensor/memmy-a
 - **[OpenClaw](https://github.com/openclaw/openclaw)** — open-source personal AI assistant pioneer; its multi-platform messaging exploration inspired Memmy's channel design.
 - **[hermes-agent](https://github.com/NousResearch/hermes-agent)** — Nous Research's self-evolving agent; its persistent memory and skill self-learning practice showed what "gets better the more you use it" looks like.
 - **[nanobot](https://github.com/HKUDS/nanobot)** — grew from a minimal prototype into a full-featured agent platform; its agent loop and MCP integration engineering informed Memmy's core design.
+
+## Topic Inbox
+
+Topic Inbox aggregates project L1 evidence memories into structured topics and
+governed candidates (L2 / L3 / Skill). It runs as an asynchronous worker
+pipeline and exposes REST endpoints for review and decision.
+
+### Workflow
+
+```text
+L1 memory captured
+       │
+       ▼
+embedding job (embedAfterCapture)
+       │
+       ▼
+topic_ingest job  ◄── dedupeKey prevents duplicate runs
+       │
+       ▼
+ProjectTopicInboxService.ingest(memoryId)
+       │
+       ├─ matchProjectTopic (cosine similarity)
+       │
+       ▼
+analyzeProjectTopic
+       │
+       ├─ LLM: topic.inbox.analyze  ──► validateTopicAnalysis
+       │                                       │
+       │                              (fail)   ▼
+       │                       topic.inbox.analyze.repair  (one retry)
+       │
+       ▼
+evaluateTopicAutoApproval (policy: topic-auto-l2-v2)
+       │
+       ├─ approved  ──► candidate status = "approved", write L2 memory
+       └─ rejected  ──► candidate status = "pending", await human review
+```
+
+### Trigger Points
+
+`topic_ingest` jobs are enqueued from three places:
+
+1. **Embedding completion** — after a new L1 memory is embedded
+   (`embedding-job-processor.ts`).
+2. **Quality update** — when `updateMemoryQuality` promotes an L1 memory
+   (`memory-service.ts`).
+3. **Reward pipeline** — after a reward episode is persisted
+   (`reward-pipeline.ts`).
+
+All three use `dedupeKey = "topic_ingest:<memoryId>:<contentHash>"` so the same
+memory is not re-analyzed unless its content changes.
+
+### LLM Operations
+
+| Operation | Purpose |
+|---|---|
+| `topic.inbox.analyze` | Aggregate evidence into topic + candidates |
+| `topic.inbox.analyze.repair` | Retry when `analyze` returns invalid JSON (schema mismatch, missing fields, bad enum) |
+
+`repair` is triggered **only** when `validateTopicAnalysis` throws — i.e. the
+LLM returned JSON missing `topic`/`candidates`, wrong field types, or invalid
+enum values. It runs at most once per analysis; if repair also fails, the error
+propagates and the job is retried by the worker.
+
+### Auto-Approval Policy
+
+Policy version: `topic-auto-l2-v2`
+
+A candidate is auto-approved only when **all** conditions hold:
+
+- `proposedLayer` is `"L2"`
+- `risk` is `"low"`
+- `confidence` is `"high"`
+- `verificationStatus` is `"verified"`
+- No conflicts or sensitive categories
+- At least one cited evidence memory exists
+- At least one cited evidence has a successful tool call or structured verification
+- No evidence matches the `NEVER_AUTOMATIC` regex (security, credentials,
+  destructive operations, migrations, schema changes)
+- No evidence shows negated success patterns or failed tool calls
+- Candidate title/conclusion do not match `NEVER_AUTOMATIC`
+
+Candidates that fail any condition remain `pending` for human review via the
+Topic Inbox UI or API.
+
+### REST API
+
+All routes require `panel-read` or `panel-write` capability and are scoped to
+a namespace (`tenantId` + `projectId`).
+
+| Method | Path | Capability | Description |
+|---|---|---|---|
+| `GET` | `/api/v1/topic-inbox` | `panel-read` | List topics with candidates and evidence counts |
+| `POST` | `/api/v1/topic-inbox/refresh` | `panel-write` | Enqueue a full re-analysis of the namespace |
+| `POST` | `/api/v1/topic-inbox/candidates/:id/decision` | `panel-write` | Approve, reject, defer, or edit-and-approve a candidate |
+| `POST` | `/api/v1/topic-inbox/topics/:id/merge` | `panel-write` | Merge one topic into another |
+| `POST` | `/api/v1/topic-inbox/topics/:id/split` | `panel-write` | Split evidence out of a topic into a new topic |
+| `GET` | `/api/v1/topic-inbox/topics/:id/evidence` | `panel-read` | List raw evidence memories for a topic |
+
+#### Request Examples
+
+**List topics with pending candidates:**
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:18960/api/v1/topic-inbox?namespace=$(jq -cn '{tenantId:\"default\",projectId:\"my-project\"}')&statuses=pending"
+```
+
+**Refresh topic analysis:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"namespace":{"tenantId":"default","projectId":"my-project"}}' \
+  "http://127.0.0.1:18960/api/v1/topic-inbox/refresh"
+```
+
+**Approve a candidate:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": {"tenantId":"default","projectId":"my-project"},
+    "decision": {"action":"approve","expectedVersion":1},
+    "requestId": "idempotency-key"
+  }' \
+  "http://127.0.0.1:18960/api/v1/topic-inbox/candidates/cand_abc123/decision"
+```
+
+**Edit and approve:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": {"tenantId":"default","projectId":"my-project"},
+    "decision": {
+      "action": "edit_and_approve",
+      "expectedVersion": 1,
+      "title": "Corrected title",
+      "conclusion": "Refined conclusion",
+      "proposedLayer": "L2"
+    },
+    "requestId": "idempotency-key"
+  }' \
+  "http://127.0.0.1:18960/api/v1/topic-inbox/candidates/cand_abc123/decision"
+```
+
+**Merge topics:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": {"tenantId":"default","projectId":"my-project"},
+    "targetTopicId": "topic_def456",
+    "expectedVersion": 1,
+    "targetExpectedVersion": 2,
+    "requestId": "idempotency-key"
+  }' \
+  "http://127.0.0.1:18960/api/v1/topic-inbox/topics/topic_abc123/merge"
+```
+
+**Split topic:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": {"tenantId":"default","projectId":"my-project"},
+    "expectedVersion": 1,
+    "title": "New split topic",
+    "summary": "Evidence extracted from parent topic",
+    "evidenceMemoryIds": ["mem_xyz789"],
+    "requestId": "idempotency-key"
+  }' \
+  "http://127.0.0.1:18960/api/v1/topic-inbox/topics/topic_abc123/split"
+```
+
+#### Response Shapes
+
+**List (`GET /api/v1/topic-inbox`):**
+
+```json
+{
+  "projects": [{
+    "namespace": {"tenantId":"default","projectId":"my-project"},
+    "topics": [{
+      "id": "topic_abc123",
+      "title": "Topic title",
+      "summary": "Topic summary",
+      "version": 1,
+      "candidates": [{
+        "id": "cand_xyz",
+        "status": "pending",
+        "proposedLayer": "L2",
+        "title": "Candidate title",
+        "conclusion": "Candidate conclusion",
+        "risk": "low",
+        "confidence": "high",
+        "verificationStatus": "verified"
+      }],
+      "evidenceCount": 5
+    }]
+  }],
+  "serverTime": "2026-08-12T10:00:00.000Z"
+}
+```
+
+**Decision (`POST .../decision`):**
+
+```json
+{
+  "candidate": { "id": "cand_xyz", "status": "approved" },
+  "memoryId": "mem_created_l2",
+  "auditId": "audit_abc",
+  "serverTime": "2026-08-12T10:00:00.000Z"
+}
+```
+
+### Concurrency and Deduplication
+
+- **`dedupeKey`** on `topic_ingest` jobs: `topic_ingest:<memoryId>:<contentHash>`.
+  Same memory with unchanged content is skipped.
+- **`claimAnalysisRun`** uses a lease mechanism to prevent concurrent analysis of
+  the same topic.
+- **`topic_refresh`** uses `namespaceId + evidenceCursor` as dedupe key.
+- **Idempotent mutations**: all decision/merge/split routes accept a `requestId`
+  and use `service.idempotent()` with `exactReplay: true` to guarantee
+  at-most-once semantics.
+- **Version conflicts**: mutations require `expectedVersion`; mismatched
+  versions return HTTP 409 and the client should re-fetch.
+
+### Configuration
+
+Topic Inbox uses the same LLM client configured in `config.yaml`. No additional
+configuration is required beyond enabling the Memory service.
+
+```yaml
+memmyMemory:
+  version: 1
+  activeProfile: byok
+  storage:
+    runtime: managed
+    mode: local
+    backend: sqlite
+    sqlitePath: ~/.memmy/memory-service/memory.sqlite
+  profiles:
+    byok:
+      embedding:
+        provider: local
+      # LLM used for topic.inbox.analyze and topic.inbox.analyze.repair
+      completion:
+        provider: openai
+        model: gpt-4o-mini
+```
+
+The built-in viewer at `/viewer` includes a Topic Inbox panel for interactive
+review, decision, merge, and split operations.

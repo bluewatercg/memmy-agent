@@ -12,6 +12,19 @@ describe("memoryPanelHtml", () => {
     expect(html).toContain('id="exportContextPack"');
     expect(html).toContain('link.download = "memmy-context-pack-" + name + ".md"');
   });
+  it("exposes the project topic inbox through the Docker Web UI", () => {
+    const html = memoryPanelHtml();
+
+    expect(html).toContain('id="navTopicInbox"');
+    expect(html).toContain('id="viewTopicInbox"');
+    expect(html).toContain('id="topicInboxProject"');
+    expect(html).toContain('/api/v1/topic-inbox?');
+    expect(html).toContain('/api/v1/topic-inbox/refresh');
+    expect(html).toContain('/decision');
+    expect(html).toContain('/merge');
+    expect(html).toContain('/split');
+    expect(html).toContain('/evidence?');
+  });
 
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
@@ -131,6 +144,28 @@ describe("memoryPanelHtml", () => {
       authorization: "Bearer manual-panel-token"
     });
   });
+  it("loads a project topic inbox with a strict runtime namespace", async () => {
+    const harness = createViewerHarness();
+    runViewerScript(harness);
+    await flushPromises();
+
+    harness.element("topicInboxProject").value = "workspace:workspace_1";
+    const changeProject = harness.element("topicInboxProject").onchange as () => void;
+    changeProject();
+    await flushPromises();
+
+    const request = harness.requests().find(({ path }) => path.startsWith("/api/v1/topic-inbox?"));
+    expect(request).toBeDefined();
+    const url = new URL(request!.path, "http://localhost");
+    expect(JSON.parse(url.searchParams.get("namespace") ?? "null")).toEqual({
+      tenantId: "local",
+      projectId: "demo",
+      workspaceId: "workspace_1",
+      workspacePath: "/tmp/demo",
+      source: "unknown",
+      profileId: "default"
+    });
+  });
 });
 
 type FakeRow = FakeElement & {
@@ -176,6 +211,7 @@ function createViewerHarness() {
   const requests: Array<{ path: string; authorization?: string }> = [];
   const ids = [
     "navDashboard",
+    "navTopicInbox",
     "navMemories",
     "navActivity",
     "navTasks",
@@ -183,6 +219,7 @@ function createViewerHarness() {
     "navAudit",
     "navSystem",
     "viewDashboard",
+    "viewTopicInbox",
     "viewMemories",
     "viewActivity",
     "viewTasks",
@@ -244,6 +281,10 @@ function createViewerHarness() {
     "copyAuditPacks",
     "query",
     "layer",
+    "topicInboxProject",
+    "refreshTopicInbox",
+    "topicInboxSummary",
+    "topicInboxList",
     "status",
     "sourceAgent",
     "projectScope",
@@ -395,6 +436,9 @@ function createViewerHarness() {
         { namespace: { tenantId: "local", projectId: "demo", workspaceId: "workspace_1", workspacePath: "/tmp/demo", label: "demo" }, markdown: "# Project Memory Pack: demo" },
         { namespace: { tenantId: "local", projectId: "other", workspaceId: "workspace_2", workspacePath: "/tmp/other", label: "other" }, markdown: "# Project Memory Pack: other" }
       ] });
+    }
+    if (path.startsWith("/api/v1/topic-inbox?")) {
+      return jsonResponse({ projects: [{ namespace: { tenantId: "local", projectId: "demo", workspaceId: "workspace_1" }, projectId: "demo", topics: [] }] });
     }
     if (path === "/api/v1/panel/namespace-audit") {
       return jsonResponse({ summary: { total: 2, missingWorkspace: 0, unknownSource: 0, missingAgentSourceTag: 0, crossWorkspaceRisk: 0 }, issues: [] });
