@@ -206,6 +206,27 @@ describe("MemoryService / worker / runtime", () => {
     db.close();
   });
 
+  it("skips failed retries when an active job owns the same dedupe key", () => {
+    const { db, service } = createTestService();
+    const createdAt = new Date(Date.now() - 60_000).toISOString();
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+        id, job_type, status, dedupe_key, user_id, session_id, episode_id, target_memory_id,
+        payload_json, attempts, max_attempts, leased_until, last_error, created_at, updated_at
+      ) VALUES (?, 'topic_ingest', 'dead_letter', ?, 'retry-user', NULL, NULL, 'memory-a', '{}', 1, 3, NULL, 'previous failure', ?, ?),
+             (?, 'topic_ingest', 'queued', ?, 'retry-user', NULL, NULL, 'memory-a', '{}', 0, 3, NULL, NULL, ?, ?)`
+    ).run("failed-topic-job", "topic_ingest:memory-a:old", createdAt, createdAt, "active-topic-job", "topic_ingest:memory-a:old", createdAt, createdAt);
+
+    const result = service.retryFailedWorkerJobs({ limit: 10 });
+    expect(result.retried).toBe(0);
+    expect(db.db.prepare(`SELECT status, attempts, last_error FROM evolution_jobs WHERE id = ?`).get("failed-topic-job")).toEqual({
+      status: "dead_letter",
+      attempts: 1,
+      last_error: "previous failure"
+    });
+    db.close();
+  });
+
   it("moves terminal worker failures to dead letter", async () => {
     const { db, service } = createTestService();
     const jobId = "job_terminal_failure";

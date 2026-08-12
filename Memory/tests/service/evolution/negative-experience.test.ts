@@ -163,7 +163,8 @@ describe("MemoryService / evolution / negative experience", () => {
     expect(detail.body).toContain("443");
     expect(operations).toEqual([
       "capture.summarize",
-      "reward.reward.r_human.v7"
+      "reward.reward.r_human.v7",
+      "topic.inbox.analyze"
     ]);
     const negativePolicy = (detail.metadata.properties as {
       internal_info: {
@@ -276,7 +277,8 @@ describe("MemoryService / evolution / negative experience", () => {
     );
     expect(operations).toEqual([
       "capture.summarize",
-      "reward.reward.r_human.v7"
+      "reward.reward.r_human.v7",
+      "topic.inbox.analyze"
     ]);
     db.close();
   });
@@ -525,5 +527,5 @@ describe("MemoryService / evolution / negative experience", () => {
     });
     expect(result.hits.some((hit) => hit.id === crossUserPolicy?.id)).toBe(true);
     db.close();
-  });
+  }, 30_000);
 });

@@ -2611,17 +2611,27 @@ export class RuntimeRepository {
         `SELECT * FROM evolution_jobs
          WHERE id IN (${placeholders}) AND status IN ('failed', 'dead_letter')`
       ).all(...ids) as SqlJobRow[];
+      const retried: Array<{ before: EvolutionJobRecord; after: EvolutionJobRecord }> = [];
       for (const row of rows) {
+        if (row.dedupe_key) {
+          const active = this.db.prepare(
+            `SELECT id FROM evolution_jobs
+             WHERE dedupe_key = ? AND id <> ? AND status IN ('queued', 'leased', 'failed')
+             LIMIT 1`
+          ).get(row.dedupe_key, row.id) as { id: string } | undefined;
+          if (active) continue;
+        }
         this.db.prepare(
           `UPDATE evolution_jobs
            SET status = 'queued', attempts = 0, leased_until = NULL, last_error = NULL, updated_at = ?
            WHERE id = ?`
         ).run(at, row.id);
+        retried.push({
+          before: jobFromSql(row),
+          after: jobFromSql({ ...row, status: "queued", attempts: 0, leased_until: null, last_error: null, updated_at: at })
+        });
       }
-      return rows.map((row) => ({
-        before: jobFromSql(row),
-        after: jobFromSql({ ...row, status: "queued", attempts: 0, leased_until: null, last_error: null, updated_at: at })
-      }));
+      return retried;
     });
     return transaction();
   }
