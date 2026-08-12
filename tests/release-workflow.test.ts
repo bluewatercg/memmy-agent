@@ -253,8 +253,8 @@ describe("Memory Docker publish workflow", () => {
   it("installs a locked production tree and blocks high-severity runtime advisories", () => {
     const rootManifest = readJson("package.json") as { overrides?: Record<string, unknown> };
     const memoryManifest = readJson("Memory/package.json") as { overrides?: Record<string, unknown> };
-    const runtimeLock = readJson("Memory/package-lock.json") as {
-      packages?: Record<string, { version?: string }>;
+    const rootLock = readJson("package-lock.json") as {
+      packages?: Record<string, { version?: string; resolved?: string }>;
     };
 
     expect(rootManifest.overrides).toMatchObject({
@@ -264,12 +264,13 @@ describe("Memory Docker publish workflow", () => {
       "@huggingface/transformers": { sharp: "$sharp" }
     });
     expect(readJson("Memory/package.json")).toMatchObject({
-      dependencies: { sharp: "0.35.3" }
+      dependencies: { sharp: "0.35.3", "@memmy/local-api-contracts": "0.0.0" }
     });
-    expect(runtimeLock.packages?.["node_modules/sharp"]?.version).toBe("0.35.3");
-    expect(memoryDockerfile).toContain("cp Memory/package-lock.json /runtime/package-lock.json");
-    expect(memoryDockerfile).toContain("npm ci --omit=dev");
-    expect(memoryDockerfile).toContain("npm audit --omit=dev --audit-level=high");
+    expect(rootLock.packages?.["node_modules/sharp"]?.version).toBe("0.35.3");
+    expect(rootLock.packages?.["node_modules/@memmy/local-api-contracts"]?.resolved).toBe("App/backend/local-api-contracts");
+    expect(memoryDockerfile).toContain("npm ci --omit=dev --workspace @memmy/memory --include-workspace-root=false");
+    expect(memoryDockerfile).toContain("npm audit --omit=dev --workspace @memmy/memory --audit-level=high");
+    expect(memoryDockerfile).toContain("cp -RL node_modules /runtime/node_modules");
     expect(memoryDockerfile).not.toContain("npm install --omit=dev --no-package-lock");
   });
 });

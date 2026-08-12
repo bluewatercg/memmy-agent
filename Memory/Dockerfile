@@ -9,13 +9,12 @@ COPY . .
 
 RUN npm ci \
     && npm run memory:build \
+    && npm ci --omit=dev --workspace @memmy/memory --include-workspace-root=false \
+    && npm audit --omit=dev --workspace @memmy/memory --audit-level=high \
     && mkdir -p /runtime \
     && cp Memory/package.json /runtime/package.json \
-    && cp Memory/package-lock.json /runtime/package-lock.json \
     && cp -R Memory/dist /runtime/dist \
-    && cd /runtime \
-    && npm ci --omit=dev \
-    && npm audit --omit=dev --audit-level=high
+    && cp -RL node_modules /runtime/node_modules
 
 FROM node:24-bookworm-slim AS runtime
 
