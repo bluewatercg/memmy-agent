@@ -4179,16 +4179,6 @@ export class TopicDecisionRepository {
     return next;
   }
 
-  /**
-   * Delete a session and cascade-clean all child records (snapshots, positions,
-   * debate rounds, evidence requests, proposals, execution runs) via FK ON DELETE
-   * CASCADE. This is the ONLY path that mutates decision state destructively;
-   * all other mutations are append-only or version-gated. Not part of the brief
-   * interface but required by the brief's cascade-cleanup invariant.
-   */
-  deleteSession(namespaceId: string, sessionId: string): void {
-    this.db.prepare(`DELETE FROM project_topic_decision_sessions WHERE id = ? AND namespace_id = ?`).run(sessionId, namespaceId);
-  }
 }
 
 interface TopicDecisionSessionSqlRow { id: string; namespace_id: string; topic_id: string; input_hash: string; state: string; version: number; metadata_json: string; created_at: string; updated_at: string }

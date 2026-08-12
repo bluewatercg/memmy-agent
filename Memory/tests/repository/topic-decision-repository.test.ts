@@ -479,7 +479,9 @@ describe("TopicDecisionRepository", () => {
       repos.topicDecisions.upsertEvidenceRequest(baseEvidenceRequest());
       repos.topicDecisions.insertProposal(baseProposal());
       repos.topicDecisions.createExecutionRun(baseExecutionRun());
-      repos.topicDecisions.deleteSession(nsA, "session-1");
+      // Delete session directly via DB handle to prove FK ON DELETE CASCADE
+      // without exposing a public deleteSession on the repository API.
+      db.db.prepare(`DELETE FROM project_topic_decision_sessions WHERE id = ? AND namespace_id = ?`).run("session-1", nsA);
       expect(repos.topicDecisions.getSession(nsA, "session-1")).toBeUndefined();
       expect(repos.topicDecisions.getSnapshot(nsA, "snapshot-1")).toBeUndefined();
       expect(repos.topicDecisions.listPositions(nsA, "session-1", "snapshot-1")).toEqual([]);
