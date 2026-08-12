@@ -28,20 +28,18 @@ export class EvidenceSnapshotBuilder {
       throw new Error(`topic not found: ${input.topicId}`);
     }
 
-    const evidence = this.repos.topics.listEvidence(input.topicId, input.namespaceId);
+    // Get all evidence linked to the topic (without namespace filter) for validation
+    const allEvidence = this.repos.topics.listAllEvidenceForTopic(input.topicId);
 
-    // Validate cross-namespace evidence
-    for (const ev of evidence) {
+    // Validate every evidence attached to the topic
+    for (const ev of allEvidence) {
       if (ev.namespaceId !== input.namespaceId) {
         throw new Error(`evidence not found in namespace: ${ev.id}`);
       }
     }
 
-    // Ensure all evidence belongs to same namespace (cross-namespace topic-evidence link)
-    const crossNamespaceEvidence = evidence.filter((ev) => ev.namespaceId !== input.namespaceId);
-    if (crossNamespaceEvidence.length > 0) {
-      throw new Error(`cross-namespace evidence detected: ${crossNamespaceEvidence.map((e) => e.id).join(", ")}`);
-    }
+    // Get evidence for this namespace (now validated)
+    const evidence = allEvidence.filter((ev) => ev.namespaceId === input.namespaceId);
 
     const evidenceHashes: Record<string, string> = {};
     const evidenceContent: Record<string, string> = {};

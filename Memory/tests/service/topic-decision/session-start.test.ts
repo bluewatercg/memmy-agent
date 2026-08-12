@@ -289,9 +289,7 @@ describe("TopicDecisionService.start", () => {
       updatedAt: nowIso()
     });
 
-    // Evidence linked to topic but in wrong namespace - this is a data integrity violation
-    // The repository's listEvidence will not return it because it filters by namespaceId
-    // We test that missing evidence causes the session to still be created without cross-namespace evidence
+    // Evidence linked to topic but in wrong namespace - must throw, not filter
     repos.topics.insertEvidence({
       id: "ev-cross",
       topicId: "topic-5",
@@ -304,11 +302,30 @@ describe("TopicDecisionService.start", () => {
     });
 
     const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
-    // Session will be created with empty evidence because cross-namespace evidence is filtered out
-    // This tests that we don't accidentally include cross-namespace evidence
-    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-5" });
-    expect(result.session.topicId).toBe("topic-5");
-    expect(result.snapshot.payload.evidenceIds).toEqual([]); // Cross-namespace evidence filtered out
+    expect(() => service.startTopicDecisionSession({ namespace, topicId: "topic-5" }))
+      .toThrow("evidence not found in namespace: ev-cross");
+  });
+
+  it("starts session with empty evidence when topic has no evidence attached", async () => {
+    const { service, repos, namespaceId } = await setupService();
+
+    repos.topics.insertTopic({
+      id: "topic-no-evidence",
+      namespaceId,
+      title: "Test Topic",
+      summary: "Test summary",
+      status: "active",
+      version: 1,
+      sourceMemoryIds: [],
+      metadata: {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-no-evidence" });
+    expect(result.session.topicId).toBe("topic-no-evidence");
+    expect(result.snapshot.payload.evidenceIds).toEqual([]);
   });
 
   it("includes project constraints in snapshot", async () => {

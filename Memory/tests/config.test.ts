@@ -309,6 +309,36 @@ describe("memmy memory config", () => {
       join(homedir(), ".memmy", "config.yaml")
     ]);
   });
+
+  it("defaults topic decisions disabled with empty models", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    const { config } = loadMemmyConfig(configPath);
+    expect(config.algorithm.topicDecisions.enabled).toBe(false);
+    expect(config.algorithm.topicDecisions.models).toEqual([]);
+  });
+
+  it("reads topic decisions enabled from env", () => {
+    setEnv("MEMMY_TOPIC_DECISIONS_ENABLED", "true");
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    const { config } = loadMemmyConfig(configPath);
+    expect(config.algorithm.topicDecisions.enabled).toBe(true);
+  });
+
+  it("trims and dedupes topic decision models", () => {
+    setEnv("MEMMY_TOPIC_DECISION_MODELS", "MiniMax-M2.5, qwen3.7-plus ,MiniMax-M2.5,glm-5");
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+    const { config } = loadMemmyConfig(configPath);
+    expect(config.algorithm.topicDecisions.models).toEqual(["MiniMax-M2.5", "qwen3.7-plus", "glm-5"]);
+  });
 });
 
 function tempRoot(): string {

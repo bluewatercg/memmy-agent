@@ -3810,6 +3810,15 @@ export class ProjectTopicRepository {
     return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? ORDER BY created_at`).all(topicId, namespaceId) as EvidenceSqlRow[]).map(evidenceFromSql);
   }
 
+  listAllEvidenceForTopic(topicId: string): ProjectTopicEvidenceRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? ORDER BY created_at`).all(topicId) as EvidenceSqlRow[]).map(evidenceFromSql);
+  }
+
+  getEvidenceById(evidenceId: string): ProjectTopicEvidenceRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_evidence WHERE id = ?`).get(evidenceId) as EvidenceSqlRow | undefined;
+    return row ? evidenceFromSql(row) : undefined;
+  }
+
   moveEvidence(sourceTopicId: string, targetTopicId: string, namespaceId: string, memoryIds?: string[]): void {
     if (!this.getTopic(sourceTopicId, namespaceId) || !this.getTopic(targetTopicId, namespaceId)) throw new Error("project topic namespace mismatch");
     const selected = memoryIds ?? this.listEvidence(sourceTopicId, namespaceId).map((item) => item.memoryId);
