@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import { namespaceForMemory, namespaceIdFromContext } from "../service/namespace/namespace-scope.js";
-import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus, TopicActionProposalRecord, TopicAgentPositionRecord, TopicDebateRoundRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../types.js";
+import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus, TopicActionProposalRecord, TopicAgentPositionRecord, TopicDebateRoundRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotPayload, TopicDecisionSnapshotRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../types.js";
 import type Database from "better-sqlite3";
 import type {
   FeedbackRequest,
@@ -4211,7 +4211,7 @@ interface TopicActionProposalSqlRow { id: string; namespace_id: string; session_
 interface TopicExecutionRunSqlRow { id: string; namespace_id: string; session_id: string; proposal_id: string; status: string; result_json: string; version: number; created_at: string; updated_at: string }
 
 function topicDecisionSessionFromSql(row: TopicDecisionSessionSqlRow): TopicDecisionSessionRecord { return { id: row.id, namespaceId: row.namespace_id, topicId: row.topic_id, inputHash: row.input_hash, state: row.state as TopicDecisionSessionRecord["state"], version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
-function topicDecisionSnapshotFromSql(row: TopicDecisionSnapshotSqlRow): TopicDecisionSnapshotRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, payload: parseJson(row.payload_json, {}), createdAt: row.created_at }; }
+function topicDecisionSnapshotFromSql(row: TopicDecisionSnapshotSqlRow): TopicDecisionSnapshotRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, payload: parseJson(row.payload_json, {}) as TopicDecisionSnapshotPayload, createdAt: row.created_at }; }
 function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), createdAt: row.created_at }; }
 function topicDebateRoundFromSql(row: TopicDebateRoundSqlRow): TopicDebateRoundRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, status: row.status, summary: row.summary, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicEvidenceRequestFromSql(row: TopicEvidenceRequestSqlRow): TopicEvidenceRequestRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, question: row.question, verification: row.verification, status: row.status, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }

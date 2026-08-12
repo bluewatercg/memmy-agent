@@ -1,5 +1,5 @@
 import type { Repositories } from "../../storage/repositories.js";
-import type { TopicAgentSpec } from "../../types.js";
+import type { TopicAgentSpec, TopicDecisionSnapshotPayload } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 
@@ -9,15 +9,7 @@ export interface EvidenceSnapshotInput {
   agents?: TopicAgentSpec[];
 }
 
-export interface EvidenceSnapshotResult {
-  topicVersion: number;
-  evidenceIds: string[];
-  evidenceHashes: Record<string, string>;
-  evidenceContent: Record<string, string>;
-  projectConstraints: Array<Record<string, unknown>>;
-  roster: TopicAgentSpec[];
-  inputHash: string;
-}
+export interface EvidenceSnapshotResult extends TopicDecisionSnapshotPayload {}
 
 export class EvidenceSnapshotBuilder {
   constructor(private readonly repos: Repositories) {}

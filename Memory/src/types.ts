@@ -159,12 +159,23 @@ export interface TopicAgentSpec {
   reason: string;
 }
 
+export interface TopicDecisionSnapshotPayload {
+  topicVersion: number;
+  evidenceIds: string[];
+  evidenceHashes: Record<string, string>;
+  evidenceContent: Record<string, string>;
+  projectConstraints: Array<Record<string, unknown>>;
+  roster: TopicAgentSpec[];
+  inputHash: string;
+  [key: string]: unknown;
+}
+
 export interface TopicDecisionSnapshotRecord {
   id: string;
   namespaceId: string;
   sessionId: string;
   round: number;
-  payload: Record<string, unknown>;
+  payload: TopicDecisionSnapshotPayload;
   createdAt: IsoTime;
 }
 

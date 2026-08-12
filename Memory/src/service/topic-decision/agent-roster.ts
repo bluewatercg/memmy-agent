@@ -8,30 +8,38 @@ const DEFAULT_ROLES: TopicAgentRole[] = [
   "action_planner"
 ];
 
+function safeGetModel(models: string[], index: number): string {
+  // With noUncheckedIndexedAccess, array access returns T | undefined.
+  // Since models is non-empty (guaranteed by caller), we assert definedness.
+  return models[index] as string;
+}
+
 export function recommendAgents(
   models: string[],
   topicMetadata?: Record<string, unknown>
 ): TopicAgentSpec[] {
-  const available = models.length > 0 ? models : ["default-model"];
+  // Ensure at least one model for roster construction
+  const rosterModels: string[] = models.length > 0 ? models : ["default-model"];
   const agents: TopicAgentSpec[] = [];
-  let modelIndex = 0;
 
-  for (const role of DEFAULT_ROLES) {
+  for (let i = 0; i < DEFAULT_ROLES.length; i++) {
+    const role: string = DEFAULT_ROLES[i] as string;
+    const model: string = safeGetModel(rosterModels, i % rosterModels.length);
     agents.push({
       id: `agent-${role}`,
       role,
-      model: available[modelIndex % available.length],
+      model,
       reason: ""
     });
-    modelIndex++;
   }
 
   const specialist = extractSpecialist(topicMetadata);
   if (specialist) {
+    const model: string = safeGetModel(rosterModels, DEFAULT_ROLES.length % rosterModels.length);
     agents.push({
       id: `agent-specialist-${specialist}`,
       role: "specialist",
-      model: available[modelIndex % available.length],
+      model,
       reason: `topic requires ${specialist} expertise`
     });
   }

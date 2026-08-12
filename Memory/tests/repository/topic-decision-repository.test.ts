@@ -39,7 +39,15 @@ function baseSnapshot(overrides: Partial<TopicDecisionSnapshotRecord> = {}): Top
     namespaceId: nsA,
     sessionId: "session-1",
     round: 1,
-    payload: { summary: "first" },
+    payload: {
+      topicVersion: 1,
+      evidenceIds: [],
+      evidenceHashes: {},
+      evidenceContent: {},
+      projectConstraints: [],
+      roster: [],
+      inputHash: "hash-snap-1"
+    },
     createdAt: at,
     ...overrides
   };
@@ -70,6 +78,7 @@ function baseRound(overrides: Partial<TopicDebateRoundRecord> = {}): TopicDebate
     status: "open",
     summary: "",
     metadata: {},
+    version: 1,
     createdAt: at,
     updatedAt: at,
     ...overrides
@@ -86,6 +95,7 @@ function baseEvidenceRequest(overrides: Partial<TopicEvidenceRequestRecord> = {}
     verification: "repository_verified",
     status: "pending",
     metadata: {},
+    version: 1,
     createdAt: at,
     updatedAt: at,
     ...overrides
@@ -352,7 +362,7 @@ describe("TopicDecisionRepository", () => {
       const repos = new Repositories(db.db);
       repos.topicDecisions.createSession(baseSession());
       expect(() => repos.topicDecisions.insertSnapshot(baseSnapshot({
-        payload: { circular: undefined }
+        payload: { ...baseSnapshot().payload, extra: undefined }
       }))).not.toThrow();
       db.close();
     } finally {

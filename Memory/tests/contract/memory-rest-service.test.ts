@@ -78,8 +78,8 @@ describe("MemoryService / REST contract", () => {
     expect(body.storage.backendId).toBe("sqlite-local");
     expect(body.storage.fullText).toBe("fts5");
     expect(body.storage.vector).toBe("native");
-    expect(body.storage.schemaVersion).toBe("7");
-    expect(body.storage.lastMigrationId).toBe("007_project_topic_inbox");
+    expect(body.storage.schemaVersion).toBe("8");
+    expect(body.storage.lastMigrationId).toBe("008_topic_decisions");
     const client = new MemoryRestClient({
       endpoint: `http://127.0.0.1:${address.port}`
     });
