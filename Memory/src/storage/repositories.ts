@@ -387,6 +387,22 @@ export class MemoryVersionConflictError extends Error {
   }
 }
 
+export class TopicDecisionIdempotencyConflictError extends Error {
+  readonly code = "topic_decision_idempotency_conflict";
+  constructor(readonly recordId: string, readonly recordKind: string) {
+    super(`idempotency conflict for ${recordKind} ${recordId}: same id with different content`);
+    this.name = "TopicDecisionIdempotencyConflictError";
+  }
+}
+
+export class TopicDecisionImmutablePositionError extends Error {
+  readonly code = "topic_decision_immutable_position";
+  constructor(readonly sessionId: string, readonly snapshotId: string, readonly round: number, readonly agentId: string) {
+    super(`immutable first-round position already exists for agent ${agentId} in session ${sessionId} snapshot ${snapshotId} round ${round}`);
+    this.name = "TopicDecisionImmutablePositionError";
+  }
+}
+
 interface SqlApiLogRow {
   id: number;
   tool_name: ApiLogRecord["toolName"];
@@ -3983,10 +3999,32 @@ function factFromSql(row: ProjectFactSqlRow): ProjectFactRecord {
   return { ...projectContextBase(row), kind: row.kind, content: row.content, status: row.status, supersedesId: row.supersedes_id ?? undefined };
 }
 
+function topicDecisionSessionFingerprint(r: TopicDecisionSessionRecord): string {
+  return stableHash({ namespaceId: r.namespaceId, topicId: r.topicId, inputHash: r.inputHash, state: r.state, version: r.version, metadata: r.metadata, createdAt: r.createdAt, updatedAt: r.updatedAt });
+}
+function topicDecisionSnapshotFingerprint(r: TopicDecisionSnapshotRecord): string {
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, payload: r.payload, createdAt: r.createdAt });
+}
+function topicAgentPositionFingerprint(r: TopicAgentPositionRecord): string {
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, snapshotId: r.snapshotId, round: r.round, agentId: r.agentId, stance: r.stance, rationale: r.rationale, evidenceIds: r.evidenceIds, createdAt: r.createdAt });
+}
+function topicActionProposalFingerprint(r: TopicActionProposalRecord): string {
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, rank: r.rank, effect: r.effect, title: r.title, payload: r.payload, status: r.status, version: r.version, metadata: r.metadata, createdAt: r.createdAt, updatedAt: r.updatedAt });
+}
+function topicExecutionRunFingerprint(r: TopicExecutionRunRecord): string {
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, proposalId: r.proposalId, status: r.status, result: r.result, version: r.version, createdAt: r.createdAt, updatedAt: r.updatedAt });
+}
+
 export class TopicDecisionRepository {
   constructor(private readonly db: Database.Database) {}
 
   createSession(input: TopicDecisionSessionRecord): TopicDecisionSessionRecord {
+    const existing = this.db.prepare(`SELECT * FROM project_topic_decision_sessions WHERE id = ?`).get(input.id) as TopicDecisionSessionSqlRow | undefined;
+    if (existing) {
+      const stored = topicDecisionSessionFromSql(existing);
+      if (topicDecisionSessionFingerprint(stored) === topicDecisionSessionFingerprint(input)) return stored;
+      throw new TopicDecisionIdempotencyConflictError(input.id, "session");
+    }
     this.db.prepare(`INSERT INTO project_topic_decision_sessions (id, namespace_id, topic_id, input_hash, state, version, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(input.id, input.namespaceId, input.topicId, input.inputHash, input.state, input.version, toJson(input.metadata), input.createdAt, input.updatedAt);
     return input;
@@ -4012,6 +4050,12 @@ export class TopicDecisionRepository {
   }
 
   insertSnapshot(snapshot: TopicDecisionSnapshotRecord): TopicDecisionSnapshotRecord {
+    const existing = this.db.prepare(`SELECT * FROM project_topic_decision_snapshots WHERE id = ?`).get(snapshot.id) as TopicDecisionSnapshotSqlRow | undefined;
+    if (existing) {
+      const stored = topicDecisionSnapshotFromSql(existing);
+      if (topicDecisionSnapshotFingerprint(stored) === topicDecisionSnapshotFingerprint(snapshot)) return stored;
+      throw new TopicDecisionIdempotencyConflictError(snapshot.id, "snapshot");
+    }
     this.db.prepare(`INSERT INTO project_topic_decision_snapshots (id, namespace_id, session_id, round, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
       .run(snapshot.id, snapshot.namespaceId, snapshot.sessionId, snapshot.round, toJson(snapshot.payload), snapshot.createdAt);
     return snapshot;
@@ -4024,8 +4068,21 @@ export class TopicDecisionRepository {
   }
 
   insertPosition(position: TopicAgentPositionRecord): TopicAgentPositionRecord {
-    this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), position.createdAt);
+    const existing = this.db.prepare(`SELECT * FROM project_topic_agent_positions WHERE id = ?`).get(position.id) as TopicAgentPositionSqlRow | undefined;
+    if (existing) {
+      const stored = topicAgentPositionFromSql(existing);
+      if (topicAgentPositionFingerprint(stored) === topicAgentPositionFingerprint(position)) return stored;
+      throw new TopicDecisionIdempotencyConflictError(position.id, "position");
+    }
+    try {
+      this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), position.createdAt);
+    } catch (err) {
+      if (err instanceof Error && /UNIQUE constraint failed: project_topic_agent_positions\.session_id, project_topic_agent_positions\.snapshot_id, project_topic_agent_positions\.round, project_topic_agent_positions\.agent_id/i.test(err.message)) {
+        throw new TopicDecisionImmutablePositionError(position.sessionId, position.snapshotId, position.round, position.agentId);
+      }
+      throw err;
+    }
     return position;
   }
 
@@ -4080,6 +4137,12 @@ export class TopicDecisionRepository {
 
   insertProposal(proposal: TopicActionProposalRecord): TopicActionProposalRecord {
     if (proposal.rank < 1 || proposal.rank > 3) throw new Error(`topic action proposal rank must be 1..3: ${proposal.rank}`);
+    const existing = this.db.prepare(`SELECT * FROM project_topic_action_proposals WHERE id = ?`).get(proposal.id) as TopicActionProposalSqlRow | undefined;
+    if (existing) {
+      const stored = topicActionProposalFromSql(existing);
+      if (topicActionProposalFingerprint(stored) === topicActionProposalFingerprint(proposal)) return stored;
+      throw new TopicDecisionIdempotencyConflictError(proposal.id, "proposal");
+    }
     this.db.prepare(`INSERT INTO project_topic_action_proposals (id, namespace_id, session_id, round, rank, effect, title, payload_json, status, version, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(proposal.id, proposal.namespaceId, proposal.sessionId, proposal.round, proposal.rank, proposal.effect, proposal.title, toJson(proposal.payload), proposal.status, proposal.version, toJson(proposal.metadata), proposal.createdAt, proposal.updatedAt);
     return proposal;
@@ -4098,6 +4161,12 @@ export class TopicDecisionRepository {
   }
 
   createExecutionRun(run: TopicExecutionRunRecord): TopicExecutionRunRecord {
+    const existing = this.db.prepare(`SELECT * FROM project_topic_execution_runs WHERE id = ?`).get(run.id) as TopicExecutionRunSqlRow | undefined;
+    if (existing) {
+      const stored = topicExecutionRunFromSql(existing);
+      if (topicExecutionRunFingerprint(stored) === topicExecutionRunFingerprint(run)) return stored;
+      throw new TopicDecisionIdempotencyConflictError(run.id, "execution_run");
+    }
     this.db.prepare(`INSERT INTO project_topic_execution_runs (id, namespace_id, session_id, proposal_id, status, result_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(run.id, run.namespaceId, run.sessionId, run.proposalId, run.status, toJson(run.result), run.version, run.createdAt, run.updatedAt);
     return run;
@@ -4110,6 +4179,13 @@ export class TopicDecisionRepository {
     return next;
   }
 
+  /**
+   * Delete a session and cascade-clean all child records (snapshots, positions,
+   * debate rounds, evidence requests, proposals, execution runs) via FK ON DELETE
+   * CASCADE. This is the ONLY path that mutates decision state destructively;
+   * all other mutations are append-only or version-gated. Not part of the brief
+   * interface but required by the brief's cascade-cleanup invariant.
+   */
   deleteSession(namespaceId: string, sessionId: string): void {
     this.db.prepare(`DELETE FROM project_topic_decision_sessions WHERE id = ? AND namespace_id = ?`).run(sessionId, namespaceId);
   }

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { MemoryDb } from "../../src/index.js";
-import { Repositories } from "../../src/storage/repositories.js";
+import { Repositories, TopicDecisionIdempotencyConflictError, TopicDecisionImmutablePositionError } from "../../src/storage/repositories.js";
 import type {
   TopicActionProposalRecord,
   TopicAgentPositionRecord,
@@ -209,7 +209,7 @@ describe("TopicDecisionRepository", () => {
     }
   });
 
-  it("rejects duplicate first-round positions by (session, snapshot, round, agent)", () => {
+  it("rejects duplicate first-round positions by (session, snapshot, round, agent) with different id", () => {
     const root = mkdtempSync(join(tmpdir(), "topic-decision-position-dup-"));
     try {
       const db = new MemoryDb({ path: join(root, "memory.sqlite") });
@@ -217,7 +217,7 @@ describe("TopicDecisionRepository", () => {
       repos.topicDecisions.createSession(baseSession());
       repos.topicDecisions.insertSnapshot(baseSnapshot());
       repos.topicDecisions.insertPosition(basePosition());
-      expect(() => repos.topicDecisions.insertPosition(basePosition())).toThrow();
+      expect(() => repos.topicDecisions.insertPosition(basePosition({ id: "position-2" }))).toThrow(TopicDecisionImmutablePositionError);
       db.close();
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -354,6 +354,113 @@ describe("TopicDecisionRepository", () => {
       expect(() => repos.topicDecisions.insertSnapshot(baseSnapshot({
         payload: { circular: undefined }
       }))).not.toThrow();
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("createSession is idempotent on exact replay and conflicts on different content", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-session-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      const session = baseSession();
+      const first = repos.topicDecisions.createSession(session);
+      const replay = repos.topicDecisions.createSession(session);
+      expect(replay).toEqual(first);
+      const different = { ...session, state: "debating" as const };
+      expect(() => repos.topicDecisions.createSession(different)).toThrow(TopicDecisionIdempotencyConflictError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("insertSnapshot is idempotent on exact replay and conflicts on different content", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-snapshot-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      const snap = baseSnapshot();
+      const first = repos.topicDecisions.insertSnapshot(snap);
+      const replay = repos.topicDecisions.insertSnapshot(snap);
+      expect(replay).toEqual(first);
+      const different = { ...snap, round: 99 };
+      expect(() => repos.topicDecisions.insertSnapshot(different)).toThrow(TopicDecisionIdempotencyConflictError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("insertPosition is idempotent on exact replay and conflicts on different content", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-position-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      repos.topicDecisions.insertSnapshot(baseSnapshot());
+      const pos = basePosition();
+      const first = repos.topicDecisions.insertPosition(pos);
+      const replay = repos.topicDecisions.insertPosition(pos);
+      expect(replay).toEqual(first);
+      const different = { ...pos, stance: "oppose" };
+      expect(() => repos.topicDecisions.insertPosition(different)).toThrow(TopicDecisionIdempotencyConflictError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("insertPosition throws TopicDecisionImmutablePositionError for duplicate (session, snapshot, round, agent) with different id", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-immutable-pos-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      repos.topicDecisions.insertSnapshot(baseSnapshot());
+      repos.topicDecisions.insertPosition(basePosition());
+      const conflicting = basePosition({ id: "position-different-id" });
+      expect(() => repos.topicDecisions.insertPosition(conflicting)).toThrow(TopicDecisionImmutablePositionError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("insertProposal is idempotent on exact replay and conflicts on different content", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-proposal-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      const prop = baseProposal();
+      const first = repos.topicDecisions.insertProposal(prop);
+      const replay = repos.topicDecisions.insertProposal(prop);
+      expect(replay).toEqual(first);
+      const different = { ...prop, title: "changed title" };
+      expect(() => repos.topicDecisions.insertProposal(different)).toThrow(TopicDecisionIdempotencyConflictError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("createExecutionRun is idempotent on exact replay and conflicts on different content", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-exec-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      repos.topicDecisions.insertProposal(baseProposal());
+      const run = baseExecutionRun();
+      const first = repos.topicDecisions.createExecutionRun(run);
+      const replay = repos.topicDecisions.createExecutionRun(run);
+      expect(replay).toEqual(first);
+      const different = { ...run, status: "succeeded" as const };
+      expect(() => repos.topicDecisions.createExecutionRun(different)).toThrow(TopicDecisionIdempotencyConflictError);
       db.close();
     } finally {
       rmSync(root, { recursive: true, force: true });
