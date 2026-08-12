@@ -126,6 +126,109 @@ export interface ProjectTopicAnalysisRunRecord {
   result: Record<string, unknown>; createdAt: IsoTime; updatedAt: IsoTime;
 }
 
+export type TopicDecisionState =
+  | "draft" | "gathering_evidence" | "debating" | "ready_for_decision"
+  | "awaiting_user_input" | "blocked_by_evidence" | "executing"
+  | "completed" | "stale" | "failed" | "cancelled";
+
+export type TopicEvidenceVerification =
+  | "repository_verified" | "tool_verified" | "user_authoritative"
+  | "user_supplied_unverified" | "contradicted";
+
+export type TopicActionEffect =
+  | "read" | "analyze" | "draft" | "create_candidate_task"
+  | "authoritative_write" | "external_write" | "delete"
+  | "topic_mutation" | "memory_promotion";
+
+export interface TopicDecisionSessionRecord {
+  id: string;
+  namespaceId: string;
+  topicId: string;
+  inputHash: string;
+  state: TopicDecisionState;
+  version: number;
+  metadata: Record<string, unknown>;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export interface TopicDecisionSnapshotRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  round: number;
+  payload: Record<string, unknown>;
+  createdAt: IsoTime;
+}
+
+export interface TopicAgentPositionRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  snapshotId: string;
+  round: number;
+  agentId: string;
+  stance: string;
+  rationale: string;
+  evidenceIds: string[];
+  createdAt: IsoTime;
+}
+
+export interface TopicDebateRoundRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  round: number;
+  status: string;
+  summary: string;
+  metadata: Record<string, unknown>;
+  version: number;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export interface TopicEvidenceRequestRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  round: number;
+  question: string;
+  verification: TopicEvidenceVerification;
+  status: string;
+  metadata: Record<string, unknown>;
+  version: number;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export interface TopicActionProposalRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  round: number;
+  rank: number;
+  effect: TopicActionEffect;
+  title: string;
+  payload: Record<string, unknown>;
+  status: string;
+  version: number;
+  metadata: Record<string, unknown>;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export interface TopicExecutionRunRecord {
+  id: string;
+  namespaceId: string;
+  sessionId: string;
+  proposalId: string;
+  status: string;
+  result: Record<string, unknown>;
+  version: number;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
 
 export interface ApiErrorBody {
   error: {

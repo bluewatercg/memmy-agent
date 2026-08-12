@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import { namespaceForMemory, namespaceIdFromContext } from "../service/namespace/namespace-scope.js";
-import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus } from "../types.js";
+import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus, TopicActionProposalRecord, TopicAgentPositionRecord, TopicDebateRoundRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../types.js";
 import type Database from "better-sqlite3";
 import type {
   FeedbackRequest,
@@ -63,7 +63,14 @@ const BUNDLE_TABLES = [
   "memory_processing_state",
   "runtime_kv",
   "artifacts",
-  "audit_logs"
+  "audit_logs",
+  "project_topic_decision_sessions",
+  "project_topic_decision_snapshots",
+  "project_topic_agent_positions",
+  "project_topic_debate_rounds",
+  "project_topic_evidence_requests",
+  "project_topic_action_proposals",
+  "project_topic_execution_runs"
 ] as const;
 type BundleTableName = typeof BUNDLE_TABLES[number];
 const LOG_TABLE_RETENTION_LIMIT = 10_000;
@@ -3976,12 +3983,161 @@ function factFromSql(row: ProjectFactSqlRow): ProjectFactRecord {
   return { ...projectContextBase(row), kind: row.kind, content: row.content, status: row.status, supersedesId: row.supersedes_id ?? undefined };
 }
 
+export class TopicDecisionRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  createSession(input: TopicDecisionSessionRecord): TopicDecisionSessionRecord {
+    this.db.prepare(`INSERT INTO project_topic_decision_sessions (id, namespace_id, topic_id, input_hash, state, version, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(input.id, input.namespaceId, input.topicId, input.inputHash, input.state, input.version, toJson(input.metadata), input.createdAt, input.updatedAt);
+    return input;
+  }
+
+  findReusableSession(namespaceId: string, topicId: string, inputHash: string): TopicDecisionSessionRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_decision_sessions WHERE namespace_id = ? AND topic_id = ? AND input_hash = ?`)
+      .get(namespaceId, topicId, inputHash) as TopicDecisionSessionSqlRow | undefined;
+    return row ? topicDecisionSessionFromSql(row) : undefined;
+  }
+
+  getSession(namespaceId: string, sessionId: string): TopicDecisionSessionRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_decision_sessions WHERE id = ? AND namespace_id = ?`)
+      .get(sessionId, namespaceId) as TopicDecisionSessionSqlRow | undefined;
+    return row ? topicDecisionSessionFromSql(row) : undefined;
+  }
+
+  updateSession(next: TopicDecisionSessionRecord, expectedVersion: number): TopicDecisionSessionRecord {
+    const result = this.db.prepare(`UPDATE project_topic_decision_sessions SET state = ?, version = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`)
+      .run(next.state, next.version, toJson(next.metadata), next.updatedAt, next.id, next.namespaceId, expectedVersion);
+    if (!result.changes) throw new Error(`topic decision session version conflict: ${next.id}`);
+    return next;
+  }
+
+  insertSnapshot(snapshot: TopicDecisionSnapshotRecord): TopicDecisionSnapshotRecord {
+    this.db.prepare(`INSERT INTO project_topic_decision_snapshots (id, namespace_id, session_id, round, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(snapshot.id, snapshot.namespaceId, snapshot.sessionId, snapshot.round, toJson(snapshot.payload), snapshot.createdAt);
+    return snapshot;
+  }
+
+  getSnapshot(namespaceId: string, snapshotId: string): TopicDecisionSnapshotRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_decision_snapshots WHERE id = ? AND namespace_id = ?`)
+      .get(snapshotId, namespaceId) as TopicDecisionSnapshotSqlRow | undefined;
+    return row ? topicDecisionSnapshotFromSql(row) : undefined;
+  }
+
+  insertPosition(position: TopicAgentPositionRecord): TopicAgentPositionRecord {
+    this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), position.createdAt);
+    return position;
+  }
+
+  listPositions(namespaceId: string, sessionId: string, snapshotId: string): TopicAgentPositionRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_agent_positions WHERE namespace_id = ? AND session_id = ? AND snapshot_id = ? ORDER BY round, agent_id`)
+      .all(namespaceId, sessionId, snapshotId) as TopicAgentPositionSqlRow[]).map(topicAgentPositionFromSql);
+  }
+
+  upsertRound(round: TopicDebateRoundRecord, expectedVersion?: number): TopicDebateRoundRecord {
+    const existing = this.db.prepare(`SELECT * FROM project_topic_debate_rounds WHERE id = ? AND namespace_id = ?`)
+      .get(round.id, round.namespaceId) as TopicDebateRoundSqlRow | undefined;
+    if (!existing) {
+      this.db.prepare(`INSERT INTO project_topic_debate_rounds (id, namespace_id, session_id, round, status, summary, metadata_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(round.id, round.namespaceId, round.sessionId, round.round, round.status, round.summary, toJson(round.metadata), round.version ?? 1, round.createdAt, round.updatedAt);
+      return round;
+    }
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      throw new Error(`topic debate round version conflict: ${round.id}`);
+    }
+    const nextVersion = expectedVersion !== undefined ? expectedVersion + 1 : existing.version + 1;
+    this.db.prepare(`UPDATE project_topic_debate_rounds SET status = ?, summary = ?, metadata_json = ?, version = ?, updated_at = ? WHERE id = ? AND namespace_id = ?`)
+      .run(round.status, round.summary, toJson(round.metadata), nextVersion, round.updatedAt, round.id, round.namespaceId);
+    return { ...round, version: nextVersion };
+  }
+
+  listRounds(namespaceId: string, sessionId: string): TopicDebateRoundRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_debate_rounds WHERE namespace_id = ? AND session_id = ? ORDER BY round`)
+      .all(namespaceId, sessionId) as TopicDebateRoundSqlRow[]).map(topicDebateRoundFromSql);
+  }
+
+  upsertEvidenceRequest(request: TopicEvidenceRequestRecord, expectedVersion?: number): TopicEvidenceRequestRecord {
+    const existing = this.db.prepare(`SELECT * FROM project_topic_evidence_requests WHERE id = ? AND namespace_id = ?`)
+      .get(request.id, request.namespaceId) as TopicEvidenceRequestSqlRow | undefined;
+    if (!existing) {
+      this.db.prepare(`INSERT INTO project_topic_evidence_requests (id, namespace_id, session_id, round, question, verification, status, metadata_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(request.id, request.namespaceId, request.sessionId, request.round, request.question, request.verification, request.status, toJson(request.metadata), request.version ?? 1, request.createdAt, request.updatedAt);
+      return request;
+    }
+    if (expectedVersion !== undefined && existing.version !== expectedVersion) {
+      throw new Error(`topic evidence request version conflict: ${request.id}`);
+    }
+    const nextVersion = expectedVersion !== undefined ? expectedVersion + 1 : existing.version + 1;
+    this.db.prepare(`UPDATE project_topic_evidence_requests SET question = ?, verification = ?, status = ?, metadata_json = ?, version = ?, updated_at = ? WHERE id = ? AND namespace_id = ?`)
+      .run(request.question, request.verification, request.status, toJson(request.metadata), nextVersion, request.updatedAt, request.id, request.namespaceId);
+    return { ...request, version: nextVersion };
+  }
+
+  listEvidenceRequests(namespaceId: string, sessionId: string): TopicEvidenceRequestRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_evidence_requests WHERE namespace_id = ? AND session_id = ? ORDER BY round, created_at`)
+      .all(namespaceId, sessionId) as TopicEvidenceRequestSqlRow[]).map(topicEvidenceRequestFromSql);
+  }
+
+  insertProposal(proposal: TopicActionProposalRecord): TopicActionProposalRecord {
+    if (proposal.rank < 1 || proposal.rank > 3) throw new Error(`topic action proposal rank must be 1..3: ${proposal.rank}`);
+    this.db.prepare(`INSERT INTO project_topic_action_proposals (id, namespace_id, session_id, round, rank, effect, title, payload_json, status, version, metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(proposal.id, proposal.namespaceId, proposal.sessionId, proposal.round, proposal.rank, proposal.effect, proposal.title, toJson(proposal.payload), proposal.status, proposal.version, toJson(proposal.metadata), proposal.createdAt, proposal.updatedAt);
+    return proposal;
+  }
+
+  listProposals(namespaceId: string, sessionId: string): TopicActionProposalRecord[] {
+    return (this.db.prepare(`SELECT * FROM project_topic_action_proposals WHERE namespace_id = ? AND session_id = ? ORDER BY round, rank`)
+      .all(namespaceId, sessionId) as TopicActionProposalSqlRow[]).map(topicActionProposalFromSql);
+  }
+
+  updateProposal(next: TopicActionProposalRecord, expectedVersion: number): TopicActionProposalRecord {
+    const result = this.db.prepare(`UPDATE project_topic_action_proposals SET rank = ?, effect = ?, title = ?, payload_json = ?, status = ?, version = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`)
+      .run(next.rank, next.effect, next.title, toJson(next.payload), next.status, next.version, toJson(next.metadata), next.updatedAt, next.id, next.namespaceId, expectedVersion);
+    if (!result.changes) throw new Error(`topic action proposal version conflict: ${next.id}`);
+    return next;
+  }
+
+  createExecutionRun(run: TopicExecutionRunRecord): TopicExecutionRunRecord {
+    this.db.prepare(`INSERT INTO project_topic_execution_runs (id, namespace_id, session_id, proposal_id, status, result_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(run.id, run.namespaceId, run.sessionId, run.proposalId, run.status, toJson(run.result), run.version, run.createdAt, run.updatedAt);
+    return run;
+  }
+
+  updateExecutionRun(next: TopicExecutionRunRecord, expectedVersion: number): TopicExecutionRunRecord {
+    const result = this.db.prepare(`UPDATE project_topic_execution_runs SET status = ?, result_json = ?, version = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`)
+      .run(next.status, toJson(next.result), next.version, next.updatedAt, next.id, next.namespaceId, expectedVersion);
+    if (!result.changes) throw new Error(`topic execution run version conflict: ${next.id}`);
+    return next;
+  }
+
+  deleteSession(namespaceId: string, sessionId: string): void {
+    this.db.prepare(`DELETE FROM project_topic_decision_sessions WHERE id = ? AND namespace_id = ?`).run(sessionId, namespaceId);
+  }
+}
+
+interface TopicDecisionSessionSqlRow { id: string; namespace_id: string; topic_id: string; input_hash: string; state: string; version: number; metadata_json: string; created_at: string; updated_at: string }
+interface TopicDecisionSnapshotSqlRow { id: string; namespace_id: string; session_id: string; round: number; payload_json: string; created_at: string }
+interface TopicAgentPositionSqlRow { id: string; namespace_id: string; session_id: string; snapshot_id: string; round: number; agent_id: string; stance: string; rationale: string; evidence_ids_json: string; created_at: string }
+interface TopicDebateRoundSqlRow { id: string; namespace_id: string; session_id: string; round: number; status: string; summary: string; metadata_json: string; version: number; created_at: string; updated_at: string }
+interface TopicEvidenceRequestSqlRow { id: string; namespace_id: string; session_id: string; round: number; question: string; verification: TopicEvidenceRequestRecord["verification"]; status: string; metadata_json: string; version: number; created_at: string; updated_at: string }
+interface TopicActionProposalSqlRow { id: string; namespace_id: string; session_id: string; round: number; rank: number; effect: TopicActionProposalRecord["effect"]; title: string; payload_json: string; status: string; version: number; metadata_json: string; created_at: string; updated_at: string }
+interface TopicExecutionRunSqlRow { id: string; namespace_id: string; session_id: string; proposal_id: string; status: string; result_json: string; version: number; created_at: string; updated_at: string }
+
+function topicDecisionSessionFromSql(row: TopicDecisionSessionSqlRow): TopicDecisionSessionRecord { return { id: row.id, namespaceId: row.namespace_id, topicId: row.topic_id, inputHash: row.input_hash, state: row.state as TopicDecisionSessionRecord["state"], version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function topicDecisionSnapshotFromSql(row: TopicDecisionSnapshotSqlRow): TopicDecisionSnapshotRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, payload: parseJson(row.payload_json, {}), createdAt: row.created_at }; }
+function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), createdAt: row.created_at }; }
+function topicDebateRoundFromSql(row: TopicDebateRoundSqlRow): TopicDebateRoundRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, status: row.status, summary: row.summary, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
+function topicEvidenceRequestFromSql(row: TopicEvidenceRequestSqlRow): TopicEvidenceRequestRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, question: row.question, verification: row.verification, status: row.status, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
+function topicActionProposalFromSql(row: TopicActionProposalSqlRow): TopicActionProposalRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, rank: row.rank, effect: row.effect, title: row.title, payload: parseJson(row.payload_json, {}), status: row.status, version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
+function topicExecutionRunFromSql(row: TopicExecutionRunSqlRow): TopicExecutionRunRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, proposalId: row.proposal_id, status: row.status, result: parseJson(row.result_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
+
 export class Repositories {
   readonly memories: MemoryRepository;
   readonly processing: MemoryProcessingRepository;
   readonly runtime: RuntimeRepository;
   readonly projectContext: ProjectContextRepository;
   readonly topics: ProjectTopicRepository;
+  readonly topicDecisions: TopicDecisionRepository;
   readonly vectors: SqliteVecStore;
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
@@ -3989,6 +4145,7 @@ export class Repositories {
     this.processing = new MemoryProcessingRepository(db);
     this.projectContext = new ProjectContextRepository(db);
     this.topics = new ProjectTopicRepository(db);
+    this.topicDecisions = new TopicDecisionRepository(db);
     this.runtime = new RuntimeRepository(db);
   }
   transaction<T>(fn: () => T): T { return this.db.transaction(fn)(); }

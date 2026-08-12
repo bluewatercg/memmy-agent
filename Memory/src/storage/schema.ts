@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 7;
-export const SCHEMA_MIGRATION_ID = "007_project_topic_inbox";
+export const SCHEMA_VERSION = 8;
+export const SCHEMA_MIGRATION_ID = "008_topic_decisions";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -588,7 +588,117 @@ const statements = [
     updated_at TEXT NOT NULL,
     UNIQUE(namespace_id, input_hash)
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_project_topic_analysis_namespace ON project_topic_analysis_runs(namespace_id, updated_at DESC)`
+  `CREATE INDEX IF NOT EXISTS idx_project_topic_analysis_namespace ON project_topic_analysis_runs(namespace_id, updated_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_decision_sessions (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN (
+      'draft', 'gathering_evidence', 'debating', 'ready_for_decision',
+      'awaiting_user_input', 'blocked_by_evidence', 'executing',
+      'completed', 'stale', 'failed', 'cancelled'
+    )),
+    version INTEGER NOT NULL DEFAULT 1,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (namespace_id, topic_id, input_hash)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_decision_sessions_namespace ON project_topic_decision_sessions(namespace_id, updated_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_decision_snapshots (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_decision_snapshots_session ON project_topic_decision_snapshots(namespace_id, session_id, created_at DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_agent_positions (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    snapshot_id TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    agent_id TEXT NOT NULL,
+    stance TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_ids_json)),
+    created_at TEXT NOT NULL,
+    UNIQUE (session_id, snapshot_id, round, agent_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_agent_positions_session_snapshot ON project_topic_agent_positions(namespace_id, session_id, snapshot_id)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_debate_rounds (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    summary TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (session_id, round)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_debate_rounds_session ON project_topic_debate_rounds(namespace_id, session_id, round)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_evidence_requests (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL,
+    question TEXT NOT NULL,
+    verification TEXT NOT NULL CHECK (verification IN (
+      'repository_verified', 'tool_verified', 'user_authoritative',
+      'user_supplied_unverified', 'contradicted'
+    )),
+    status TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_evidence_requests_session ON project_topic_evidence_requests(namespace_id, session_id, round)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_action_proposals (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    round INTEGER NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank BETWEEN 1 AND 3),
+    effect TEXT NOT NULL CHECK (effect IN (
+      'read', 'analyze', 'draft', 'create_candidate_task',
+      'authoritative_write', 'external_write', 'delete',
+      'topic_mutation', 'memory_promotion'
+    )),
+    title TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(payload_json)),
+    status TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_action_proposals_session ON project_topic_action_proposals(namespace_id, session_id, round)`,
+
+  `CREATE TABLE IF NOT EXISTS project_topic_execution_runs (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL REFERENCES project_topic_decision_sessions(id) ON DELETE CASCADE,
+    proposal_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(result_json)),
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_topic_execution_runs_session ON project_topic_execution_runs(namespace_id, session_id, proposal_id)`
  ];
 
 export function migrate(db: Database.Database): void {
@@ -598,7 +708,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
