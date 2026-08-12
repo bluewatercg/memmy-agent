@@ -2,6 +2,8 @@
 import { ZodError } from "zod";
 import { MemoryLayerError } from "../adapters/outbound/memory-client/index.js";
 import type { FastifyReply, FastifyRequest, RouteHandlerMethod } from "fastify";
+export { MemoryLayerError } from "../adapters/outbound/memory-client/index.js";
+
 
 export const API_ERROR_CODES = [
   "invalid_argument",

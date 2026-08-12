@@ -1,8 +1,8 @@
 /** Agent runtime routes tests. */
 import { afterEach, describe, expect, it } from "vitest";
+import { MemoryLayerError } from "../../../../services/error-envelope.js";
 import { createProgressBus } from "../../../../services/progress-bus.js";
 import { createLocalApiServer } from "../server.js";
-import { MemoryLayerError } from "../../../outbound/memory-client/errors.js";
 import type { FastifyInstance } from "fastify";
 import type { PermissionManager } from "../../../../permission/index.js";
 import type { BackendServices } from "../../../../services/index.js";
