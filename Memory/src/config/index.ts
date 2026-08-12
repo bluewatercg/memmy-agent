@@ -46,6 +46,11 @@ export type CaptureBatchMode = "windowed";
 export type ReflectionContextMode = "none" | "task" | "downstream" | "task_downstream";
 export type LongEpisodeReflectMode = "per_step_parallel" | "per_step_downstream";
 
+export interface TopicDecisionsConfig {
+  enabled: boolean;
+  models: string[];
+}
+
 export interface LlmConfig {
   provider: LlmProviderName;
   vendor?: LlmVendorName;
@@ -226,6 +231,7 @@ export interface AlgorithmConfig {
     llmFilterCandidateBodyChars: number;
     readOnlyInjectionProfile: ReadOnlyInjectionProfile;
   };
+  topicDecisions: TopicDecisionsConfig;
 }
 
 export interface MemmyConfig {
@@ -436,6 +442,10 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
       llmFilterMinCandidates: 2,
       llmFilterCandidateBodyChars: 500,
       readOnlyInjectionProfile: "all"
+    },
+    topicDecisions: {
+      enabled: false,
+      models: []
     }
   }
 };
@@ -542,6 +552,10 @@ function configFromEnv(): Record<string, unknown> {
         readOnlyInjectionProfile:
           process.env.MEMMY_RETRIEVAL_INJECTION_PROFILE ??
           process.env.MEMMY_READONLY_INJECTION_PROFILE
+      }),
+      topicDecisions: compactRecord({
+        enabled: booleanEnv("MEMMY_TOPIC_DECISIONS_ENABLED"),
+        models: process.env.MEMMY_TOPIC_DECISION_MODELS
       })
     })
   });
@@ -846,8 +860,22 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
         retrieval.readOnlyInjectionProfile,
         DEFAULT_MEMMY_CONFIG.algorithm.retrieval.readOnlyInjectionProfile
       )
-    }
+    },
+    topicDecisions: normalizeTopicDecisions(asRecord(input.topicDecisions))
   };
+}
+
+function normalizeTopicDecisions(input: Record<string, unknown>): TopicDecisionsConfig {
+  return {
+    enabled: booleanValue(input.enabled, DEFAULT_MEMMY_CONFIG.algorithm.topicDecisions.enabled),
+    models: parseTopicDecisionModels(input.models)
+  };
+}
+
+function parseTopicDecisionModels(value: unknown): string[] {
+  if (typeof value !== "string" || !value.trim()) return [];
+  const seen = new Set<string>();
+  return value.split(",").map((s) => s.trim()).filter(Boolean).filter((m) => !seen.has(m) && seen.add(m));
 }
 
 function memoryDomainName(value: unknown, fallback: MemoryDomainName): MemoryDomainName {

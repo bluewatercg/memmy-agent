@@ -174,6 +174,9 @@ import {
 import { WorkerRunner } from "./worker/worker-runner.js";
 import { ProjectTopicInboxService } from "./topic-inbox/project-topic-inbox.js";
 import type { TopicCandidateDecision, TopicInboxQuery } from "./topic-inbox/topic-inbox-types.js";
+import { TopicDecisionService } from "./topic-decision/topic-decision-service.js";
+import type { TopicDecisionStartInput, TopicDecisionStartResult } from "./topic-decision/decision-types.js";
+import type { TopicAgentSpec } from "../types.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
 
@@ -271,6 +274,7 @@ export class MemoryService {
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
   private readonly topicInbox: ProjectTopicInboxService;
+  private readonly topicDecisions: TopicDecisionService;
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
   private readonly repos: Repositories;
@@ -364,6 +368,11 @@ export class MemoryService {
       buildMemory: (input) => this.buildMemory(input as Parameters<MemoryService["buildMemory"]>[0]),
       upsertMemory: (memory) => this.evolutionJobs.upsertEvolutionMemory(memory),
       enqueueJob: this.workerHandlers.enqueueJob
+    });
+    this.topicDecisions = new TopicDecisionService({
+      repos: this.repos,
+      enabled: this.config.algorithm.topicDecisions.enabled,
+      models: this.config.algorithm.topicDecisions.models
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -1858,6 +1867,14 @@ export class MemoryService {
   renderStableProjectContext(namespace: RuntimeNamespace, budget?: number): ProjectContextStableResult {
     this.assertProjectContextScope(namespace);
     return this.projectContext.renderStable(namespace, budget);
+  }
+
+  recommendAgents(namespace: RuntimeNamespace, topicId: string): TopicAgentSpec[] {
+    return this.topicDecisions.recommendAgents(namespace, topicId);
+  }
+
+  startTopicDecisionSession(input: TopicDecisionStartInput): TopicDecisionStartResult {
+    return this.topicDecisions.start(input);
   }
 
   private assertProjectContextScope(namespace: RuntimeNamespace): void {

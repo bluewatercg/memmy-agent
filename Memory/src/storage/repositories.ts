@@ -3800,6 +3800,12 @@ export class ProjectTopicRepository {
     })();
   }
 
+  insertEvidence(evidence: ProjectTopicEvidenceRecord): ProjectTopicEvidenceRecord {
+    this.db.prepare(`INSERT INTO project_topic_evidence (id, topic_id, namespace_id, memory_id, role, summary, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(evidence.id, evidence.topicId, evidence.namespaceId, evidence.memoryId, evidence.role, evidence.summary, toJson(evidence.metadata), evidence.createdAt);
+    return evidence;
+  }
+
   listEvidence(topicId: string, namespaceId: string): ProjectTopicEvidenceRecord[] {
     return (this.db.prepare(`SELECT * FROM project_topic_evidence WHERE topic_id = ? AND namespace_id = ? ORDER BY created_at`).all(topicId, namespaceId) as EvidenceSqlRow[]).map(evidenceFromSql);
   }
@@ -4065,6 +4071,12 @@ export class TopicDecisionRepository {
     const row = this.db.prepare(`SELECT * FROM project_topic_decision_snapshots WHERE id = ? AND namespace_id = ?`)
       .get(snapshotId, namespaceId) as TopicDecisionSnapshotSqlRow | undefined;
     return row ? topicDecisionSnapshotFromSql(row) : undefined;
+  }
+
+  getSnapshotsForSession(namespaceId: string, sessionId: string): TopicDecisionSnapshotRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM project_topic_decision_snapshots WHERE namespace_id = ? AND session_id = ? ORDER BY round ASC`)
+      .all(namespaceId, sessionId) as TopicDecisionSnapshotSqlRow[];
+    return rows.map((row) => topicDecisionSnapshotFromSql(row));
   }
 
   insertPosition(position: TopicAgentPositionRecord): TopicAgentPositionRecord {

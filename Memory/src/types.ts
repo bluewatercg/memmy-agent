@@ -152,6 +152,13 @@ export interface TopicDecisionSessionRecord {
   updatedAt: IsoTime;
 }
 
+export interface TopicAgentSpec {
+  id: string;
+  role: string;
+  model: string;
+  reason: string;
+}
+
 export interface TopicDecisionSnapshotRecord {
   id: string;
   namespaceId: string;
