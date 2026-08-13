@@ -315,5 +315,71 @@ git diff --check
 
 ### Commit
 ```
-<COMMIT_HASH> fix(memory): resolve TDZ ReferenceError in agent-position.ts
+58d81ae fix(memory): resolve TDZ ReferenceError in agent-position.ts
+```
+
+---
+
+## Fix Round 2: Production-Path Tests for runIndependentPositions
+
+### Issue
+Need tests for `AgentPositionService.runIndependentPositions` to verify position reuse logic:
+- Same active snapshot successful position reused without LLM call
+- Stale snapshot position not reused, LLM runs
+- Invalid citation on current snapshot position not reused
+- No ReferenceError (covered by Round 1 fix)
+
+### Tests Added
+```typescript
+// Memory/tests/service/topic-decision/agent-position.test.ts
+describe("runIndependentPositions", () => {
+  it("reuses successful position from active snapshot without LLM call", ...);
+  it("does not reuse position from stale snapshot - LLM runs", ...);
+  it("does not reuse position with invalid evidence citation on current snapshot", ...);
+  it("has no ReferenceError - validEvidenceIds defined before filter callback", ...);
+  it("builds validEvidenceIds before filter callback executes", ...);
+});
+```
+
+### Test Outputs
+
+**agent-position.test.ts**
+```
+ RUN  v4.1.7
+ Test Files  1 passed (1)
+      Tests  14 passed (14)
+   Duration  10.48s
+```
+
+**evidence-gaps.test.ts**
+```
+ RUN  v4.1.7
+ Test Files  1 passed (1)
+      Tests  17 passed (17)
+   Duration  13.97s
+```
+
+**session-start.test.ts**
+```
+ RUN  v4.1.7
+ Test Files  1 passed (1)
+      Tests  16 passed (16)
+   Duration  8.10s
+```
+
+### Typecheck
+```
+npx tsc -p tsconfig.json --noEmit
+# (no output - no errors)
+```
+
+### Git diff --check
+```
+git diff --check
+# (no output - no errors)
+```
+
+### Commit
+```
+0e2ffe9 fix(memory): add production-path tests for runIndependentPositions
 ```
