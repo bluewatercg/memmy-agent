@@ -247,3 +247,73 @@ e414d47 fix(memory): validate position reuse, rebuild snapshot on answers, use a
 | topic-decision-service.ts | Add rebuildPayloadWithAnswers, rebuildWithAutoAcquiredAnswers |
 | agent-position.test.ts | Add position reuse validation tests |
 | evidence-gaps.test.ts | Add snapshot rebuild, historical marks, auto-acquisition tests |
+
+---
+
+## Fix Round 2: TDZ ReferenceError in agent-position.ts
+
+### Issue: Temporal Dead Zone (TDZ) ReferenceError
+
+**Problem**: `validEvidenceIds` was declared AFTER the filter callback that referenced it, causing a runtime ReferenceError.
+
+**Location**: `Memory/src/service/topic-decision/agent-position.ts` lines ~185-200
+
+**Before fix**:
+```typescript
+const allPositions = this.options.repos.topicDecisions.listPositions(...);
+
+// BUG: validEvidenceIds used here but declared after
+const validPositions = allPositions.filter(p => {
+  for (const evId of p.evidenceIds) {
+    if (!validEvidenceIds.has(evId)) return false; // ReferenceError!
+  }
+  return true;
+});
+
+// Declared too late
+const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
+```
+
+**After fix**:
+```typescript
+const allPositions = this.options.repos.topicDecisions.listPositions(...);
+
+// FIXED: validEvidenceIds declared BEFORE any callback uses it
+const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
+
+const validPositions = allPositions.filter(p => {
+  for (const evId of p.evidenceIds) {
+    if (!validEvidenceIds.has(evId)) return false;
+  }
+  return true;
+});
+```
+
+### Test Results
+
+```bash
+# Tests
+npm run memory:test
+# Test Files: 75 passed (75)
+# Tests: 620 passed (620)
+
+# Typecheck
+npm run memory:lint
+# 0 errors
+
+# Git diff --check
+git diff --check
+# (no errors)
+```
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `Memory/src/service/topic-decision/agent-position.ts` | Move `validEvidenceIds` declaration before filter callback |
+| `Memory/tests/service/topic-decision/agent-position.test.ts` | Add production-path tests for `runIndependentPositions` |
+
+### Commit
+```
+<COMMIT_HASH> fix(memory): resolve TDZ ReferenceError in agent-position.ts
+```

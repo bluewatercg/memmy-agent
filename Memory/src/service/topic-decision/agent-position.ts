@@ -182,6 +182,9 @@ export class AgentPositionService {
       snapshot.id
     );
 
+    // Build valid evidence IDs set - must be before any callback that uses it
+    const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
+
     // Filter positions: must belong to active snapshot AND have valid evidence citations
     const validPositions = allPositions.filter(p => {
       // Must be from the current active snapshot
@@ -195,9 +198,6 @@ export class AgentPositionService {
     });
 
     const existingPositionMap = new Map(validPositions.map(p => [p.agentId, p]));
-
-    // Build valid evidence IDs set
-    const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
 
     // Build prompt with snapshot
     const snapshotPrompt = this.buildSnapshotPrompt(snapshot.payload);

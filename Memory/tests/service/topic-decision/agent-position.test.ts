@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb, MemoryService, Repositories } from "../../../src/index.js";
 import { loadMemmyConfig } from "../../../src/config/index.js";
 import type { RuntimeNamespace } from "../../../src/types.js";
+import { AgentPositionService } from "../../../src/service/topic-decision/agent-position.js";
 import { nowIso } from "../../../src/utils/time.js";
 import { stableHash } from "../../../src/utils/id.js";
 
@@ -103,6 +104,82 @@ describe("position reuse validation", () => {
 
     const parseResult = parseAgentPosition(validPosition, currentValidEvidenceIds);
     expect(parseResult).not.toHaveProperty("code");
+  });
+});
+
+// Production-path tests for AgentPositionService.runIndependentPositions
+describe("runIndependentPositions", () => {
+  it("has no ReferenceError - validEvidenceIds defined before filter callback", async () => {
+    // This test verifies the TDZ fix: validEvidenceIds must be declared BEFORE
+    // the filter callback that uses it
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    const snapshots = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnapshot = snapshots[snapshots.length - 1]!;
+    const currentEvidenceIds = activeSnapshot.payload.evidenceIds;
+
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: currentEvidenceIds,
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: mockLlmClient
+    });
+
+    // This should NOT throw ReferenceError (the bug we fixed)
+    // Before fix: ReferenceError: Cannot access 'validEvidenceIds' before initialization
+    await expect(agentPosService.runIndependentPositions(namespace, sessionId))
+      .resolves.not.toThrow();
+  });
+
+  it("builds validEvidenceIds before filter callback executes", async () => {
+    // Direct unit test of the ordering fix
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    const snapshots = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnapshot = snapshots[snapshots.length - 1]!;
+
+    // The key fix: validEvidenceIds is now built BEFORE the filter that uses it.
+    // This test just confirms the function executes without TDZ error.
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: activeSnapshot.payload.evidenceIds,
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: mockLlmClient
+    });
+
+    // If validEvidenceIds was used before declaration, this would throw ReferenceError
+    await expect(agentPosService.runIndependentPositions(namespace, sessionId))
+      .resolves.not.toThrow();
   });
 });
 
@@ -306,4 +383,59 @@ async function setupService(): Promise<{
   });
 
   return { service, repos, namespaceId, db };
+}
+
+async function setupServiceWithAgentPosition(): Promise<{
+  service: MemoryService;
+  repos: Repositories;
+  namespaceId: string;
+  db: MemoryDb;
+  AgentPositionService: typeof AgentPositionService;
+}> {
+  const root = tempRoot();
+  const configPath = join(root, "config.yaml");
+  const dbPath = join(root, "memory.sqlite");
+  writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+
+  const { config } = loadMemmyConfig(configPath);
+  const db = new MemoryDb({ path: dbPath });
+  const repos = new Repositories(db.db);
+
+  const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+  const namespaceId = stableHash(namespace);
+
+  // Insert topic
+  repos.topics.insertTopic({
+    id: "topic-1",
+    namespaceId,
+    title: "Test Topic",
+    summary: "Test summary",
+    status: "active",
+    version: 1,
+    sourceMemoryIds: [],
+    metadata: {},
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  // Insert evidence
+  repos.topics.insertEvidence({
+    id: "ev-1",
+    topicId: "topic-1",
+    namespaceId,
+    memoryId: "mem-1",
+    role: "support",
+    summary: "Evidence 1 content",
+    metadata: {},
+    createdAt: nowIso()
+  });
+
+  const service = new MemoryService({
+    db,
+    config,
+    configPath,
+    mode: "dev"
+  });
+
+  return { service, repos, namespaceId, db, AgentPositionService };
 }
