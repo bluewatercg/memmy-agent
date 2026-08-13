@@ -211,6 +211,7 @@ export interface MemoryServiceOptions {
   llm?: LlmClient;
   skillLlm?: LlmClient;
   embedder?: Embedder;
+  createLlmClient?: (model: string) => LlmClient;
 }
 
 export interface CompleteTurnResponse {
@@ -370,11 +371,11 @@ export class MemoryService {
       enqueueJob: this.workerHandlers.enqueueJob
     });
     // Create LLM client factory for topic decisions
-    const createTopicDecisionLlm = (model: string) => {
+    const createTopicDecisionLlm = options.createLlmClient ?? ((model: string) => {
       // Use default config with model, requiring API key to be configured
       const config = { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
       return createLlmClient(config);
-    };
+    });
 
     this.topicDecisions = new TopicDecisionService({
       repos: this.repos,
@@ -1908,6 +1909,14 @@ export class MemoryService {
 
   getEvidenceSource() {
     return this.topicDecisions.getEvidenceSource();
+  }
+
+  async runDebate(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+    return this.topicDecisions.runDebate(namespace, sessionId);
+  }
+
+  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+    return this.topicDecisions.synthesizeProposals(namespace, sessionId);
   }
 
   private assertProjectContextScope(namespace: RuntimeNamespace): void {

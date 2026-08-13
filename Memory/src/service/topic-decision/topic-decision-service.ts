@@ -8,6 +8,8 @@ import { EvidenceSnapshotBuilder } from "./evidence-snapshot.js";
 import { AgentPositionService } from "./agent-position.js";
 import { EvidenceAcquisitionService } from "./evidence-acquisition.js";
 import { DecisionabilityService } from "./decisionability.js";
+import { DebateOrchestrator } from "./debate-orchestrator.js";
+import { ProposalSynthesis } from "./proposal-synthesis.js";
 import { createLlmClient } from "../../model/llm.js";
 import type { LlmConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
@@ -25,6 +27,8 @@ export class TopicDecisionService {
   private readonly agentPositionService: AgentPositionService;
   private readonly evidenceAcquisitionService: EvidenceAcquisitionService;
   private readonly decisionabilityService: DecisionabilityService;
+  private readonly debateOrchestrator: DebateOrchestrator;
+  private readonly proposalSynthesis: ProposalSynthesis;
 
   constructor(private readonly options: TopicDecisionServiceOptions) {
     this.snapshotBuilder = new EvidenceSnapshotBuilder(options.repos);
@@ -45,6 +49,16 @@ export class TopicDecisionService {
     };
 
     this.agentPositionService = new AgentPositionService({
+      repos: options.repos,
+      createLlmClient: createClient
+    });
+
+    this.debateOrchestrator = new DebateOrchestrator({
+      repos: options.repos,
+      createLlmClient: createClient
+    });
+
+    this.proposalSynthesis = new ProposalSynthesis({
       repos: options.repos,
       createLlmClient: createClient
     });
@@ -390,6 +404,36 @@ export class TopicDecisionService {
     // Return the first source (MemoryEvidenceSource)
     const sources = (this.evidenceAcquisitionService as any).sources;
     return sources?.[0] || this.evidenceAcquisitionService;
+  }
+
+  /**
+   * Run adaptive debate with bounded rounds.
+   */
+  async runDebate(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    const namespaceId = stableHash(namespace);
+    await this.debateOrchestrator.runDebate(namespace, sessionId);
+
+    // Return updated session detail
+    return this.read(namespace, sessionId);
+  }
+
+  /**
+   * Synthesize proposals from debate results.
+   */
+  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    const namespaceId = stableHash(namespace);
+    await this.proposalSynthesis.synthesizeProposals(namespace, sessionId);
+
+    // Return updated session detail
+    return this.read(namespace, sessionId);
   }
 
   private createSnapshotRecord(
