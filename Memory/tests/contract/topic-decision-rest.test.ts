@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryHttpServer, API_ROUTES } from "../../src/index.js";
 import { MemoryRestClient } from "../../src/client/rest-client.js";
 import type { MemoryService } from "../../src/service/memory-service.js";
@@ -960,3 +960,59 @@ describe("Topic Decision REST contract", () => {
     });
   });
 });
+  it("rejects missing idempotency envelope fields on every mutation", async () => {
+    const { db, service } = createTestService({ topicDecisionEnabled: true });
+    const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
+    const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { writer: { namespace, scopes: ["panel:write"] } } } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const base = `http://127.0.0.1:${address.port}`;
+      const headers = { authorization: "Bearer writer", "content-type": "application/json" };
+      const cases: Array<[string, Record<string, unknown>]> = [
+        [`${base}/api/v1/topic-inbox/topics/t1/decisions`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/run`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/positions`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/debate`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/proposals`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/proposals/p1/approve`, { namespace, expectedProposalVersion: 1 }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/executions/r1/resume`, { namespace }],
+        [`${base}/api/v1/topic-inbox/decisions/s1/executions/r1/actions/a1/confirm`, { namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k" }]
+      ];
+      for (const [url, body] of cases) {
+        const response = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+        expect(response.status, url).toBe(400);
+      }
+    });
+    db.close();
+  });
+
+  it("sends namespace in the decision read query", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ session: {}, snapshots: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new MemoryRestClient({ endpoint: "http://example.test" });
+    const namespace = { source: "codex", profileId: "default", userId: "u", projectId: "p" };
+    await client.readTopicDecision("s1", namespace);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("namespace=");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain(encodeURIComponent(JSON.stringify(namespace)));
+  });
+
+  it("sanitizes nested execution result fields", async () => {
+    const { db, service } = createTestService({ topicDecisionEnabled: true });
+    const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
+    const run = { id: "r1", namespaceId: "ns", sessionId: "s1", proposalId: "p1", status: "failed", result: { status: "failed", action: { id: "a1", status: "failed", output: { token: "secret", safe: "ok" }, error: { code: "E_FAIL", message: "safe", providerPayload: { apiKey: "secret" } }, providerPayload: { secret: "x" } } }, version: 2, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
+    service.approveProposal = async () => run as any;
+    const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { writer: { namespace, scopes: ["panel:write"] } } } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/s1/proposals/p1/approve`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "a", requestId: "r" }) });
+      const body = await response.json() as any;
+      expect(body.result.actions[0].output).toEqual({});
+      expect(body.result.actions[0].error).toEqual({ code: "E_FAIL", message: "safe" });
+      expect(JSON.stringify(body)).not.toContain("secret");
+    });
+    db.close();
+  });

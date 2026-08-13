@@ -146,7 +146,17 @@ export class TopicDecisionService {
     }
 
     const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
-    return { session, snapshots };
+    const latestSnapshot = snapshots[snapshots.length - 1];
+    const positions = latestSnapshot ? this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, latestSnapshot.id) : [];
+    return {
+      session,
+      snapshots,
+      positions,
+      debateRounds: this.options.repos.topicDecisions.listRounds(namespaceId, sessionId),
+      evidenceRequests: this.options.repos.topicDecisions.listEvidenceRequests(namespaceId, sessionId),
+      proposals: this.options.repos.topicDecisions.listProposals(namespaceId, sessionId),
+      executionRuns: this.options.repos.topicDecisions.listExecutionRuns(namespaceId, sessionId)
+    };
   }
 
   /**

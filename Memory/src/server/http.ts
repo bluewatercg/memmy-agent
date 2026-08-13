@@ -838,9 +838,7 @@ async function routeRequest(
     const request = topicDecisionStartInput(body, "topic-decision.start", principal);
     const topicId = decodeMatchSegment(topicDecisionStart, 1);
     try {
-      const result = await service.idempotent("topic-decision.start", request, { topicId, request }, () => {
-        return service.startTopicDecisionSession({ namespace: request.namespace, topicId, agents: request.agents });
-      }, { exactReplay: true });
+      const result = await service.idempotent("topic-decision.start", request, { topicId, request }, () => service.startTopicDecisionSession({ namespace: request.namespace, topicId, agents: request.agents, adapterId: request.adapterId, requestId: request.requestId }), { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshot: publicTopicDecisionSnapshot(result.snapshot), reused: result.reused };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -854,7 +852,7 @@ async function routeRequest(
     const sessionId = decodeMatchSegment(topicDecisionRead, 1);
     try {
       const result = service.readTopicDecisionSession(namespace, sessionId);
-      return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
+      return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot), positions: result.positions ?? [], debateRounds: result.debateRounds ?? [], evidenceRequests: result.evidenceRequests ?? [], proposals: (result.proposals ?? []).map((proposal) => ({ ...proposal, payload: undefined })), executionRuns: (result.executionRuns ?? []).map(publicTopicExecutionRun) };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -886,8 +884,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.run", principal);
     const sessionId = decodeMatchSegment(topicDecisionRun, 1);
     try {
-      await service.runIndependentPositions(request.namespace, sessionId);
-      return { accepted: true };
+      await service.idempotent("topic-decision.run", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -899,8 +896,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.positions", principal);
     const sessionId = decodeMatchSegment(topicDecisionPositions, 1);
     try {
-      await service.runIndependentPositions(request.namespace, sessionId);
-      return { accepted: true };
+      await service.idempotent("topic-decision.positions", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -912,7 +908,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.debate", principal);
     const sessionId = decodeMatchSegment(topicDecisionDebate, 1);
     try {
-      const result = await service.runDebate(request.namespace, sessionId);
+      const result = await service.idempotent("topic-decision.debate", request, { sessionId, request }, async () => service.runDebate(request.namespace, sessionId), { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -925,7 +921,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.proposals", principal);
     const sessionId = decodeMatchSegment(topicDecisionProposals, 1);
     try {
-      const result = await service.synthesizeProposals(request.namespace, sessionId);
+      const result = await service.idempotent("topic-decision.proposals", request, { sessionId, request }, async () => service.synthesizeProposals(request.namespace, sessionId), { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -970,8 +966,11 @@ async function routeRequest(
     const sessionId = decodeMatchSegment(topicDecisionResume, 1);
     const runId = decodeMatchSegment(topicDecisionResume, 2);
     try {
-      const run = await service.resumeExecution(request.namespace, runId);
-      return publicTopicExecutionRun(run);
+      const run = await service.idempotent("topic-decision.resume", request, { sessionId, runId, request }, async () => {
+        const detail = service.readTopicDecisionSession(request.namespace, sessionId);
+        if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
+        return service.resumeExecution(request.namespace, runId);
+      }, { exactReplay: true });
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -985,6 +984,8 @@ async function routeRequest(
     const runId = decodeMatchSegment(topicDecisionConfirm, 2);
     const actionId = decodeMatchSegment(topicDecisionConfirm, 3);
     try {
+      const detail = service.readTopicDecisionSession(request.namespace, sessionId);
+      if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
       const run = await service.idempotent("topic-decision.confirm", request, { runId, actionId, request }, async () => {
         return service.confirmExecutionAction(request.namespace, runId, actionId, request.expectedRunVersion, request.approved, decisionActor(request), request.idempotencyKey);
       }, { exactReplay: true });
@@ -2014,68 +2015,18 @@ function parseStatus(value: string | null): "activated" | "resolving" | "archive
 
 // Topic Decision input parsers and output sanitizers
 
-function topicDecisionStartInput(
-  body: unknown,
-  routeName: string,
-  principal: AuthPrincipal
-): { namespace: RuntimeNamespace; agents?: TopicAgentSpec[]; adapterId?: string; requestId?: string } {
-  const obj = asObject(body, routeName);
-  const request = envelopeWithPrincipal(obj, principal);
-  const allowedKeys = ["namespace", "agents", "requestId", "adapterId", "source"];
-  for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-    }
-  }
-  let agents: TopicAgentSpec[] | undefined;
-  if (obj.agents !== undefined) {
-    if (!Array.isArray(obj.agents)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.agents must be an array`);
-    }
-    if (obj.agents.length > 10) {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.agents exceeds maximum length of 10`);
-    }
-    agents = obj.agents.map((a: unknown, i: number) => {
-      if (!isRecord(a)) {
-        throw new MemoryServiceError("invalid_argument", `${routeName}.agents[${i}] must be an object`);
-      }
-      const agentAllowed = ["id", "role", "model", "reason"];
-      for (const key of Object.keys(a)) {
-        if (!agentAllowed.includes(key)) {
-          throw new MemoryServiceError("invalid_argument", `${routeName}.agents[${i}] unknown field: ${key}`);
-        }
-      }
-      if (typeof a.id !== "string" || typeof a.role !== "string" || typeof a.model !== "string" || typeof a.reason !== "string") {
-        throw new MemoryServiceError("invalid_argument", `${routeName}.agents[${i}] requires id, role, model, reason as strings`);
-      }
-      return { id: a.id, role: a.role, model: a.model, reason: a.reason };
-    });
-  }
-  return {
-    namespace: request.namespace!,
-    agents,
-    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
-  };
+function topicDecisionStartInput(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; agents?: TopicAgentSpec[]; adapterId: string; requestId: string } {
+  const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
+  return { namespace: request.namespace!, agents: obj.agents as TopicAgentSpec[] | undefined, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
-function topicDecisionMutation(
-  body: unknown,
-  routeName: string,
-  principal: AuthPrincipal
-): { namespace: RuntimeNamespace; requestId?: string } {
-  const obj = asObject(body, routeName);
-  const request = envelopeWithPrincipal(obj, principal);
-  const allowedKeys = ["namespace", "requestId", "adapterId", "source"];
-  for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-    }
-  }
-  return {
-    namespace: request.namespace!,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
-  };
+function topicDecisionMutation(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; adapterId: string; requestId: string } {
+  const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
+  return { namespace: request.namespace!, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
 function topicDecisionAgentsInput(
@@ -2162,50 +2113,22 @@ function topicDecisionAnswersInput(
   };
 }
 
-function topicDecisionApproveInput(
-  body: unknown,
-  routeName: string,
-  principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedProposalVersion: number; adapterId?: string; requestId?: string } {
-  const obj = asObject(body, routeName);
-  const request = envelopeWithPrincipal(obj, principal);
-  const allowedKeys = ["namespace", "expectedProposalVersion", "requestId", "adapterId", "source"];
-  for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-  }
-  if (typeof obj.expectedProposalVersion !== "number" || !Number.isInteger(obj.expectedProposalVersion) || obj.expectedProposalVersion < 1) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.expectedProposalVersion must be a positive integer`);
-  }
-  return {
-    namespace: request.namespace!,
-    expectedProposalVersion: obj.expectedProposalVersion,
-    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
-  };
+function topicDecisionApproveInput(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; expectedProposalVersion: number; adapterId: string; requestId: string } {
+  const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
+  if (typeof obj.expectedProposalVersion !== "number" || !Number.isInteger(obj.expectedProposalVersion) || obj.expectedProposalVersion < 1) throw new MemoryServiceError("invalid_argument", `${routeName}.expectedProposalVersion must be a positive integer`);
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
+  return { namespace: request.namespace!, expectedProposalVersion: obj.expectedProposalVersion, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
-function topicDecisionConfirmInput(
-  body: unknown,
-  routeName: string,
-  principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedRunVersion: number; approved: boolean; idempotencyKey: string; adapterId?: string; requestId?: string } {
-  const obj = asObject(body, routeName);
-  const request = envelopeWithPrincipal(obj, principal);
-  const allowedKeys = ["namespace", "expectedRunVersion", "approved", "idempotencyKey", "requestId", "adapterId", "source"];
-  for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-  }
+function topicDecisionConfirmInput(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; expectedRunVersion: number; approved: boolean; idempotencyKey: string; adapterId: string; requestId: string } {
+  const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
   if (typeof obj.expectedRunVersion !== "number" || !Number.isInteger(obj.expectedRunVersion) || obj.expectedRunVersion < 1) throw new MemoryServiceError("invalid_argument", `${routeName}.expectedRunVersion must be a positive integer`);
   if (typeof obj.approved !== "boolean") throw new MemoryServiceError("invalid_argument", `${routeName}.approved must be a boolean`);
-  if (typeof obj.idempotencyKey !== "string" || obj.idempotencyKey.length === 0) throw new MemoryServiceError("invalid_argument", `${routeName}.idempotencyKey must be a non-empty string`);
-  return {
-    namespace: request.namespace!,
-    expectedRunVersion: obj.expectedRunVersion,
-    approved: obj.approved,
-    idempotencyKey: obj.idempotencyKey,
-    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
-  };
+  if (typeof obj.idempotencyKey !== "string" || !obj.idempotencyKey.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.idempotencyKey must be a non-empty string`);
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
+  return { namespace: request.namespace!, expectedRunVersion: obj.expectedRunVersion, approved: obj.approved, idempotencyKey: obj.idempotencyKey, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
 function topicDecisionCancelInput(
@@ -2250,8 +2173,14 @@ function publicTopicDecisionSnapshot(snapshot: Record<string, unknown>): Record<
   return { ...snapshot, payload: payloadRest };
 }
 
-function publicTopicExecutionRun(run: TopicExecutionRunRecord): TopicExecutionRunRecord {
-  return { ...run };
+function publicTopicExecutionRun(run: TopicExecutionRunRecord): Record<string, unknown> {
+  const result = isRecord(run.result) ? run.result : {};
+  const actions = Array.isArray(result.actions) ? result.actions.map((action) => {
+    if (!isRecord(action)) return {};
+    const error = isRecord(action.error) ? { code: typeof action.error.code === "string" ? action.error.code : undefined, message: typeof action.error.message === "string" ? action.error.message : undefined } : undefined;
+    return { id: action.id, status: action.status, confirmationRequired: action.confirmationRequired, output: {}, error };
+  }) : undefined;
+  return { id: run.id, namespaceId: run.namespaceId, sessionId: run.sessionId, proposalId: run.proposalId, status: run.status, version: run.version, createdAt: run.createdAt, updatedAt: run.updatedAt, result: actions ? { status: result.status, actions } : { status: result.status } };
 }
 
 function mapTopicDecisionError(error: unknown): Error {

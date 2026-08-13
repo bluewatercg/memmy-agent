@@ -1,4 +1,4 @@
-import type { RuntimeNamespace, TopicAgentSpec } from "../../types.js";
+import type { RuntimeNamespace, TopicActionProposalRecord, TopicAgentPositionRecord, TopicAgentSpec, TopicDebateRoundRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../../types.js";
 
 export type TopicAgentRole = "evidence_analyst" | "domain_analyst" | "risk_challenger" | "action_planner" | "specialist";
 
@@ -6,6 +6,8 @@ export interface TopicDecisionStartInput {
   namespace: RuntimeNamespace;
   topicId: string;
   agents?: TopicAgentSpec[];
+  adapterId?: string;
+  requestId?: string;
 }
 
 export interface TopicDecisionStartResult {
@@ -42,4 +44,9 @@ export interface TopicDecisionStartResult {
 export interface TopicDecisionDetail {
   session: TopicDecisionStartResult["session"];
   snapshots: TopicDecisionStartResult["snapshot"][];
+  positions?: TopicAgentPositionRecord[];
+  debateRounds?: TopicDebateRoundRecord[];
+  evidenceRequests?: TopicEvidenceRequestRecord[];
+  proposals?: TopicActionProposalRecord[];
+  executionRuns?: TopicExecutionRunRecord[];
 }

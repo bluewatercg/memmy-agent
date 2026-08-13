@@ -4205,6 +4205,10 @@ export class TopicDecisionRepository {
       .get(runId, namespaceId) as TopicExecutionRunSqlRow | undefined;
     return row ? topicExecutionRunFromSql(row) : undefined;
   }
+  listExecutionRuns(namespaceId: string, sessionId: string): TopicExecutionRunRecord[] {
+    const rows = this.db.prepare(`SELECT * FROM project_topic_execution_runs WHERE namespace_id = ? AND session_id = ? ORDER BY created_at`).all(namespaceId, sessionId) as TopicExecutionRunSqlRow[];
+    return rows.map(topicExecutionRunFromSql);
+  }
 
 }
 
