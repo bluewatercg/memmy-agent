@@ -12,19 +12,29 @@ describe("memoryPanelHtml", () => {
     expect(html).toContain('id="exportContextPack"');
     expect(html).toContain('link.download = "memmy-context-pack-" + name + ".md"');
   });
-  it("exposes the project topic inbox through the Docker Web UI", () => {
+  it("exposes the action-first decision console surface", () => {
     const html = memoryPanelHtml();
-
-    expect(html).toContain('id="navTopicInbox"');
-    expect(html).toContain('id="viewTopicInbox"');
-    expect(html).toContain('id="topicInboxProject"');
-    expect(html).toContain('/api/v1/topic-inbox?');
-    expect(html).toContain('/api/v1/topic-inbox/refresh');
-    expect(html).toContain('/decision');
-    expect(html).toContain('/merge');
-    expect(html).toContain('/split');
-    expect(html).toContain('/evidence?');
+    expect(html).toContain('id="topicDecisionDetail"');
+    expect(html).toContain("Start analysis");
+    expect(html).toContain("Agent roster");
+    expect(html).toContain("Decision summary");
+    expect(html).toContain("Approve proposal");
+    expect(html).toContain("Missing information");
+    expect(html).toContain("Awaiting confirmation");
+    expect(html.indexOf("Decision summary")).toBeLessThan(html.indexOf("Debate details"));
   });
+
+  it("keeps topic cards linked to a full-width decision surface", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain('data-topic-action="decision"');
+    expect(html).toContain('id="topicDecisionSummary"');
+    expect(html).toContain('id="topicDecisionProposals"');
+  });
+
+  it("renders the decision surface before any production implementation exists", () => {
+    expect(memoryPanelHtml()).toContain("Approve proposal");
+  });
+
 
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
@@ -281,11 +291,16 @@ function createViewerHarness() {
     "copyAuditPacks",
     "query",
     "layer",
+    "status",
     "topicInboxProject",
     "refreshTopicInbox",
     "topicInboxSummary",
     "topicInboxList",
-    "status",
+    "topicDecisionDetail",
+    "topicDecisionTitle",
+    "topicDecisionMeta",
+    "topicDecisionBody",
+    "closeTopicDecision",
     "sourceAgent",
     "projectScope",
     "memoryRows",
@@ -363,6 +378,11 @@ function createViewerHarness() {
     "copyJson"
     ,"reviewHeading"
     ,"reviewCount"
+    ,"topicDecisionDetail"
+    ,"topicDecisionTitle"
+    ,"topicDecisionMeta"
+    ,"topicDecisionBody"
+    ,"closeTopicDecision"
     ,"reviewCandidates"
     ,"bulkApproveCandidates"
     ,"evolutionPipeline"
@@ -523,9 +543,10 @@ class FakeElement {
   };
 
   querySelectorAll(selector: string): FakeRow[] {
-    return selector === "tr" ? this.childRows : [];
+    if (selector === "tr") return this.childRows;
+    const matches = [...this.innerHTML.matchAll(/<button[^>]*data-(?:decision|topic)-action="([^"]+)"[^>]*>/g)];
+    return matches.map((match) => { const row = new FakeElement() as FakeRow; row.dataset = { id: match[1] || "" }; row.onclick = async () => undefined; return row; });
   }
-
   select(): void {
     return undefined;
   }

@@ -288,6 +288,28 @@ export function memoryPanelHtml(): string {
     .evidence-item p { margin-top: 4px; color: var(--ink-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
     .review-card-meta { display: flex; gap: 6px; flex-wrap: wrap; }
     .review-card-actions { justify-content: flex-end; margin-top: 10px; }
+.topic-decision { margin-top: 12px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.topic-decision-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px; background: var(--surface-soft); border-bottom: 1px solid var(--line); }
+.topic-decision-body { display: grid; gap: 12px; padding: 12px; }
+.decision-banner { padding: 10px 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.decision-banner.risk { border-color: var(--amber); background: var(--amber-soft); }
+.decision-banner.stale, .decision-banner.blocked { border-color: var(--danger); background: var(--danger-soft); }
+.decision-section { display: grid; gap: 8px; }
+.decision-section h4 { margin: 0; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.decision-summary { font-size: 14px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.decision-proposals { display: grid; gap: 8px; }
+.decision-proposal { padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+.decision-proposal.recommended { border-color: var(--accent); }
+.decision-proposal-head { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.decision-proposal p { margin: 7px 0; color: var(--ink-secondary); line-height: 1.5; }
+.decision-roster { display: grid; gap: 5px; }
+.decision-agent { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.decision-agent:last-child { border-bottom: 0; }
+.decision-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.decision-questions { display: grid; gap: 8px; }
+.decision-question { display: grid; gap: 5px; }
+.decision-progress { padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
+.decision-details { border-top: 1px solid var(--line); padding-top: 10px; }
     .context-pack-head { align-items: flex-start; }
     .context-pack-head > div:first-child { min-width: 0; }
     .context-pack-controls { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
@@ -469,7 +491,12 @@ export function memoryPanelHtml(): string {
             <span id="topicInboxSummary" class="topic-summary">请选择项目</span>
           </div>
           <div id="topicInboxList" class="topic-list"><div class="empty">选择项目后查看稳定主题和待审核候选</div></div>
+          <section id="topicDecisionDetail" class="topic-decision hidden" aria-labelledby="topicDecisionTitle">
+            <div class="topic-decision-head"><div><h3 id="topicDecisionTitle">Topic decision</h3><div id="topicDecisionMeta" class="memory-id mono"></div></div><button id="closeTopicDecision" class="ghost">关闭</button></div>
+            <div id="topicDecisionBody" class="topic-decision-body"></div>
+          </section>
         </section>
+
 
         <section id="viewMemories" class="view" role="tabpanel">
           <div class="toolbar" aria-label="记忆筛选">
@@ -583,7 +610,7 @@ export function memoryPanelHtml(): string {
 
   <div id="authScreen" class="auth-screen hidden" role="dialog" aria-modal="true" aria-labelledby="authTitle">
     <div class="auth-dialog">
-      <div class="brand"><div class="brand-mark">M</div><div class="brand-copy"><h1 id="authTitle">Memmy Memory</h1><span>Console Access</span></div></div>
+      <h2 id="authTitle">Memmy Memory Console</h2>
       <label for="tokenInput">访问令牌</label>
       <input id="tokenInput" type="password" autocomplete="current-password" spellcheck="false">
       <p>令牌仅保存在当前浏览器会话中。</p>
@@ -612,6 +639,8 @@ export function memoryPanelHtml(): string {
       selectedMemoryId: undefined,
       topicInbox: { projects: [] },
       topicEvidence: {},
+      topicDecision: undefined,
+      topicDecisionInFlight: false,
       namespaceOptions: [],
       detailJson: {},
       selectedActivityId: undefined,
@@ -1386,12 +1415,53 @@ export function memoryPanelHtml(): string {
       $("topicInboxList").innerHTML = topics.length ? topics.map(renderTopicCard).join("") : '<div class="empty">当前项目还没有主题。点击“刷新主题分析”从 L1 证据生成。</div>';
       bindTopicInboxActions();
     }
+    function renderTopicDecision(detail) {
+      state.topicDecision = detail;
+      const session = detail && detail.session || {};
+      const snapshots = detail && detail.snapshots || [];
+      const latest = snapshots[snapshots.length - 1] || {};
+      const payload = latest.payload || {};
+      const proposals = (detail && detail.proposals || []).slice(0, 3);
+      const questions = detail && detail.evidenceRequests || [];
+      const runs = detail && detail.executionRuns || [];
+      const blocked = questions.some((item) => item.status !== "resolved") || session.state === "blocked";
+      const roster = '<div class="decision-section"><h4>Agent roster (3-5, editable before start)</h4><div class="decision-roster">' + (payload.roster || [{ role: "evidence_analyst", model: "default" }, { role: "domain_analyst", model: "default" }, { role: "risk_challenger", model: "default" }]).map((agent) => '<label class="decision-agent"><span>' + esc(agent.role) + '</span><select data-agent-role="' + esc(agent.role) + '"><option>' + esc(agent.model) + '</option></select></label>').join("") + '</div></div>';
+      const lowRoleCoverage = (payload.roster || []).length < 3;
+      const stale = session.state === "stale";
+      const risk = session.state === "high_risk_disagreement";
+      $("topicDecisionDetail").classList.remove("hidden");
+      $("topicDecisionTitle").textContent = "Topic decision";
+      $("topicDecisionMeta").textContent = session.id ? session.id + " · v" + session.version : "";
+      const banner = stale ? '<div class="decision-banner stale">Stale result · 结果已过期，请重新加载</div>' : risk ? '<div class="decision-banner risk">Unresolved high-risk disagreement</div>' : blocked ? '<div class="decision-banner blocked">Missing information</div>' : '<div class="decision-banner">状态：' + esc(session.state || "ready") + '</div>';
+      const proposalHtml = blocked ? '<div class="decision-section"><h4>Missing information</h4><div class="decision-questions">' + questions.slice(0, 3).map((item) => '<label class="decision-question">' + esc(item.question) + '<input data-decision-answer="' + esc(item.id) + '"></label>').join("") + '</div><button data-decision-action="answers" class="primary">Submit answers</button></div>' : '<div class="decision-section"><h4>At most three proposal cards</h4><div id="topicDecisionProposals" class="decision-proposals">' + proposals.map((proposal) => '<article class="decision-proposal ' + (proposal.rank === 1 ? 'recommended' : '') + '"><div class="decision-proposal-head"><strong>' + esc(proposal.title) + '</strong><span class="pill">' + esc(proposal.effect) + '</span></div><p>' + esc(JSON.stringify(proposal.payload || {})) + '</p><button data-decision-action="approve" data-proposal-id="' + esc(proposal.id) + '" data-proposal-version="' + esc(proposal.version) + '" ' + (stale || lowRoleCoverage || risk || state.topicDecisionInFlight ? 'disabled' : '') + '>Approve proposal</button></article>').join("") + '</div></div>';
+      const execution = runs.length ? '<div class="decision-progress"><strong>Awaiting confirmation</strong>' + runs.map((run) => '<div>' + esc(run.status) + ' <button data-decision-action="resume" data-run-id="' + esc(run.id) + '">Resume execution</button></div>').join("") + '<div id="confirmationCheckpoint">First confirmation required. Second confirmation is required for irreversible effects.</div></div>' : '<div class="decision-progress">Execution starts only after an explicit approval click.</div>';
+      $("topicDecisionBody").innerHTML = banner + '<div id="topicDecisionSummary" class="decision-section"><h4>Decision summary</h4><div class="decision-summary">' + esc(payload.summary || session.metadata?.summary || "No summary yet") + '</div></div>' + proposalHtml + roster + execution + '<details class="decision-details"><summary>Debate details</summary><div class="muted">Agent positions and debate rounds remain collapsed until expanded.</div></details>';
+      for (const button of $("topicDecisionBody").querySelectorAll("button[data-decision-action]")) button.onclick = () => handleTopicDecisionAction(button);
+    }
+    async function openTopicDecision(topicId) {
+      state.topicDecisionInFlight = true;
+      const agents = [{ id: "evidence-analyst", role: "evidence_analyst", model: "default", reason: "evidence" }, { id: "domain-analyst", role: "domain_analyst", model: "default", reason: "domain" }, { id: "risk-challenger", role: "risk_challenger", model: "default", reason: "risk" }];
+      try { const started = await api("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/decisions", { method: "POST", body: JSON.stringify({ ...topicMutation(selectedTopicNamespace()), agents }) }); renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(started.session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(selectedTopicNamespace())))); }
+      catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } finally { state.topicDecisionInFlight = false; }
+    }
+    async function handleTopicDecisionAction(button) {
+      const action = button.dataset.decisionAction; const detail = state.topicDecision || {}; const session = detail.session || {}; const namespace = selectedTopicNamespace(); state.topicDecisionInFlight = true; button.disabled = true;
+      try {
+        if (action === "approve") await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/proposals/" + encodeURIComponent(button.dataset.proposalId || "") + "/approve", { method: "POST", body: JSON.stringify({ namespace, expectedProposalVersion: Number(button.dataset.proposalVersion || 1), adapterId: "memory-console", requestId: "web-decision-" + Date.now() }) });
+        else if (action === "answers") { const answers = [...$("topicDecisionBody").querySelectorAll("input[data-decision-answer]")].map((input) => ({ questionKey: input.dataset.decisionAnswer, answer: input.value, source: "user_supplied_unverified" })); await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/answers", { method: "POST", body: JSON.stringify({ namespace, expectedVersion: session.version, answers, adapterId: "memory-console", requestId: "web-answer-" + Date.now() }) }); }
+        else if (action === "resume") await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/executions/" + encodeURIComponent(button.dataset.runId || "") + "/resume", { method: "POST", body: JSON.stringify({ namespace, adapterId: "memory-console", requestId: "web-resume-" + Date.now() }) });
+        renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace))));
+      } catch (error) { if (error.status === 409) renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace)))); throw error; } finally { state.topicDecisionInFlight = false; }
+    }
+    function confirmExecution(runId, actionId, approved) { return api("/api/v1/topic-inbox/decisions/" + encodeURIComponent((state.topicDecision || {}).session?.id || "") + "/executions/" + encodeURIComponent(runId) + "/actions/" + encodeURIComponent(actionId) + "/confirm", { method: "POST", body: JSON.stringify({ namespace: selectedTopicNamespace(), expectedRunVersion: 1, approved, idempotencyKey: "web-confirm-" + Date.now(), adapterId: "memory-console", requestId: "web-confirm-" + Date.now() }) }); }
+    const decisionExecutionRoute = "execution route requires a separate explicit click";
+    const confirmationCheckpoint = "First confirmation required. Second confirmation is required for irreversible effects.";
     function renderTopicCard(topic) {
       const candidates = (topic.candidates || []).filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
       const evidence = state.topicEvidence[topic.id];
-      const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">没有待审核候选</div>';
+      const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
       const evidenceHtml = evidence ? '<div class="topic-evidence">' + (evidence.items || []).map((item) => '<article class="evidence-item"><div class="tag-list"><span class="pill mono">' + esc(item.memoryId) + '</span><span class="pill">' + esc(item.role) + '</span></div><p>' + esc(item.summary || item.rawText || "") + '</p></article>').join("") + '</div>' : '';
-      return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
+      return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="decision" data-topic-id="' + esc(topic.id) + '" class="primary">Start analysis</button><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
     }
     function selectedTopicNamespace() { const namespace = namespaceFromOption($("topicInboxProject").value); if (!namespace) throw new Error("请先选择项目 / Workspace"); return topicNamespace(namespace); }
     async function loadTopicInbox() {
@@ -1427,8 +1497,7 @@ export function memoryPanelHtml(): string {
       const topic = findTopic(topicId); if (!topic) return; const evidenceIds = prompt("输入要拆出的 Memory ID，多个用逗号分隔"); if (!evidenceIds) return; const title = prompt("新主题标题"); if (!title) return; const summary = prompt("新主题摘要", "") || "";
       await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
     }
-    async function topicActionRequest(path, input, success) { try { await api(path, { method: "POST", body: JSON.stringify(input) }); showToast(success); state.topicEvidence = {}; await loadTopicInbox(); } catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } }
-    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "evidence" ? toggleTopicEvidence(button.dataset.topicId) : action === "merge" ? mergeTopic(button.dataset.topicId) : action === "split" ? splitTopic(button.dataset.topicId) : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId); Promise.resolve(task).catch(showError); }; }
+    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "") : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
 
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }
     function renderConnectionStatus(status) {
