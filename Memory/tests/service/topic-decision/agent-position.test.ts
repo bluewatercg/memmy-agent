@@ -27,10 +27,10 @@ afterEach(() => {
 describe("parseAgentPosition", () => {
   it("parses valid position with all fields", async () => {
     const { service } = await setupService();
-    
+
     // Import the parsing function
     const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
-    
+
     const validPosition = {
       judgment: "support",
       confidence: 0.8,
@@ -42,7 +42,7 @@ describe("parseAgentPosition", () => {
       counterarguments: ["counter 1"],
       suggestedActions: ["action 1"]
     };
-    
+
     const result = parseAgentPosition(validPosition, new Set(["ev-1"]));
     expect(result).not.toHaveProperty("code");
     if (!("code" in result)) {
@@ -53,9 +53,9 @@ describe("parseAgentPosition", () => {
 
   it("rejects invalid confidence outside [0,1]", async () => {
     const { service } = await setupService();
-    
+
     const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
-    
+
     const invalidPosition = {
       judgment: "support",
       confidence: 1.5,
@@ -67,16 +67,16 @@ describe("parseAgentPosition", () => {
       counterarguments: [],
       suggestedActions: []
     };
-    
+
     const result = parseAgentPosition(invalidPosition, new Set(["ev-1"]));
     expect(result).toHaveProperty("code", "INVALID_CONFIDENCE");
   });
 
   it("rejects unknown evidence citation", async () => {
     const { service } = await setupService();
-    
+
     const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
-    
+
     const positionWithUnknownEvidence = {
       judgment: "support",
       confidence: 0.8,
@@ -88,16 +88,16 @@ describe("parseAgentPosition", () => {
       counterarguments: [],
       suggestedActions: []
     };
-    
+
     const result = parseAgentPosition(positionWithUnknownEvidence, new Set(["ev-1"]));
     expect(result).toHaveProperty("code", "UNKNOWN_EVIDENCE_CITATION");
   });
 
   it("accepts unknown judgment with type guard", async () => {
     const { service } = await setupService();
-    
+
     const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
-    
+
     const unknownJudgment = {
       judgment: "unknown",
       confidence: 0.5,
@@ -109,7 +109,7 @@ describe("parseAgentPosition", () => {
       counterarguments: [],
       suggestedActions: []
     };
-    
+
     const result = parseAgentPosition(unknownJudgment, new Set());
     expect(result).not.toHaveProperty("code");
     if (!("code" in result)) {
@@ -119,9 +119,9 @@ describe("parseAgentPosition", () => {
 
   it("validates risk severity values", async () => {
     const { service } = await setupService();
-    
+
     const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
-    
+
     const invalidRiskPosition = {
       judgment: "support",
       confidence: 0.8,
@@ -133,7 +133,7 @@ describe("parseAgentPosition", () => {
       counterarguments: [],
       suggestedActions: []
     };
-    
+
     const result = parseAgentPosition(invalidRiskPosition, new Set());
     expect(result).toHaveProperty("code", "MISSING_FIELD");
   });

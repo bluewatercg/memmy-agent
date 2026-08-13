@@ -57,7 +57,7 @@ npx vitest run tests/service/topic-decision/agent-position.test.ts \
 
 ### New Files
 - `Memory/src/service/topic-decision/agent-position.ts` - Independent position parsing and execution
-- `Memory/src/service/topic-decision/decisionability.ts` - Decisionability gate and gap analysis  
+- `Memory/src/service/topic-decision/decisionability.ts` - Decisionability gate and gap analysis
 - `Memory/src/service/topic-decision/evidence-acquisition.ts` - Evidence source queries and answer submission
 - `Memory/tests/service/topic-decision/agent-position.test.ts` - Position parsing tests
 - `Memory/tests/service/topic-decision/evidence-gaps.test.ts` - Decisionability tests
@@ -125,6 +125,38 @@ npx vitest run tests/service/topic-decision/agent-position.test.ts tests/service
 cd Memory
 npx vitest run tests/service/topic-decision/agent-position.test.ts tests/service/topic-decision/evidence-gaps.test.ts tests/service/topic-decision/session-start.test.ts
 
-# Typecheck (has warnings but passes runtime)
-npx tsc --noEmit
+# Typecheck
+npm run typecheck
+```
+
+---
+
+## Follow-up
+
+**CORRECTION**: The "Concerns" section stated "TypeScript strict mode has ~15 errors". This is stale — all type errors were resolved in commit ea43480.
+
+### Commit ea43480: fix(memory): resolve 28 TS errors in topic-decision module
+
+```
+ea43480 fix(memory): resolve 28 TS errors in topic-decision module
+```
+
+### Verified Clean
+
+```bash
+# Focused tests
+cd Memory
+npx vitest run tests/service/topic-decision/agent-position.test.ts \
+  tests/service/topic-decision/evidence-gaps.test.ts \
+  tests/service/topic-decision/session-start.test.ts
+# Test Files: 3 passed
+# Tests: 35 passed
+
+# Typecheck
+npm run typecheck
+# 0 errors
+
+# Trailing whitespace cleanup
+git diff --check
+# (no output - clean)
 ```
