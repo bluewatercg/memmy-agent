@@ -866,7 +866,12 @@ async function routeRequest(
     const request = topicDecisionAgentsInput(body, "topic-decision.agents", principal);
     const sessionId = decodeMatchSegment(topicDecisionAgents, 1);
     try {
-      const result = service.readTopicDecisionSession(request.namespace, sessionId);
+      const result = service.updateTopicDecisionSessionAgents(
+        request.namespace,
+        sessionId,
+        request.expectedVersion ?? 1,
+        request.agents
+      );
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -990,10 +995,11 @@ async function routeRequest(
   const topicDecisionCancel = match(path, /^\/api\/v1\/topic-inbox\/decisions\/([^\/]+)\/cancel$/);
   if (method === "POST" && topicDecisionCancel) {
     requirePanelWrite(principal);
-    const request = topicDecisionMutation(body, "topic-decision.cancel", principal);
+    const request = topicDecisionCancelInput(body, "topic-decision.cancel", principal);
     const sessionId = decodeMatchSegment(topicDecisionCancel, 1);
     try {
-      return { accepted: true };
+      const result = service.cancelTopicDecisionSession(request.namespace, sessionId, request.expectedVersion);
+      return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -2071,10 +2077,10 @@ function topicDecisionAgentsInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; requestId?: string } {
+): { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; expectedVersion: number; requestId?: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
-  const allowedKeys = ["namespace", "agents", "requestId", "adapterId", "source"];
+  const allowedKeys = ["namespace", "agents", "expectedVersion", "requestId", "adapterId", "source"];
   for (const key of Object.keys(obj)) {
     if (!allowedKeys.includes(key)) {
       throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
@@ -2085,6 +2091,9 @@ function topicDecisionAgentsInput(
   }
   if (obj.agents.length > 10) {
     throw new MemoryServiceError("invalid_argument", `${routeName}.agents exceeds maximum length of 10`);
+  }
+  if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
   }
   const agents = obj.agents.map((a: unknown, i: number) => {
     if (!isRecord(a)) {
@@ -2104,6 +2113,7 @@ function topicDecisionAgentsInput(
   return {
     namespace: request.namespace!,
     agents,
+    expectedVersion: obj.expectedVersion,
     requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
   };
 }
@@ -2210,6 +2220,29 @@ function topicDecisionConfirmInput(
     expectedRunVersion: obj.expectedRunVersion,
     approved: obj.approved,
     idempotencyKey: obj.idempotencyKey,
+    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
+  };
+}
+
+function topicDecisionCancelInput(
+  body: unknown,
+  routeName: string,
+  principal: AuthPrincipal
+): { namespace: RuntimeNamespace; expectedVersion: number; requestId?: string } {
+  const obj = asObject(body, routeName);
+  const request = envelopeWithPrincipal(obj, principal);
+  const allowedKeys = ["namespace", "expectedVersion", "requestId", "adapterId", "source"];
+  for (const key of Object.keys(obj)) {
+    if (!allowedKeys.includes(key)) {
+      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
+    }
+  }
+  if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
+  }
+  return {
+    namespace: request.namespace!,
+    expectedVersion: obj.expectedVersion,
     requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
   };
 }

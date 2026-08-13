@@ -500,6 +500,178 @@ export class TopicDecisionService {
   }
 
   /**
+   * Update the agent roster for a session.
+   * Validates that changing agents won't invalidate immutable inputs.
+   * If the new roster would change the inputHash, creates a new snapshot.
+   * Returns updated session and snapshots.
+   */
+  updateSessionAgents(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number,
+    agents: TopicAgentSpec[]
+  ): TopicDecisionDetail {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    const namespaceId = stableHash(namespace);
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+
+    // Validate expected version for optimistic locking
+    if (session.version !== expectedVersion) {
+      const error = new Error(`version conflict: expected ${expectedVersion}, got ${session.version}`);
+      (error as Error & { name: string }).name = "TopicDecisionConflictError";
+      Object.assign(error, { entityId: sessionId, currentVersion: session.version, currentState: session.state });
+      throw error;
+    }
+
+    // Cannot update agents if session is in executing/completed/cancelled state
+    const terminalStates = ["executing", "completed", "cancelled", "failed"];
+    if (terminalStates.includes(session.state)) {
+      const error = new Error(`cannot update agents in state: ${session.state}`);
+      (error as Error & { name: string }).name = "TopicDecisionPolicyError";
+      throw error;
+    }
+
+    // Get current snapshot
+    const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const currentSnapshot = snapshots[snapshots.length - 1];
+    if (!currentSnapshot) {
+      throw new Error(`no snapshot found for session: ${sessionId}`);
+    }
+
+    // Build new payload with updated roster
+    const newPayload: TopicDecisionSnapshotPayload = {
+      ...currentSnapshot.payload,
+      roster: agents
+    };
+
+    // Recompute canonical inputHash with new roster
+    const canonicalInput = {
+      topicVersion: newPayload.topicVersion,
+      evidenceIds: newPayload.evidenceIds.sort(),
+      evidenceHashes: Object.entries(newPayload.evidenceHashes).sort(([a], [b]) => a.localeCompare(b)),
+      projectConstraints: newPayload.projectConstraints.map((c: Record<string, unknown>) => c.id || JSON.stringify(c)).sort(),
+      roster: agents.map((a) => ({ id: a.id, role: a.role, model: a.model, reason: a.reason }))
+    };
+    newPayload.inputHash = stableHash(canonicalInput);
+
+    const now = nowIso();
+
+    // If inputHash changed (roster affects it), create new snapshot
+    if (newPayload.inputHash !== currentSnapshot.payload.inputHash) {
+      const historicalSnapshots = (session.metadata.historicalSnapshotIds as string[] | undefined) || [];
+
+      // Update session with new inputHash and historical reference
+      const updatedSession = this.options.repos.topicDecisions.updateSession(
+        {
+          ...session,
+          inputHash: newPayload.inputHash,
+          version: session.version + 1,
+          metadata: {
+            ...session.metadata,
+            historicalSnapshotIds: [...historicalSnapshots, currentSnapshot.id]
+          },
+          updatedAt: now
+        },
+        expectedVersion
+      );
+
+      // Create new snapshot round
+      const newRound = currentSnapshot.round + 1;
+      const newSnapshot = this.options.repos.topicDecisions.insertSnapshot({
+        id: newId("tdsnap"),
+        namespaceId,
+        sessionId: updatedSession.id,
+        round: newRound,
+        payload: newPayload,
+        createdAt: now
+      });
+
+      return {
+        session: updatedSession,
+        snapshots: [...snapshots, newSnapshot]
+      };
+    }
+
+    // No inputHash change - just update metadata with new agents
+    const updatedSession = this.options.repos.topicDecisions.updateSession(
+      {
+        ...session,
+        version: session.version + 1,
+        metadata: { ...session.metadata, updatedAgents: agents, updatedAt: now },
+        updatedAt: now
+      },
+      expectedVersion
+    );
+
+    return { session: updatedSession, snapshots };
+  }
+
+  /**
+   * Cancel a decision session.
+   * Idempotent: if already cancelled, returns success.
+   * Rejects if session is in executing or completed state.
+   */
+  cancelSession(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number
+  ): TopicDecisionDetail {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    const namespaceId = stableHash(namespace);
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+
+    // Idempotent: already cancelled
+    if (session.state === "cancelled") {
+      const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+      return { session, snapshots };
+    }
+
+    // Validate expected version for optimistic locking
+    if (session.version !== expectedVersion) {
+      const error = new Error(`version conflict: expected ${expectedVersion}, got ${session.version}`);
+      (error as Error & { name: string }).name = "TopicDecisionConflictError";
+      Object.assign(error, { entityId: sessionId, currentVersion: session.version, currentState: session.state });
+      throw error;
+    }
+
+    // Cannot cancel if session is executing or completed
+    const nonCancellableStates = ["executing", "completed"];
+    if (nonCancellableStates.includes(session.state)) {
+      const error = new Error(`cannot cancel session in state: ${session.state}`);
+      (error as Error & { name: string }).name = "TopicDecisionPolicyError";
+      throw error;
+    }
+
+    // Update session state to cancelled
+    const now = nowIso();
+    const updatedSession = this.options.repos.topicDecisions.updateSession(
+      {
+        ...session,
+        state: "cancelled",
+        version: session.version + 1,
+        metadata: { ...session.metadata, cancelledAt: now },
+        updatedAt: now
+      },
+      expectedVersion
+    );
+
+    const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    return { session: updatedSession, snapshots };
+  }
+
+  /**
    * Register a custom action handler for a specific effect.
    */
   registerActionHandler(handler: TopicActionHandler): void {

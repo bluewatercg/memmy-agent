@@ -1950,6 +1950,23 @@ export class MemoryService {
     this.topicDecisions.registerActionHandler(handler);
   }
 
+  updateTopicDecisionSessionAgents(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number,
+    agents: import("../types.js").TopicAgentSpec[]
+  ): import("./topic-decision/decision-types.js").TopicDecisionDetail {
+    return this.topicDecisions.updateSessionAgents(namespace, sessionId, expectedVersion, agents);
+  }
+
+  cancelTopicDecisionSession(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number
+  ): import("./topic-decision/decision-types.js").TopicDecisionDetail {
+    return this.topicDecisions.cancelSession(namespace, sessionId, expectedVersion);
+  }
+
   private assertProjectContextScope(namespace: RuntimeNamespace): void {
     if (!hasProjectScope(namespace)) {
       throw new MemoryServiceError("invalid_argument", "project context requires projectId, workspaceId, or workspacePath");

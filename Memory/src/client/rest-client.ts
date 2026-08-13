@@ -131,7 +131,7 @@ export class MemoryRestClient {
     return this.request("GET", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}`) as Promise<{ session: unknown; snapshots: unknown[] }>;
   }
 
-  patchTopicDecisionAgents(sessionId: string, input: { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+  patchTopicDecisionAgents(sessionId: string, input: { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; expectedVersion: number; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
     return this.request("PATCH", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/agents`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
   }
 
@@ -163,8 +163,8 @@ export class MemoryRestClient {
     return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/executions/${encodeURIComponent(runId)}/actions/${encodeURIComponent(actionId)}/confirm`, input);
   }
 
-  cancelTopicDecision(sessionId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<{ accepted: boolean }> {
-    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/cancel`, input) as Promise<{ accepted: boolean }>;
+  cancelTopicDecision(sessionId: string, input: { namespace: RuntimeNamespace; expectedVersion: number; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/cancel`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
   }
 
   private async request(method: "GET" | "POST" | "DELETE" | "PATCH", path: string, body?: unknown): Promise<unknown> {
