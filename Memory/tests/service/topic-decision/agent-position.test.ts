@@ -181,6 +181,175 @@ describe("runIndependentPositions", () => {
     await expect(agentPosService.runIndependentPositions(namespace, sessionId))
       .resolves.not.toThrow();
   });
+
+  it("reuses successful position from active snapshot without LLM call", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    const snapshots = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnapshot = snapshots[snapshots.length - 1]!;
+    const currentEvidenceIds = activeSnapshot.payload.evidenceIds;
+
+    // Pre-insert a successful position for the active snapshot
+    const agentId = "agent-evidence_analyst";
+    const insertedPosition = await repos.topicDecisions.insertPosition({
+      id: "pos-active-valid",
+      namespaceId,
+      sessionId,
+      snapshotId: activeSnapshot.id, // Same as active snapshot
+      round: activeSnapshot.round,
+      agentId,
+      stance: "support",
+      rationale: "pre-existing position from active snapshot",
+      evidenceIds: currentEvidenceIds,
+      createdAt: nowIso()
+    });
+    // Verify the position was inserted
+    const allPositions = repos.topicDecisions.listPositions(namespaceId, sessionId, activeSnapshot.id);
+    expect(allPositions.length).toBeGreaterThan(0);
+
+    // Debug: verify the snapshot and position data before calling runIndependentPositions
+    const snapshotsBefore = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnap = snapshotsBefore[0]; // newest by round ASC
+    const allPositionsBefore = repos.topicDecisions.listPositions(namespaceId, sessionId, activeSnap?.id ?? "");
+    const roster = activeSnap?.payload.roster ?? [];
+    const rosterAgentIds = roster.map(a => a.id);
+    const positionsByAgent = new Map(allPositionsBefore.map(p => [p.agentId, p]));
+
+    // Debug output
+    console.log("DEBUG: rosterAgentIds:", rosterAgentIds);
+    console.log("DEBUG: positions count:", allPositionsBefore.length);
+
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: currentEvidenceIds,
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: mockLlmClient
+    });
+
+    await agentPosService.runIndependentPositions(namespace, sessionId);
+
+    // LLM should NOT be called for agent with existing position (evidence_analyst)
+    // But SHOULD be called for other 3 agents without positions
+    expect(mockLlmClient).toHaveBeenCalledTimes(3);
+    // Verify the first call was for evidence_analyst (no LLM call)
+    const calls = mockLlmClient.mock.calls;
+    const calledModels = calls.map(c => c[0]);
+    expect(calledModels).not.toContain("MiniMax-M2.5"); // evidence_analyst's model
+  });
+
+  it("does not reuse position from stale snapshot - LLM runs", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+    const currentSnapshotId = result.snapshot.id;
+
+    const snapshots = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnapshot = snapshots[snapshots.length - 1]!;
+    const currentEvidenceIds = activeSnapshot.payload.evidenceIds;
+
+    // Pre-insert a position from a STALE snapshot (different snapshotId)
+    const agentId = "agent-evidence_analyst";
+    await repos.topicDecisions.insertPosition({
+      id: "pos-stale-snapshot",
+      namespaceId,
+      sessionId,
+      snapshotId: "stale-snapshot-id", // Different from current snapshot
+      round: 0,
+      agentId,
+      stance: "support",
+      rationale: "position from stale snapshot",
+      evidenceIds: currentEvidenceIds,
+      createdAt: nowIso()
+    });
+
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: currentEvidenceIds,
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: mockLlmClient
+    });
+
+    await agentPosService.runIndependentPositions(namespace, sessionId);
+
+    // LLM SHOULD be called because stale snapshot position is not reused
+    expect(mockLlmClient).toHaveBeenCalled();
+  });
+
+  it("does not reuse position with invalid evidence citation on current snapshot", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    const snapshots = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const activeSnapshot = snapshots[snapshots.length - 1]!;
+
+    // Pre-insert a position that cites evidence NOT in current snapshot
+    const agentId = "agent-evidence_analyst";
+    await repos.topicDecisions.insertPosition({
+      id: "pos-invalid-citation",
+      namespaceId,
+      sessionId,
+      snapshotId: activeSnapshot.id, // Same as active snapshot
+      round: activeSnapshot.round + 1, // Use next round to avoid immutable first-round conflict
+      agentId,
+      stance: "support",
+      rationale: "position with invalid evidence citation",
+      evidenceIds: ["nonexistent-evidence"], // NOT in current snapshot
+      createdAt: nowIso()
+    });
+
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: activeSnapshot.payload.evidenceIds,
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: mockLlmClient
+    });
+
+    await agentPosService.runIndependentPositions(namespace, sessionId);
+
+    // LLM SHOULD be called because the cached position has invalid evidence
+    expect(mockLlmClient).toHaveBeenCalled();
+  });
 });
 
 // Tests that verify the position parsing logic without needing actual LLM calls
