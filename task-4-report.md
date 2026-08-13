@@ -32,7 +32,7 @@ Test Files  3 passed (3)
 Tests  32 passed (32)
 ```
 - `debate.test.ts`: 7/7 pass
-- `proposals.test.ts`: 8/8 pass  
+- `proposals.test.ts`: 8/8 pass
 - `evidence-gaps.test.ts`: 17/17 pass (Task 3 regression)
 
 ### Task 3 Regression
@@ -58,7 +58,7 @@ git diff --check → ✅ No whitespace errors
 
 2. **Conflict Detection**: Deterministic detection from position stances (support vs oppose) and rationale keywords ("critical", "high risk", "severe" → high; "moderate", "concern" → medium; else low).
 
-3. **Stop Reasons**: 
+3. **Stop Reasons**:
    - `no_material_conflict` — No conflicts detected or all resolved
    - `resolved_after_round2` — Conflicts resolved by round 2
    - `max_rounds` — Reached 3 rounds with unresolved conflicts
@@ -155,3 +155,24 @@ git diff --check → ✅ No whitespace errors
 
 ## Report Length
 Status/commit/tests/typecheck/concerns/report: 14 lines (under 15-line limit)
+
+## Completion Fix
+
+**Failure**: `tests/repository/topic-decision-repository.test.ts` → `insertPosition is idempotent on exact replay and conflicts on different content` threw `TopicDecisionIdempotencyConflictError` after `risks_json`/`assumptions_json` columns were added.
+
+**Root cause**: `basePosition()` fixture omits `risks`/`assumptions` (undefined), but the repository writes them as `[]` to SQLite. On replay, `topicAgentPositionFromSql` returns `risks: []`/`assumptions: []`, so `topicAgentPositionFingerprint(stored) !== topicAgentPositionFingerprint(position)` because `undefined !== []`.
+
+**Fix** (Memory/src/storage/repositories.ts):
+1. `topicAgentPositionFingerprint` normalizes `r.risks ?? []` and `r.assumptions ?? []` before hashing — aligns fingerprint with DB normalization.
+2. `insertPosition` returns the caller's `position` (not the stored record) on idempotent replay, preserving input shape (`undefined` stays `undefined`) so `toEqual(first)` holds.
+
+**Tests**:
+- `Memory/tests/repository/topic-decision-repository.test.ts`: 20/20 pass (was 19/20).
+- `Memory/tests/service/topic-decision/`: 65/65 pass (agent-position, debate, proposals, evidence-gaps, session-start).
+- `Memory/tests/repository/`: 65/65 pass (source; excludes stale `dist/` artifact).
+- `Memory/tests/repository/sqlite-schema.test.ts`: 11/11 pass.
+- `Memory/tests/service/bundle/`: 2/2 pass.
+- `Memory` typecheck (`tsc --noEmit`): clean.
+- `git diff --check`: clean.
+
+**Commit**: `c91ab5d` is the actual HEAD of `feat/topic-multi-agent-decision` (controller-observed); the earlier `39d4607` reference in the report was stale.

@@ -4021,7 +4021,7 @@ function topicDecisionSnapshotFingerprint(r: TopicDecisionSnapshotRecord): strin
   return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, payload: r.payload, createdAt: r.createdAt });
 }
 function topicAgentPositionFingerprint(r: TopicAgentPositionRecord): string {
-  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, snapshotId: r.snapshotId, round: r.round, agentId: r.agentId, stance: r.stance, rationale: r.rationale, evidenceIds: r.evidenceIds, risks: r.risks, assumptions: r.assumptions, createdAt: r.createdAt });
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, snapshotId: r.snapshotId, round: r.round, agentId: r.agentId, stance: r.stance, rationale: r.rationale, evidenceIds: r.evidenceIds, risks: r.risks ?? [], assumptions: r.assumptions ?? [], createdAt: r.createdAt });
 }
 function topicActionProposalFingerprint(r: TopicActionProposalRecord): string {
   return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, rank: r.rank, effect: r.effect, title: r.title, payload: r.payload, status: r.status, version: r.version, metadata: r.metadata, createdAt: r.createdAt, updatedAt: r.updatedAt });
@@ -4092,7 +4092,7 @@ export class TopicDecisionRepository {
     const existing = this.db.prepare(`SELECT * FROM project_topic_agent_positions WHERE id = ?`).get(position.id) as TopicAgentPositionSqlRow | undefined;
     if (existing) {
       const stored = topicAgentPositionFromSql(existing);
-      if (topicAgentPositionFingerprint(stored) === topicAgentPositionFingerprint(position)) return stored;
+      if (topicAgentPositionFingerprint(stored) === topicAgentPositionFingerprint(position)) return position;
       throw new TopicDecisionIdempotencyConflictError(position.id, "position");
     }
     try {
