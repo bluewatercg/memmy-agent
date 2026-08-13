@@ -243,7 +243,7 @@ describe("confirmExecutionAction", () => {
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     const otherNamespace: RuntimeNamespace = { source: "test", profileId: "other-profile", userId: "user-2" };
     await expect(
-      service.confirmExecutionAction(otherNamespace, run.id, "action-1", 1, true, { userId: "user-2" })
+      service.confirmExecutionAction(otherNamespace, run.id, "action-1", 1, true, { userId: "user-2" }, "key-1")
     ).rejects.toThrow(/namespace|not found/i);
   });
 
@@ -256,7 +256,7 @@ describe("confirmExecutionAction", () => {
     });
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     await expect(
-      service.confirmExecutionAction(namespace, run.id, "wrong-action-id", run.version, true, { userId: "user-1" })
+      service.confirmExecutionAction(namespace, run.id, "wrong-action-id", run.version, true, { userId: "user-1" }, "key-1")
     ).rejects.toThrow(/action not pending confirmation/i);
   });
 
@@ -269,7 +269,7 @@ describe("confirmExecutionAction", () => {
     });
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     await expect(
-      service.confirmExecutionAction(namespace, run.id, "action-1", 0, true, { userId: "user-1" })
+      service.confirmExecutionAction(namespace, run.id, "action-1", 0, true, { userId: "user-1" }, "key-1")
     ).rejects.toThrow(/version/i);
   });
 
@@ -281,7 +281,7 @@ describe("confirmExecutionAction", () => {
       effect: "authoritative_write"
     });
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
-    const updated = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, false, { userId: "user-1" });
+    const updated = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, false, { userId: "user-1" }, "key-1");
     expect(updated.status).toBe("cancelled");
   });
 });
@@ -374,5 +374,186 @@ describe("execution idempotency and dependency order", () => {
     const resumed = await service.resumeExecution(namespace, run.id);
     expect(resumed.status).toBe("failed");
     expect(resumed.result.error).toMatch(/stale/i);
+  });
+});
+
+describe("irreversible two-confirmation flow", () => {
+  it("first confirmation does not invoke handler; second does", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executeSpy = vi.fn().mockResolvedValue({ status: "succeeded", output: { data: "deleted" } } satisfies TopicActionOutcome);
+    service.registerActionHandler({ effect: "delete", execute: executeSpy });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "delete",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "delete",
+            target: "topic-1",
+            input: {},
+            dependsOn: [],
+            recoveryPoint: "pre",
+            acceptanceCondition: "deleted"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(run.status).toBe("awaiting_confirmation");
+    expect(executeSpy).not.toHaveBeenCalled();
+
+    // First confirmation: handler still not invoked
+    const afterFirst = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, true, { userId: "user-1" }, "key-1");
+    expect(afterFirst.status).toBe("awaiting_second_confirmation");
+    expect(executeSpy).not.toHaveBeenCalled();
+
+    // Second confirmation: handler invoked
+    const afterSecond = await service.confirmExecutionAction(namespace, afterFirst.id, "action-1", afterFirst.version, true, { userId: "user-1" }, "key-2");
+    expect(afterSecond.status).toBe("completed");
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("replay of first confirmation does not count twice", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executeSpy = vi.fn().mockResolvedValue({ status: "succeeded", output: {} } satisfies TopicActionOutcome);
+    service.registerActionHandler({ effect: "delete", execute: executeSpy });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "delete",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "delete",
+            target: "topic-1",
+            input: {},
+            dependsOn: [],
+            recoveryPoint: "pre",
+            acceptanceCondition: "deleted"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+
+    // First confirmation
+    const afterFirst = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, true, { userId: "user-1" }, "key-1");
+    expect(afterFirst.status).toBe("awaiting_second_confirmation");
+
+    // Replay same idempotency key: must be no-op
+    const replay = await service.confirmExecutionAction(namespace, afterFirst.id, "action-1", afterFirst.version, true, { userId: "user-1" }, "key-1");
+    expect(replay.status).toBe("awaiting_second_confirmation");
+    expect(replay.version).toBe(afterFirst.version);
+    expect(executeSpy).not.toHaveBeenCalled();
+
+    // Second confirmation with different key: handler invoked
+    const afterSecond = await service.confirmExecutionAction(namespace, replay.id, "action-1", replay.version, true, { userId: "user-1" }, "key-2");
+    expect(afterSecond.status).toBe("completed");
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("persisted provenance has two events with ordinals", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    service.registerActionHandler({ effect: "delete", execute: async () => ({ status: "succeeded", output: {} }) });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "delete",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "delete",
+            target: "topic-1",
+            input: {},
+            dependsOn: [],
+            recoveryPoint: "pre",
+            acceptanceCondition: "deleted"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const afterFirst = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, true, { userId: "user-1" }, "key-1");
+    const afterSecond = await service.confirmExecutionAction(namespace, afterFirst.id, "action-1", afterFirst.version, true, { userId: "user-1" }, "key-2");
+
+    const result = afterSecond.result as any;
+    const actionResult = result.actions.find((a: any) => a.id === "action-1");
+    expect(actionResult.confirmationEvents).toHaveLength(2);
+    expect(actionResult.confirmationEvents[0].ordinal).toBe(1);
+    expect(actionResult.confirmationEvents[0].actor).toEqual({ userId: "user-1" });
+    expect(actionResult.confirmationEvents[0].actionId).toBe("action-1");
+    expect(actionResult.confirmationEvents[0].idempotencyKey).toBe("key-1");
+    expect(actionResult.confirmationEvents[0].eventId).toMatch(/^tdconf[_-]/);
+    expect(actionResult.confirmationEvents[1].ordinal).toBe(2);
+    expect(actionResult.confirmationEvents[1].idempotencyKey).toBe("key-2");
+  });
+
+  it("rejection after first confirmation cancels the run", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executeSpy = vi.fn().mockResolvedValue({ status: "succeeded", output: {} } satisfies TopicActionOutcome);
+    service.registerActionHandler({ effect: "delete", execute: executeSpy });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "delete",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "delete",
+            target: "topic-1",
+            input: {},
+            dependsOn: [],
+            recoveryPoint: "pre",
+            acceptanceCondition: "deleted"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const afterFirst = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, true, { userId: "user-1" }, "key-1");
+    expect(afterFirst.status).toBe("awaiting_second_confirmation");
+
+    // Reject at second stage
+    const cancelled = await service.confirmExecutionAction(namespace, afterFirst.id, "action-1", afterFirst.version, false, { userId: "user-1" }, "key-reject");
+    expect(cancelled.status).toBe("cancelled");
+    expect(executeSpy).not.toHaveBeenCalled();
+  });
+
+  it("rejection at first confirmation cancels the run", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executeSpy = vi.fn().mockResolvedValue({ status: "succeeded", output: {} } satisfies TopicActionOutcome);
+    service.registerActionHandler({ effect: "delete", execute: executeSpy });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "delete",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "delete",
+            target: "topic-1",
+            input: {},
+            dependsOn: [],
+            recoveryPoint: "pre",
+            acceptanceCondition: "deleted"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const cancelled = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, false, { userId: "user-1" }, "key-reject");
+    expect(cancelled.status).toBe("cancelled");
+    expect(executeSpy).not.toHaveBeenCalled();
   });
 });

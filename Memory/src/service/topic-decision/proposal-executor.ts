@@ -3,7 +3,7 @@ import type { Repositories } from "../../storage/repositories.js";
 import type { ProjectContextService } from "../project-context/project-context-service.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
-import { evaluateExecutionPolicy } from "./execution-policy.js";
+import { evaluateExecutionPolicy, isIrreversibleEffect } from "./execution-policy.js";
 import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
 
 export interface TopicProposalAction {
@@ -38,13 +38,21 @@ export interface TopicActionHandler {
   execute(action: TopicProposalAction, context: TopicExecutionContext): Promise<TopicActionOutcome>;
 }
 
+export interface ConfirmationEvent {
+  eventId: string;
+  ordinal: 1 | 2;
+  actor: Record<string, unknown>;
+  timestamp: string;
+  actionId: string;
+  idempotencyKey: string;
+}
+
 interface ActionResult {
   id: string;
-  status: "pending" | "succeeded" | "failed" | "awaiting_confirmation" | "skipped";
+  status: "pending" | "succeeded" | "failed" | "awaiting_confirmation" | "awaiting_second_confirmation" | "skipped";
   output?: unknown;
   error?: string;
-  confirmedAt?: string;
-  confirmedBy?: Record<string, unknown>;
+  confirmationEvents: ConfirmationEvent[];
 }
 
 interface RunResult {
@@ -53,7 +61,10 @@ interface RunResult {
     id: string;
     target: string;
     input: Record<string, unknown>;
+    effect: TopicActionEffect;
     rollbackMetadata: Record<string, unknown>;
+    confirmationOrdinal: 1 | 2;
+    lastIdempotencyKey?: string;
   };
   error?: string;
 }
@@ -133,7 +144,7 @@ export class ProposalExecutor {
       sessionId,
       proposalId,
       status: "running",
-      result: { actions: actions.map(a => ({ id: a.id, status: "pending" })) },
+      result: { actions: actions.map(a => ({ id: a.id, status: "pending", confirmationEvents: [] })) },
       version: 1,
       createdAt: now,
       updatedAt: now
@@ -181,7 +192,7 @@ export class ProposalExecutor {
       result.error = "session is stale; execution stopped";
       // Mark pending actions as skipped
       for (const action of result.actions) {
-        if (action.status === "pending" || action.status === "awaiting_confirmation") {
+        if (action.status === "pending" || action.status === "awaiting_confirmation" || action.status === "awaiting_second_confirmation") {
           action.status = "skipped";
         }
       }
@@ -201,7 +212,7 @@ export class ProposalExecutor {
     // Filter to pending actions only (idempotency: skip succeeded)
     const pendingActions = actions.filter(a => {
       const actionResult = result.actions.find(ar => ar.id === a.id);
-      return !actionResult || actionResult.status === "pending" || actionResult.status === "awaiting_confirmation";
+      return !actionResult || actionResult.status === "pending" || actionResult.status === "awaiting_confirmation" || actionResult.status === "awaiting_second_confirmation";
     });
 
     if (pendingActions.length === 0) {
@@ -229,7 +240,8 @@ export class ProposalExecutor {
     actionId: string,
     expectedRunVersion: number,
     approved: boolean,
-    actor: Record<string, unknown>
+    actor: Record<string, unknown>,
+    idempotencyKey: string
   ): Promise<TopicExecutionRunRecord> {
     const namespaceId = stableHash(namespace);
     const run = this.getRun(namespaceId, runId);
@@ -247,12 +259,21 @@ export class ProposalExecutor {
       throw new Error(`action not pending confirmation: ${actionId}`);
     }
 
+    // Idempotency: replay of same request must not increment confirmation count
+    if (pendingAction.lastIdempotencyKey === idempotencyKey) {
+      return run;
+    }
+
     const now = nowIso();
 
     if (!approved) {
-      // Rejection: cancel run
+      // Rejection at either stage cancels the run
       for (const action of result.actions) {
-        if (action.status === "pending" || action.status === "awaiting_confirmation") {
+        if (
+          action.status === "pending" ||
+          action.status === "awaiting_confirmation" ||
+          action.status === "awaiting_second_confirmation"
+        ) {
           action.status = "skipped";
         }
       }
@@ -260,15 +281,45 @@ export class ProposalExecutor {
       return this.updateRun(run, "cancelled", result, now);
     }
 
-    // Approval: record confirmation and execute action
     const actionResult = result.actions.find(ar => ar.id === actionId);
-    if (actionResult) {
-      actionResult.status = "succeeded";
-      actionResult.confirmedAt = now;
-      actionResult.confirmedBy = actor;
+    const irreversible = isIrreversibleEffect(pendingAction.effect);
+
+    if (irreversible && pendingAction.confirmationOrdinal === 1) {
+      // First confirmation for irreversible effect: persist event, pause for second
+      const event: ConfirmationEvent = {
+        eventId: newId("tdconf"),
+        ordinal: 1,
+        actor,
+        timestamp: now,
+        actionId,
+        idempotencyKey
+      };
+      if (actionResult) {
+        actionResult.confirmationEvents = [...(actionResult.confirmationEvents ?? []), event];
+        actionResult.status = "awaiting_second_confirmation";
+      }
+      result.pendingAction = {
+        ...pendingAction,
+        confirmationOrdinal: 2,
+        lastIdempotencyKey: idempotencyKey
+      };
+      return this.updateRun(run, "awaiting_second_confirmation", result, now);
     }
 
-    // Get proposal and execute remaining actions
+    // Second confirmation for irreversible, or first for reversible: execute handler
+    const event: ConfirmationEvent = {
+      eventId: newId("tdconf"),
+      ordinal: irreversible ? 2 : 1,
+      actor,
+      timestamp: now,
+      actionId,
+      idempotencyKey
+    };
+    if (actionResult) {
+      actionResult.confirmationEvents = [...(actionResult.confirmationEvents ?? []), event];
+    }
+
+    // Get proposal and actions
     const proposals = this.options.repos.topicDecisions.listProposals(namespaceId, run.sessionId);
     const proposal = proposals.find(p => p.id === run.proposalId);
     if (!proposal) {
@@ -289,16 +340,56 @@ export class ProposalExecutor {
       projectContextService: this.options.projectContextService
     };
 
-    // Execute remaining actions after the confirmed one
-    const confirmedIndex = actions.findIndex(a => a.id === actionId);
-    const remainingActions = actions.slice(confirmedIndex + 1);
-
-    if (remainingActions.length === 0) {
-      return this.updateRun(run, "completed", result, now);
+    // Execute the confirmed action via handler
+    const action = actions.find(a => a.id === actionId);
+    if (!action) {
+      throw new Error(`action not found in proposal: ${actionId}`);
     }
 
-    const updatedRun = this.updateRun(run, "running", result, now);
-    return this.executeActions(updatedRun, actions, context, actor, result);
+    const handler = this.handlers.get(action.effect);
+    if (!handler) {
+      if (actionResult) {
+        actionResult.status = "failed";
+        actionResult.error = `no handler registered for effect: ${action.effect}`;
+      }
+      result.error = `no handler for effect: ${action.effect}`;
+      return this.updateRun(run, "failed", result, now);
+    }
+
+    try {
+      const outcome = await handler.execute(action, context);
+      if (actionResult) {
+        actionResult.status = outcome.status;
+        if (outcome.status === "succeeded") {
+          actionResult.output = outcome.output;
+        } else {
+          actionResult.error = outcome.error;
+        }
+      }
+
+      if (outcome.status === "failed") {
+        result.error = `action failed: ${action.id} — ${outcome.error}`;
+        return this.updateRun(run, "failed", result, now);
+      }
+
+      // Execute remaining actions after the confirmed one
+      const confirmedIndex = actions.findIndex(a => a.id === actionId);
+      const remainingActions = actions.slice(confirmedIndex + 1);
+
+      if (remainingActions.length === 0) {
+        return this.updateRun(run, "completed", result, nowIso());
+      }
+
+      const updatedRun = this.updateRun(run, "running", result, nowIso());
+      return this.executeActions(updatedRun, actions, context, actor, result);
+    } catch (err) {
+      if (actionResult) {
+        actionResult.status = "failed";
+        actionResult.error = err instanceof Error ? err.message : String(err);
+      }
+      result.error = `action threw: ${action.id} — ${err instanceof Error ? err.message : String(err)}`;
+      return this.updateRun(run, "failed", result, nowIso());
+    }
   }
 
   private async executeActions(
@@ -308,7 +399,7 @@ export class ProposalExecutor {
     actor: Record<string, unknown> | undefined,
     existingResult?: RunResult
   ): Promise<TopicExecutionRunRecord> {
-    const result: RunResult = existingResult ?? { actions: actions.map(a => ({ id: a.id, status: "pending" })) };
+    const result: RunResult = existingResult ?? { actions: actions.map(a => ({ id: a.id, status: "pending", confirmationEvents: [] })) };
     let currentRun = run;
 
     // Topological sort for dependency order
@@ -361,12 +452,14 @@ export class ProposalExecutor {
           id: action.id,
           target: action.target,
           input: action.input,
+          effect: action.effect,
           rollbackMetadata: {
             recoveryPoint: action.recoveryPoint,
             effect: action.effect,
             target: action.target,
             input: action.input
-          }
+          },
+          confirmationOrdinal: 1
         };
         const now = nowIso();
         return this.updateRun(currentRun, "awaiting_confirmation", result, now);

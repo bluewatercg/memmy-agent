@@ -1940,9 +1940,10 @@ export class MemoryService {
     actionId: string,
     expectedRunVersion: number,
     approved: boolean,
-    actor: Record<string, unknown>
+    actor: Record<string, unknown>,
+    idempotencyKey: string
   ): Promise<TopicExecutionRunRecord> {
-    return this.topicDecisions.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor);
+    return this.topicDecisions.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor, idempotencyKey);
   }
 
   registerActionHandler(handler: import("./topic-decision/proposal-executor.js").TopicActionHandler): void {

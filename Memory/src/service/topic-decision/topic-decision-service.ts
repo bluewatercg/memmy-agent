@@ -480,6 +480,8 @@ export class TopicDecisionService {
 
   /**
    * Confirm or reject a pending confirmation-required action.
+   * Irreversible effects require two separate confirmations; the idempotencyKey
+   * prevents replay of the same confirmation request from counting twice.
    */
   async confirmExecutionAction(
     namespace: RuntimeNamespace,
@@ -487,13 +489,14 @@ export class TopicDecisionService {
     actionId: string,
     expectedRunVersion: number,
     approved: boolean,
-    actor: Record<string, unknown>
+    actor: Record<string, unknown>,
+    idempotencyKey: string
   ): Promise<TopicExecutionRunRecord> {
     if (!this.options.enabled) {
       throw new Error("topic decisions disabled");
     }
 
-    return this.proposalExecutor.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor);
+    return this.proposalExecutor.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor, idempotencyKey);
   }
 
   /**

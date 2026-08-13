@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateExecutionPolicy } from "../../../src/service/topic-decision/execution-policy.js";
+import { evaluateExecutionPolicy, isIrreversibleEffect, IRREVERSIBLE_EFFECTS } from "../../../src/service/topic-decision/execution-policy.js";
 import type { TopicActionEffect } from "../../../src/types.js";
 
 describe("execution policy matrix", () => {
@@ -78,5 +78,38 @@ describe("execution policy matrix", () => {
       acceptanceCondition: "applied"
     });
     expect(decision.mode).toBe("confirmation_required");
+  });
+});
+
+describe("irreversible effects", () => {
+  const irreversibleEffects: TopicActionEffect[] = [
+    "delete", "topic_mutation", "memory_promotion", "authoritative_write", "external_write"
+  ];
+
+  for (const effect of irreversibleEffects) {
+    it(`${effect} is irreversible`, () => {
+      expect(isIrreversibleEffect(effect)).toBe(true);
+      expect(IRREVERSIBLE_EFFECTS.has(effect)).toBe(true);
+    });
+  }
+
+  it("draft is not irreversible", () => {
+    expect(isIrreversibleEffect("draft")).toBe(false);
+  });
+
+  it("read is not irreversible", () => {
+    expect(isIrreversibleEffect("read")).toBe(false);
+  });
+
+  it("confirmation_required reason mentions irreversible for irreversible effects", () => {
+    const decision = evaluateExecutionPolicy("delete", {
+      recoveryPoint: "pre",
+      acceptanceCondition: "done"
+    });
+    expect(decision.mode).toBe("confirmation_required");
+    if (decision.mode === "confirmation_required") {
+      expect(decision.reason).toMatch(/irreversible/);
+      expect(decision.reason).toMatch(/two separate confirmations/);
+    }
   });
 });

@@ -20,6 +20,26 @@ const CONFIRMATION_EFFECTS: Set<TopicActionEffect> = new Set([
   "memory_promotion"
 ]);
 
+/**
+ * Irreversible effects require a separately recorded second confirmation
+ * before execution. Defined by the policy contract:
+ * delete, topic_mutation, memory_promotion, authoritative_write, external_write.
+ */
+export const IRREVERSIBLE_EFFECTS: Set<TopicActionEffect> = new Set([
+  "delete",
+  "topic_mutation",
+  "memory_promotion",
+  "authoritative_write",
+  "external_write"
+]);
+
+/**
+ * Returns true if the effect is irreversible and requires two confirmations.
+ */
+export function isIrreversibleEffect(effect: TopicActionEffect): boolean {
+  return IRREVERSIBLE_EFFECTS.has(effect);
+}
+
 const ALL_KNOWN_EFFECTS: Set<TopicActionEffect> = new Set([
   ...AUTOMATIC_EFFECTS,
   ...CONFIRMATION_EFFECTS
@@ -63,9 +83,12 @@ export function evaluateExecutionPolicy(
   }
 
   if (CONFIRMATION_EFFECTS.has(effect)) {
+    const irreversible = isIrreversibleEffect(effect);
     return {
       mode: "confirmation_required",
-      reason: `effect ${effect} is irreversible or has external impact; requires explicit confirmation`
+      reason: irreversible
+        ? `effect ${effect} is irreversible; requires two separate confirmations`
+        : `effect ${effect} has external impact; requires explicit confirmation`
     };
   }
 
