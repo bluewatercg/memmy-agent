@@ -866,12 +866,14 @@ async function routeRequest(
     const request = topicDecisionAgentsInput(body, "topic-decision.agents", principal);
     const sessionId = decodeMatchSegment(topicDecisionAgents, 1);
     try {
-      const result = service.updateTopicDecisionSessionAgents(
-        request.namespace,
-        sessionId,
-        request.expectedVersion ?? 1,
-        request.agents
-      );
+      const result = await service.idempotent("topic-decision.agents", request, { sessionId, request }, async () => {
+        return service.updateTopicDecisionSessionAgents(
+          request.namespace,
+          sessionId,
+          request.expectedVersion,
+          request.agents
+        );
+      }, { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -998,7 +1000,9 @@ async function routeRequest(
     const request = topicDecisionCancelInput(body, "topic-decision.cancel", principal);
     const sessionId = decodeMatchSegment(topicDecisionCancel, 1);
     try {
-      const result = service.cancelTopicDecisionSession(request.namespace, sessionId, request.expectedVersion);
+      const result = await service.idempotent("topic-decision.cancel", request, { sessionId, request }, async () => {
+        return service.cancelTopicDecisionSession(request.namespace, sessionId, request.expectedVersion);
+      }, { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -2077,7 +2081,7 @@ function topicDecisionAgentsInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; expectedVersion: number; requestId?: string } {
+): { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; expectedVersion: number; adapterId: string; requestId: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "agents", "expectedVersion", "requestId", "adapterId", "source"];
@@ -2094,6 +2098,12 @@ function topicDecisionAgentsInput(
   }
   if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) {
     throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
+  }
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  }
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
   }
   const agents = obj.agents.map((a: unknown, i: number) => {
     if (!isRecord(a)) {
@@ -2113,8 +2123,9 @@ function topicDecisionAgentsInput(
   return {
     namespace: request.namespace!,
     agents,
-    expectedVersion: obj.expectedVersion,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
+    expectedVersion: obj.expectedVersion as number,
+    adapterId: obj.adapterId as string,
+    requestId: obj.requestId as string
   };
 }
 
@@ -2228,7 +2239,7 @@ function topicDecisionCancelInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedVersion: number; requestId?: string } {
+): { namespace: RuntimeNamespace; expectedVersion: number; adapterId: string; requestId: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "expectedVersion", "requestId", "adapterId", "source"];
@@ -2240,10 +2251,17 @@ function topicDecisionCancelInput(
   if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) {
     throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
   }
+  if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
+  }
+  if (typeof obj.requestId !== "string" || !obj.requestId.trim()) {
+    throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
+  }
   return {
     namespace: request.namespace!,
     expectedVersion: obj.expectedVersion,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
+    adapterId: obj.adapterId as string,
+    requestId: obj.requestId as string
   };
 }
 
