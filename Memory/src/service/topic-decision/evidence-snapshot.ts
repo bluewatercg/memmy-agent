@@ -3,6 +3,18 @@ import type { TopicAgentSpec, TopicDecisionSnapshotPayload } from "../../types.j
 import { stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 
+/**
+ * Maximum characters for evidence summary storage.
+ * Conservative bound consistent with project limits (logger: 4000, algorithm: 200-1500).
+ * Approximates ~400-500 tokens for multi-lingual evidence text.
+ */
+export const EVIDENCE_SUMMARY_MAX_CHARS = 2000;
+
+function boundedSummary(summary: string): string {
+  if (summary.length <= EVIDENCE_SUMMARY_MAX_CHARS) return summary;
+  return `${summary.slice(0, EVIDENCE_SUMMARY_MAX_CHARS - 12)}…[truncated]`;
+}
+
 export interface EvidenceSnapshotInput {
   namespaceId: string;
   topicId: string;
@@ -37,6 +49,7 @@ export class EvidenceSnapshotBuilder {
     const evidenceContent: Record<string, string> = {};
 
     for (const ev of evidence) {
+      // Hash over full canonical evidence content for deterministic reproducibility
       const contentHash = stableHash({
         id: ev.id,
         topicId: ev.topicId,
@@ -46,7 +59,8 @@ export class EvidenceSnapshotBuilder {
         metadata: ev.metadata
       });
       evidenceHashes[ev.id] = contentHash;
-      evidenceContent[ev.id] = ev.summary;
+      // Store bounded summary for persistence; hash remains canonical
+      evidenceContent[ev.id] = boundedSummary(ev.summary);
     }
 
     // Get project constraints if projectId present

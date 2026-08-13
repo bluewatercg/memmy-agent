@@ -59,14 +59,19 @@ describe("topic decision config", () => {
     expect(config.algorithm.topicDecisions?.models).toEqual(["MiniMax-M2.5", "qwen3.7-plus", "glm-5"]);
   });
 
-  it("returns empty models when not configured", () => {
+  it("returns default four-model roster when not configured", () => {
     delete process.env.MEMMY_TOPIC_DECISION_MODELS;
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
 
     const { config } = loadMemmyConfig(configPath);
-    expect(config.algorithm.topicDecisions?.models).toEqual([]);
+    expect(config.algorithm.topicDecisions?.models).toEqual([
+      "MiniMax-M2.5",
+      "qwen3.7-plus",
+      "kimi-k2.5",
+      "glm-5"
+    ]);
   });
 });
 

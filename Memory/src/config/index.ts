@@ -872,8 +872,16 @@ function normalizeTopicDecisions(input: Record<string, unknown>): TopicDecisions
   };
 }
 
+/** Default four-model roster for topic decisions when env not configured. */
+const DEFAULT_TOPIC_DECISION_MODELS = [
+  "MiniMax-M2.5",
+  "qwen3.7-plus",
+  "kimi-k2.5",
+  "glm-5"
+] as const;
+
 function parseTopicDecisionModels(value: unknown): string[] {
-  if (typeof value !== "string" || !value.trim()) return [];
+  if (typeof value !== "string" || !value.trim()) return [...DEFAULT_TOPIC_DECISION_MODELS];
   const seen = new Set<string>();
   return value.split(",").map((s) => s.trim()).filter(Boolean).filter((m) => !seen.has(m) && seen.add(m));
 }

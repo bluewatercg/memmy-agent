@@ -310,14 +310,19 @@ describe("memmy memory config", () => {
     ]);
   });
 
-  it("defaults topic decisions disabled with empty models", () => {
+  it("defaults topic decisions disabled with default four-model roster", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");
     writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
 
     const { config } = loadMemmyConfig(configPath);
     expect(config.algorithm.topicDecisions.enabled).toBe(false);
-    expect(config.algorithm.topicDecisions.models).toEqual([]);
+    expect(config.algorithm.topicDecisions.models).toEqual([
+      "MiniMax-M2.5",
+      "qwen3.7-plus",
+      "kimi-k2.5",
+      "glm-5"
+    ]);
   });
 
   it("reads topic decisions enabled from env", () => {
