@@ -333,11 +333,14 @@ describe("Topic Decision REST contract", () => {
     db.close();
   });
 
-  // Idempotency requires integration with service.idempotent() which stores replay state in database.
-  // Direct method mocks bypass the wrapper, causing call counts to increment on replay.
-  // Routes correctly use service.idempotent() with exactReplay: true - verified by memory-rest tests.
-  it.skip("idempotent exact replay for start, answers, approve, confirm, cancel, agents", async () => {
-    const { db, service } = createTestService({ topicDecisionEnabled: true });
+  it("idempotent exact replay for start, answers, approve, confirm, cancel, agents", async () => {
+    const { db, service } = createTestService({
+      config: {
+        ...configWithMemoryGates({ enableMemoryAdd: true }),
+        algorithm: { ...configWithMemoryGates({ enableMemoryAdd: true }).algorithm, topicDecisions: { enabled: true, models: [] } }
+      },
+      topicDecisionEnabled: true
+    });
     const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
     let startCount = 0;
     let answerCount = 0;
@@ -906,10 +909,14 @@ describe("Topic Decision REST contract", () => {
       });
       db.close();
     });
-
-    // Idempotency test skipped: direct mocks bypass service.idempotent() wrapper.
-    it.skip("idempotent success on already cancelled", async () => {
-      const { db, service } = createTestService({ topicDecisionEnabled: true });
+    it("idempotent success on already cancelled", async () => {
+      const { db, service } = createTestService({
+        config: {
+          ...configWithMemoryGates({ enableMemoryAdd: true }),
+          algorithm: { ...configWithMemoryGates({ enableMemoryAdd: true }).algorithm, topicDecisions: { enabled: true, models: [] } }
+        },
+        topicDecisionEnabled: true
+      });
       const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
 
       let cancelCount = 0;

@@ -63,7 +63,7 @@ export function createMemoryServiceFixture(): {
     });
     const baseConfig = options.config ?? DEFAULT_MEMMY_CONFIG;
     const config = options.topicDecisionEnabled !== undefined
-      ? { ...baseConfig, topicDecisions: { enabled: options.topicDecisionEnabled, models: [] } }
+      ? { ...baseConfig, algorithm: { ...baseConfig.algorithm, topicDecisions: { enabled: options.topicDecisionEnabled, models: [] } } }
       : baseConfig;
     return {
       root,

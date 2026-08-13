@@ -2018,7 +2018,7 @@ function topicDecisionStartInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; agents?: TopicAgentSpec[]; requestId?: string } {
+): { namespace: RuntimeNamespace; agents?: TopicAgentSpec[]; adapterId?: string; requestId?: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "agents", "requestId", "adapterId", "source"];
@@ -2054,6 +2054,7 @@ function topicDecisionStartInput(
   return {
     namespace: request.namespace!,
     agents,
+    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
     requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
   };
 }
@@ -2128,56 +2129,36 @@ function topicDecisionAgentsInput(
     requestId: obj.requestId as string
   };
 }
-
 function topicDecisionAnswersInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedVersion: number; answers: Array<{ questionKey: string; answer: string; source: "user_preference" | "user_supplied_unverified" }>; requestId?: string } {
+): { namespace: RuntimeNamespace; answers: Array<{ questionKey: string; answer: string; source: "user_preference" | "user_supplied_unverified" }>; expectedVersion: number; adapterId: string; requestId: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "expectedVersion", "answers", "requestId", "adapterId", "source"];
   for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-    }
+    if (!allowedKeys.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
   }
-  if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
-  }
-  if (!Array.isArray(obj.answers)) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.answers must be an array`);
-  }
-  if (obj.answers.length > 50) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.answers exceeds maximum length of 50`);
-  }
+  if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion must be a positive integer`);
+  if (!Array.isArray(obj.answers)) throw new MemoryServiceError("invalid_argument", `${routeName}.answers must be an array`);
+  if (obj.answers.length > 50) throw new MemoryServiceError("invalid_argument", `${routeName}.answers exceeds maximum length of 50`);
   const answers = obj.answers.map((a: unknown, i: number) => {
-    if (!isRecord(a)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] must be an object`);
-    }
+    if (!isRecord(a)) throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] must be an object`);
     const answerAllowed = ["questionKey", "answer", "source"];
-    for (const key of Object.keys(a)) {
-      if (!answerAllowed.includes(key)) {
-        throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] unknown field: ${key}`);
-      }
-    }
-    if (typeof a.questionKey !== "string" || typeof a.answer !== "string") {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] requires questionKey and answer as strings`);
-    }
-    if (a.answer.length > 10000) {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}].answer exceeds maximum length of 10000`);
-    }
+    for (const key of Object.keys(a)) if (!answerAllowed.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] unknown field: ${key}`);
+    if (typeof a.questionKey !== "string" || typeof a.answer !== "string") throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}] requires questionKey and answer as strings`);
+    if (a.answer.length > 10000) throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}].answer exceeds maximum length of 10000`);
     const source = a.source as string;
-    if (source !== "user_preference" && source !== "user_supplied_unverified") {
-      throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}].source must be user_preference or user_supplied_unverified`);
-    }
+    if (source !== "user_preference" && source !== "user_supplied_unverified") throw new MemoryServiceError("invalid_argument", `${routeName}.answers[${i}].source must be user_preference or user_supplied_unverified`);
     return { questionKey: a.questionKey, answer: a.answer, source: source as "user_preference" | "user_supplied_unverified" };
   });
   return {
     namespace: request.namespace!,
     expectedVersion: obj.expectedVersion,
     answers,
-    requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
+    adapterId: obj.adapterId as string,
+    requestId: obj.requestId as string
   };
 }
 
@@ -2185,14 +2166,12 @@ function topicDecisionApproveInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedProposalVersion: number; requestId?: string } {
+): { namespace: RuntimeNamespace; expectedProposalVersion: number; adapterId?: string; requestId?: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "expectedProposalVersion", "requestId", "adapterId", "source"];
   for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-    }
+    if (!allowedKeys.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
   }
   if (typeof obj.expectedProposalVersion !== "number" || !Number.isInteger(obj.expectedProposalVersion) || obj.expectedProposalVersion < 1) {
     throw new MemoryServiceError("invalid_argument", `${routeName}.expectedProposalVersion must be a positive integer`);
@@ -2200,6 +2179,7 @@ function topicDecisionApproveInput(
   return {
     namespace: request.namespace!,
     expectedProposalVersion: obj.expectedProposalVersion,
+    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
     requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
   };
 }
@@ -2208,29 +2188,22 @@ function topicDecisionConfirmInput(
   body: unknown,
   routeName: string,
   principal: AuthPrincipal
-): { namespace: RuntimeNamespace; expectedRunVersion: number; approved: boolean; idempotencyKey: string; requestId?: string } {
+): { namespace: RuntimeNamespace; expectedRunVersion: number; approved: boolean; idempotencyKey: string; adapterId?: string; requestId?: string } {
   const obj = asObject(body, routeName);
   const request = envelopeWithPrincipal(obj, principal);
   const allowedKeys = ["namespace", "expectedRunVersion", "approved", "idempotencyKey", "requestId", "adapterId", "source"];
   for (const key of Object.keys(obj)) {
-    if (!allowedKeys.includes(key)) {
-      throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
-    }
+    if (!allowedKeys.includes(key)) throw new MemoryServiceError("invalid_argument", `${routeName} unknown field: ${key}`);
   }
-  if (typeof obj.expectedRunVersion !== "number" || !Number.isInteger(obj.expectedRunVersion) || obj.expectedRunVersion < 1) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.expectedRunVersion must be a positive integer`);
-  }
-  if (typeof obj.approved !== "boolean") {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.approved must be a boolean`);
-  }
-  if (typeof obj.idempotencyKey !== "string" || obj.idempotencyKey.length === 0) {
-    throw new MemoryServiceError("invalid_argument", `${routeName}.idempotencyKey must be a non-empty string`);
-  }
+  if (typeof obj.expectedRunVersion !== "number" || !Number.isInteger(obj.expectedRunVersion) || obj.expectedRunVersion < 1) throw new MemoryServiceError("invalid_argument", `${routeName}.expectedRunVersion must be a positive integer`);
+  if (typeof obj.approved !== "boolean") throw new MemoryServiceError("invalid_argument", `${routeName}.approved must be a boolean`);
+  if (typeof obj.idempotencyKey !== "string" || obj.idempotencyKey.length === 0) throw new MemoryServiceError("invalid_argument", `${routeName}.idempotencyKey must be a non-empty string`);
   return {
     namespace: request.namespace!,
     expectedRunVersion: obj.expectedRunVersion,
     approved: obj.approved,
     idempotencyKey: obj.idempotencyKey,
+    adapterId: typeof obj.adapterId === "string" ? obj.adapterId : undefined,
     requestId: typeof obj.requestId === "string" ? obj.requestId : undefined
   };
 }
@@ -2266,7 +2239,8 @@ function topicDecisionCancelInput(
 }
 
 function publicTopicDecisionSession(session: Record<string, unknown>): Record<string, unknown> {
-  const { apiKey, internalProviderPayload, ...rest } = session.metadata as Record<string, unknown>;
+  const metadata = session.metadata && typeof session.metadata === "object" ? session.metadata as Record<string, unknown> : {};
+  const { apiKey, internalProviderPayload, ...rest } = metadata;
   return { ...session, metadata: rest };
 }
 
