@@ -154,7 +154,7 @@ describe("decisionability gate", () => {
     });
 
     // Check decisionability and get questions
-    const decision = service.checkDecisionability(namespace, result.session.id);
+    const decision = await service.checkDecisionability(namespace, result.session.id);
 
     // Should have deduplicated questions
     if (decision.openQuestions) {
@@ -194,7 +194,7 @@ describe("decisionability gate", () => {
     }
 
     // Check decisionability
-    const decision = service.checkDecisionability(namespace, result.session.id);
+    const decision = await service.checkDecisionability(namespace, result.session.id);
 
     // Should surface only top 3 questions
     if (decision.openQuestions) {

@@ -133,7 +133,7 @@ export function parseAgentPosition(
   }
 
   return {
-    judgment,
+    judgment: judgment as string,
     confidence,
     evidenceIds,
     facts: facts as AgentPositionResult["facts"],
@@ -171,7 +171,7 @@ export class AgentPositionService {
       throw new Error(`no snapshot found for session: ${sessionId}`);
     }
 
-    const snapshot = snapshots[snapshots.length - 1];
+    const snapshot = snapshots[snapshots.length - 1]!;
     const roster = snapshot.payload.roster;
 
     // Get existing positions to check for reuse
@@ -268,7 +268,7 @@ export class AgentPositionService {
       specialist: "You are a specialist. Provide expert analysis specific to your domain expertise."
     };
 
-    return rolePrompts[role] || rolePrompts.specialist;
+    return rolePrompts[role] || rolePrompts.specialist || "You are a specialist.";
   }
 
   private buildSnapshotPrompt(payload: TopicDecisionSnapshotPayload): string {

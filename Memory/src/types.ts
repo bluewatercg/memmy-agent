@@ -211,6 +211,7 @@ export interface TopicEvidenceRequestRecord {
   sessionId: string;
   round: number;
   question: string;
+  answer?: string;
   verification: TopicEvidenceVerification;
   status: string;
   metadata: Record<string, unknown>;

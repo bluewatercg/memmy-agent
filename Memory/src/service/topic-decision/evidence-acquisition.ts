@@ -1,22 +1,10 @@
 import type { Repositories } from "../../storage/repositories.js";
-import type { RuntimeNamespace, TopicDecisionSnapshotPayload, TopicEvidenceRequestRecord, TopicAgentPositionRecord } from "../../types.js";
+import type { RuntimeNamespace, TopicDecisionSnapshotPayload, TopicAgentPositionRecord } from "../../types.js";
 import { stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { newId } from "../../utils/id.js";
+import type { TopicEvidenceRequestRecord, TopicEvidenceVerification } from "../../types.js";
 
-export interface TopicEvidenceRequestRecord {
-  id: string;
-  namespaceId: string;
-  sessionId: string;
-  round: number;
-  question: string;
-  verification: "none" | "repository_verified" | "tool_verified" | "user_authoritative" | "user_supplied_unverified" | "contradicted";
-  status: "pending" | "answered" | "blocked" | "auto_acquired";
-  metadata: Record<string, unknown>;
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-}
 
 export interface TopicEvidenceAcquisitionResult {
   found: boolean;
@@ -25,13 +13,8 @@ export interface TopicEvidenceAcquisitionResult {
   confidence?: number;
 }
 
-// Type for verification status (must match DB schema)
-export type TopicEvidenceVerification = 
-  | "repository_verified" 
-  | "tool_verified" 
-  | "user_authoritative" 
-  | "user_supplied_unverified" 
-  | "contradicted";
+// Re-export for convenience
+export type { TopicEvidenceVerification } from "../../types.js";
 
 export interface EvidenceSource {
   id: string;
@@ -56,15 +39,17 @@ export class MemoryEvidenceSource implements EvidenceSource {
     // Try to find answer in existing memory
     if (question.includes("memory") || question.includes("remember")) {
       // Check if any memory relates to the question
-      const memories = this.repos.memories.listByNamespace(request.namespaceId);
+      const memories = this.repos.memories.list({ tenantId: request.namespaceId }, 10);
       for (const memory of memories.slice(0, 5)) {
+        const content = memory.memoryValue;
+        const title = memory.properties.info?.title as string | undefined;
         if (
-          memory.content.toLowerCase().includes(question) ||
-          memory.title?.toLowerCase().includes(question)
+          content.toLowerCase().includes(question) ||
+          (title?.toLowerCase().includes(question))
         ) {
           return {
             found: true,
-            answer: memory.content.substring(0, 500),
+            answer: content.substring(0, 500),
             source: "memory",
             confidence: 0.7
           };
@@ -122,7 +107,7 @@ export class EvidenceAcquisitionService {
   async attemptAutoAcquisition(
     namespaceId: string,
     sessionId: string,
-    snapshot: { payload: TopicDecisionSnapshotPayload }
+    snapshot: { id: string; payload: TopicDecisionSnapshotPayload }
   ): Promise<{
     state: "gathering_evidence" | "awaiting_user_input" | "ready" | "blocked_by_evidence";
     acquiredAnswers: TopicEvidenceAcquisitionResult[];
@@ -173,7 +158,7 @@ export class EvidenceAcquisitionService {
           sessionId,
           round: snapshot.payload.topicVersion,
           question: q.question,
-          verification: "none",
+          verification: "user_supplied_unverified" as TopicEvidenceVerification,
           status: "pending",
           metadata: { key: q.key, agentId: q.agentId },
           version: 1,
@@ -191,7 +176,7 @@ export class EvidenceAcquisitionService {
             ...request,
             status: "auto_acquired",
             answer: result.answer,
-            verification: "none",
+            verification: "user_supplied_unverified" as TopicEvidenceVerification,
             metadata: { ...request.metadata, source: result.source }
           }, undefined);
         } else {
@@ -231,20 +216,25 @@ export class EvidenceAcquisitionService {
     answers: Array<{
       questionKey: string;
       answer: string;
-      source: "user_preference" | "user_supplied_unverified";
+      source: "user_authoritative" | "user_supplied_unverified";
     }>
   ): Promise<TopicEvidenceRequestRecord[]> {
     const results: TopicEvidenceRequestRecord[] = [];
     const now = nowIso();
 
     for (const answer of answers) {
+      // Map source to verification type - user_authoritative is already in correct format
+      const verification: TopicEvidenceVerification = answer.source === "user_authoritative"
+        ? "user_authoritative"
+        : "user_supplied_unverified";
+
       const request: TopicEvidenceRequestRecord = {
         id: newId("tdevreq"),
         namespaceId,
         sessionId,
         round: 0,
         question: answer.questionKey,
-        verification: answer.source,
+        verification,
         status: "answered",
         metadata: { answer: answer.answer },
         version: 1,

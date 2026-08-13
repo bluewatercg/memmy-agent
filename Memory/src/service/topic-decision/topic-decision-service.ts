@@ -39,7 +39,7 @@ export class TopicDecisionService {
       if (this.options.createLlmClient) {
         return this.options.createLlmClient(model);
       }
-      const config = this.options.llmConfigs?.[model] || { provider: "openai", model };
+      const config = this.options.llmConfigs?.[model] || { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
       return createLlmClient(config);
     };
 
@@ -151,7 +151,7 @@ export class TopicDecisionService {
       throw new Error(`no snapshot found for session: ${sessionId}`);
     }
 
-    const snapshot = snapshots[snapshots.length - 1];
+    const snapshot = snapshots[snapshots.length - 1]!;
     return this.decisionabilityService.checkDecisionability(namespaceId, sessionId, snapshot);
   }
 
@@ -183,7 +183,7 @@ export class TopicDecisionService {
     const mappedAnswers = answers.map(a => ({
       questionKey: a.questionKey,
       answer: a.answer,
-      source: a.source === "user_preference" ? "user_authoritative" : "user_supplied_unverified"
+      source: (a.source === "user_preference" ? "user_authoritative" : "user_supplied_unverified") as "user_authoritative" | "user_supplied_unverified"
     }));
 
     await this.evidenceAcquisitionService.submitAnswers(namespaceId, sessionId, expectedVersion, mappedAnswers);
@@ -192,7 +192,7 @@ export class TopicDecisionService {
     const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
     if (snapshots.length > 0) {
       // Mark old positions as historical
-      const oldSnapshot = snapshots[snapshots.length - 1];
+      const oldSnapshot = snapshots[snapshots.length - 1]!;
       const positions = this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, oldSnapshot.id);
       // Positions remain accessible but are now from previous snapshot
 

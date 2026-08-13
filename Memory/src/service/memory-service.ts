@@ -175,7 +175,7 @@ import { WorkerRunner } from "./worker/worker-runner.js";
 import { ProjectTopicInboxService } from "./topic-inbox/project-topic-inbox.js";
 import type { TopicCandidateDecision, TopicInboxQuery } from "./topic-inbox/topic-inbox-types.js";
 import { TopicDecisionService } from "./topic-decision/topic-decision-service.js";
-import type { TopicDecisionStartInput, TopicDecisionStartResult } from "./topic-decision/decision-types.js";
+import type { TopicDecisionStartInput, TopicDecisionStartResult, TopicDecisionDetail } from "./topic-decision/decision-types.js";
 import type { TopicAgentSpec } from "../types.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
@@ -369,10 +369,18 @@ export class MemoryService {
       upsertMemory: (memory) => this.evolutionJobs.upsertEvolutionMemory(memory),
       enqueueJob: this.workerHandlers.enqueueJob
     });
+    // Create LLM client factory for topic decisions
+    const createTopicDecisionLlm = (model: string) => {
+      // Use default config with model, requiring API key to be configured
+      const config = { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
+      return createLlmClient(config);
+    };
+
     this.topicDecisions = new TopicDecisionService({
       repos: this.repos,
       enabled: this.config.algorithm.topicDecisions.enabled,
-      models: this.config.algorithm.topicDecisions.models
+      models: this.config.algorithm.topicDecisions.models,
+      createLlmClient: createTopicDecisionLlm
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -1875,6 +1883,31 @@ export class MemoryService {
 
   startTopicDecisionSession(input: TopicDecisionStartInput): TopicDecisionStartResult {
     return this.topicDecisions.start(input);
+  }
+
+  readTopicDecisionSession(namespace: RuntimeNamespace, sessionId: string): TopicDecisionDetail {
+    return this.topicDecisions.read(namespace, sessionId);
+  }
+
+  async runIndependentPositions(namespace: RuntimeNamespace, sessionId: string): Promise<void> {
+    return this.topicDecisions.runIndependentPositions(namespace, sessionId);
+  }
+
+  async checkDecisionability(namespace: RuntimeNamespace, sessionId: string) {
+    return this.topicDecisions.checkDecisionability(namespace, sessionId);
+  }
+
+  async submitEvidenceAnswers(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number,
+    answers: Array<{ questionKey: string; answer: string; source: "user_preference" | "user_supplied_unverified" }>
+  ): Promise<TopicDecisionDetail> {
+    return this.topicDecisions.submitEvidenceAnswers(namespace, sessionId, expectedVersion, answers);
+  }
+
+  getEvidenceSource() {
+    return this.topicDecisions.getEvidenceSource();
   }
 
   private assertProjectContextScope(namespace: RuntimeNamespace): void {
