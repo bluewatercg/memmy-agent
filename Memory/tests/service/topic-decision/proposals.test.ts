@@ -396,6 +396,56 @@ describe("proposal synthesis — constraints", () => {
     await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
   });
 
+  it("rejects malformed nested proposal with actionable domain error", async () => {
+    const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    await repos.topicDecisions.insertPosition({
+      id: "pos-1",
+      namespaceId,
+      sessionId,
+      snapshotId: result.snapshot.id,
+      round: 0,
+      agentId: "agent-evidence_analyst",
+      stance: "support",
+      rationale: "evidence supports",
+      evidenceIds: ["ev-1"],
+      createdAt: nowIso()
+    });
+
+    // LLM returns proposal with malformed nested fields
+    createLlmClientSpy.mockImplementation((_model: string) => ({
+      config: { provider: "openai_compatible" as const, model: _model, enableThinking: false, temperature: 0, timeoutMs: 30000, maxRetries: 0, malformedRetries: 0 },
+      isConfigured: () => true,
+      status: () => ({ configured: true, lastCheck: nowIso() }),
+      complete: async () => "{}",
+      completeJson: async () => ({
+        proposals: [
+          {
+            title: "Malformed proposal",
+            benefit: "Some benefit",
+            risk: "Some risk",
+            dependencies: "not-an-array",  // Should be array
+            reversible: true,
+            verificationPlan: "Check",
+            evidenceIds: ["ev-1"],
+            effectClass: "analyze",
+            permission: "read",
+            artifact: "report",
+            acceptanceCondition: "Works",
+            recoveryPoint: "before",
+            agentContributions: ["agent-evidence_analyst"]
+          }
+        ]
+      })
+    }));
+
+    // Should reject with actionable domain error before business validation
+    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow(/dependencies/i);
+  });
+
   it("majority-wrong scenario: risk_challenger identifies unsupported assumption — majority cannot override", async () => {
     const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
     const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };

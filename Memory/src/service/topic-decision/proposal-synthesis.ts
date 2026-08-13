@@ -65,6 +65,7 @@ export class ProposalSynthesis {
     const snapshot = snapshots[snapshots.length - 1]!;
     const positions = this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, snapshot.id);
     const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
+    const roster = snapshot.payload.roster;
 
     // Check for blocking gaps
     const blockingGaps = this.detectBlockingGaps(positions);
@@ -94,22 +95,20 @@ export class ProposalSynthesis {
     };
 
     const response = await llm.completeJson(messages, llmOptions);
-    const rawProposals = (response as { proposals?: unknown[] }).proposals;
 
-    if (!Array.isArray(rawProposals)) {
-      throw new Error("synthesis response must contain proposals array");
-    }
+    // Strict schema validation before business logic
+    const parsed = parseSynthesisResponse(response);
 
-    // Validate proposals
-    const validatedProposals = this.validateProposals(rawProposals, validEvidenceIds, unresolvedConflicts);
+    // Validate proposals (business rules)
+    const validatedProposals = this.validateProposals(parsed.proposals, validEvidenceIds, unresolvedConflicts);
 
-    // Check majority-wrong scenario
-    const majorityWrong = this.detectMajorityWrong(positions);
+    // Check majority-wrong scenario using structured assumptions and roster role lookup
+    const majorityWrong = this.detectMajorityWrong(positions, roster, rounds);
     if (majorityWrong && validatedProposals.length > 0) {
       // Proposals must explicitly depend on resolving the assumption
       const allAddressAssumption = validatedProposals.every(p => {
         const deps = p.dependencies;
-        return deps.some(d => d.toLowerCase().includes("assumption"));
+        return deps.some(d => d.toLowerCase().includes("assumption") || d.toLowerCase().includes("resolve"));
       });
       if (!allAddressAssumption) {
         throw new Error("majority-wrong scenario: proposals must explicitly depend on resolving the unsupported assumption identified by risk_challenger");
@@ -189,7 +188,7 @@ export class ProposalSynthesis {
   }
 
   private validateProposals(
-    rawProposals: unknown[],
+    rawProposals: Array<Record<string, unknown>>,
     validEvidenceIds: Set<string>,
     unresolvedConflicts: TopicConflict[]
   ): SynthesizedProposal[] {
@@ -201,70 +200,31 @@ export class ProposalSynthesis {
     const validated: SynthesizedProposal[] = [];
     let recommendedCount = 0;
 
-    for (const raw of rawProposals) {
-      if (!raw || typeof raw !== "object") {
-        throw new Error("proposal must be an object");
-      }
-
-      const p = raw as Record<string, unknown>;
-
-      // Validate required fields
-      const title = p.title;
-      if (typeof title !== "string" || !title) throw new Error("proposal.title required");
-
-      const benefit = p.benefit;
-      if (typeof benefit !== "string" || !benefit) throw new Error("proposal.benefit required");
-
-      const risk = p.risk;
-      if (typeof risk !== "string" || !risk) throw new Error("proposal.risk required");
-
-      const dependencies = p.dependencies;
-      if (!Array.isArray(dependencies)) throw new Error("proposal.dependencies must be array");
-
-      const reversible = p.reversible;
-      if (typeof reversible !== "boolean") throw new Error("proposal.reversible must be boolean");
-
-      const verificationPlan = p.verificationPlan;
-      if (typeof verificationPlan !== "string" || !verificationPlan) throw new Error("proposal.verificationPlan required");
-
-      // Validate action contract
-      const effectClass = p.effectClass;
-      if (typeof effectClass !== "string" || !VALID_EFFECTS.has(effectClass as TopicActionEffect)) {
-        throw new Error(`proposal.effectClass invalid: ${effectClass}`);
-      }
-
-      const permission = p.permission;
-      if (typeof permission !== "string" || !permission) throw new Error("proposal.permission required");
-
-      const artifact = p.artifact;
-      if (typeof artifact !== "string" || !artifact) throw new Error("proposal.artifact required");
-
-      const acceptanceCondition = p.acceptanceCondition;
-      if (typeof acceptanceCondition !== "string" || !acceptanceCondition) {
-        throw new Error("proposal.acceptanceCondition required");
-      }
-
-      const recoveryPoint = p.recoveryPoint;
-      if (typeof recoveryPoint !== "string" || !recoveryPoint) {
-        throw new Error("proposal.recoveryPoint required");
-      }
+    for (const p of rawProposals) {
+      // All fields already validated by parseSynthesisResponse
+      const title = p.title as string;
+      const benefit = p.benefit as string;
+      const risk = p.risk as string;
+      const dependencies = p.dependencies as string[];
+      const reversible = p.reversible as boolean;
+      const verificationPlan = p.verificationPlan as string;
+      const evidenceIds = p.evidenceIds as string[];
+      const effectClass = p.effectClass as TopicActionEffect;
+      const permission = p.permission as string;
+      const artifact = p.artifact as string;
+      const acceptanceCondition = p.acceptanceCondition as string;
+      const recoveryPoint = p.recoveryPoint as string;
+      const agentContributions = p.agentContributions as string[];
+      const recommended = p.recommended as boolean | undefined;
 
       // Validate evidence citations
-      const evidenceIds = p.evidenceIds;
-      if (!Array.isArray(evidenceIds)) throw new Error("proposal.evidenceIds must be array");
-
       for (const evId of evidenceIds) {
-        if (typeof evId !== "string" || !validEvidenceIds.has(evId)) {
+        if (!validEvidenceIds.has(evId)) {
           throw new Error(`unknown evidence citation: ${evId}`);
         }
       }
 
-      // Validate agent contributions
-      const agentContributions = p.agentContributions;
-      if (!Array.isArray(agentContributions)) throw new Error("proposal.agentContributions must be array");
-
       // Check recommended count
-      const recommended = p.recommended;
       if (recommended === true) {
         recommendedCount++;
         if (recommendedCount > 1) {
@@ -276,17 +236,17 @@ export class ProposalSynthesis {
         title,
         benefit,
         risk,
-        dependencies: dependencies as string[],
+        dependencies,
         reversible,
         rollbackPlan: p.rollbackPlan as string | undefined,
         verificationPlan,
-        evidenceIds: evidenceIds as string[],
-        effectClass: effectClass as TopicActionEffect,
+        evidenceIds,
+        effectClass,
         permission,
         artifact,
         acceptanceCondition,
         recoveryPoint,
-        agentContributions: agentContributions as string[],
+        agentContributions,
         recommended: recommended === true
       });
     }
@@ -315,25 +275,60 @@ export class ProposalSynthesis {
     return validated;
   }
 
-  private detectMajorityWrong(positions: TopicAgentPositionRecord[]): boolean {
+  private detectMajorityWrong(
+    positions: TopicAgentPositionRecord[],
+    roster: Array<{ id: string; role: string; model: string }>,
+    rounds: Array<{ metadata: Record<string, unknown> }>
+  ): boolean {
     // Check if 3+ agents share one assumption and risk_challenger opposes
     const supportPositions = positions.filter(p => p.stance === "support");
     const opposePositions = positions.filter(p => p.stance === "oppose");
 
     if (supportPositions.length >= 3 && opposePositions.length >= 1) {
-      // Check if risk_challenger is among opposers
-      const riskChallengerOpposes = opposePositions.some(p =>
-        p.agentId.includes("risk_challenger")
-      );
+      // Use roster role lookup instead of agentId substring
+      const riskChallengerOpposes = opposePositions.some(p => {
+        const agent = roster.find(a => a.id === p.agentId);
+        return agent?.role === "risk_challenger";
+      });
+
       if (riskChallengerOpposes) {
-        // Check if supporters share a common assumption
-        const supportRationales = supportPositions.map(p => p.rationale.toLowerCase());
-        const hasCommonAssumption = supportRationales.some(r => r.includes("assum"));
-        const challengerIdentifiesIt = opposePositions.some(p =>
-          p.agentId.includes("risk_challenger") &&
-          (p.rationale.toLowerCase().includes("assum") || p.rationale.toLowerCase().includes("unsupported"))
-        );
-        return hasCommonAssumption && challengerIdentifiesIt;
+        // Use structured assumptions from positions (fallback to LLM round deltas)
+        const supportAssumptions = supportPositions.flatMap(p => p.assumptions ?? []);
+        const challengerAssumptions = opposePositions
+          .filter(p => {
+            const agent = roster.find(a => a.id === p.agentId);
+            return agent?.role === "risk_challenger";
+          })
+          .flatMap(p => p.assumptions ?? []);
+
+        // If structured assumptions available, check for overlap
+        if (supportAssumptions.length > 0 && challengerAssumptions.length > 0) {
+          const supportSet = new Set(supportAssumptions.map(a => a.toLowerCase()));
+          const hasChallengedAssumption = challengerAssumptions.some(a => supportSet.has(a.toLowerCase()));
+          return hasChallengedAssumption;
+        }
+
+        // Fallback: check LLM round deltas for structured assumptions
+        for (const round of rounds) {
+          const llmResponses = (round.metadata.deltas as Record<string, unknown>)?.llmResponses as Array<{ agentId: string; response: { assumptions?: string[] } }> | undefined;
+          if (llmResponses) {
+            const supportAssumptionsFromLlm = llmResponses
+              .filter(r => supportPositions.some(p => p.agentId === r.agentId))
+              .flatMap(r => r.response.assumptions ?? []);
+            const challengerAssumptionsFromLlm = llmResponses
+              .filter(r => {
+                const agent = roster.find(a => a.id === r.agentId);
+                return agent?.role === "risk_challenger";
+              })
+              .flatMap(r => r.response.assumptions ?? []);
+
+            if (supportAssumptionsFromLlm.length > 0 && challengerAssumptionsFromLlm.length > 0) {
+              const supportSet = new Set(supportAssumptionsFromLlm.map(a => a.toLowerCase()));
+              const hasChallengedAssumption = challengerAssumptionsFromLlm.some(a => supportSet.has(a.toLowerCase()));
+              return hasChallengedAssumption;
+            }
+          }
+        }
       }
     }
 
@@ -374,4 +369,107 @@ export class ProposalSynthesis {
 
     return prompt;
   }
+}
+
+/**
+ * Strict parser/type guard for LLM synthesis responses.
+ * Validates the full nested schema before business validation.
+ * Malformed nested fields fail with actionable domain errors.
+ */
+function parseSynthesisResponse(raw: unknown): { proposals: Array<Record<string, unknown>> } {
+  if (!raw || typeof raw !== "object") {
+    throw new Error("synthesis response must be an object");
+  }
+
+  const r = raw as Record<string, unknown>;
+  const rawProposals = r.proposals;
+
+  if (!Array.isArray(rawProposals)) {
+    throw new Error("synthesis response must contain proposals array");
+  }
+
+  // Reject rank 4+ (max 3 proposals)
+  if (rawProposals.length > 3) {
+    throw new Error(`max 3 proposal allowed, got ${rawProposals.length}`);
+  }
+
+  const validated: Array<Record<string, unknown>> = [];
+
+  for (let i = 0; i < rawProposals.length; i++) {
+    const raw = rawProposals[i];
+    if (!raw || typeof raw !== "object") {
+      throw new Error(`proposal[${i}] must be an object`);
+    }
+
+    const p = raw as Record<string, unknown>;
+
+    // Validate all required fields with actionable errors
+    const title = p.title;
+    if (typeof title !== "string" || !title) throw new Error(`proposal[${i}].title must be non-empty string`);
+
+    const benefit = p.benefit;
+    if (typeof benefit !== "string" || !benefit) throw new Error(`proposal[${i}].benefit must be non-empty string`);
+
+    const risk = p.risk;
+    if (typeof risk !== "string" || !risk) throw new Error(`proposal[${i}].risk must be non-empty string`);
+
+    const dependencies = p.dependencies;
+    if (!Array.isArray(dependencies)) throw new Error(`proposal[${i}].dependencies must be array`);
+    for (const dep of dependencies) {
+      if (typeof dep !== "string") throw new Error(`proposal[${i}].dependencies items must be strings`);
+    }
+
+    const reversible = p.reversible;
+    if (typeof reversible !== "boolean") throw new Error(`proposal[${i}].reversible must be boolean`);
+
+    const rollbackPlan = p.rollbackPlan;
+    if (rollbackPlan !== undefined && typeof rollbackPlan !== "string") {
+      throw new Error(`proposal[${i}].rollbackPlan must be string if present`);
+    }
+
+    const verificationPlan = p.verificationPlan;
+    if (typeof verificationPlan !== "string" || !verificationPlan) throw new Error(`proposal[${i}].verificationPlan must be non-empty string`);
+
+    const evidenceIds = p.evidenceIds;
+    if (!Array.isArray(evidenceIds)) throw new Error(`proposal[${i}].evidenceIds must be array`);
+    for (const evId of evidenceIds) {
+      if (typeof evId !== "string") throw new Error(`proposal[${i}].evidenceIds items must be strings`);
+    }
+
+    const effectClass = p.effectClass;
+    if (typeof effectClass !== "string" || !VALID_EFFECTS.has(effectClass as TopicActionEffect)) {
+      throw new Error(`proposal[${i}].effectClass invalid: ${JSON.stringify(effectClass)}`);
+    }
+
+    const permission = p.permission;
+    if (typeof permission !== "string" || !permission) throw new Error(`proposal[${i}].permission must be non-empty string`);
+
+    const artifact = p.artifact;
+    if (typeof artifact !== "string" || !artifact) throw new Error(`proposal[${i}].artifact must be non-empty string`);
+
+    const acceptanceCondition = p.acceptanceCondition;
+    if (typeof acceptanceCondition !== "string" || !acceptanceCondition) {
+      throw new Error(`proposal[${i}].acceptanceCondition must be non-empty string`);
+    }
+
+    const recoveryPoint = p.recoveryPoint;
+    if (typeof recoveryPoint !== "string" || !recoveryPoint) {
+      throw new Error(`proposal[${i}].recoveryPoint must be non-empty string`);
+    }
+
+    const agentContributions = p.agentContributions;
+    if (!Array.isArray(agentContributions)) throw new Error(`proposal[${i}].agentContributions must be array`);
+    for (const ac of agentContributions) {
+      if (typeof ac !== "string") throw new Error(`proposal[${i}].agentContributions items must be strings`);
+    }
+
+    const recommended = p.recommended;
+    if (recommended !== undefined && typeof recommended !== "boolean") {
+      throw new Error(`proposal[${i}].recommended must be boolean if present`);
+    }
+
+    validated.push(p);
+  }
+
+  return { proposals: validated };
 }

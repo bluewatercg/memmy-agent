@@ -189,6 +189,8 @@ export interface TopicAgentPositionRecord {
   stance: string;
   rationale: string;
   evidenceIds: string[];
+  risks?: Array<{ severity: "low" | "medium" | "high"; description: string }>;
+  assumptions?: string[];
   createdAt: IsoTime;
 }
 

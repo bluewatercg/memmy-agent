@@ -4021,7 +4021,7 @@ function topicDecisionSnapshotFingerprint(r: TopicDecisionSnapshotRecord): strin
   return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, payload: r.payload, createdAt: r.createdAt });
 }
 function topicAgentPositionFingerprint(r: TopicAgentPositionRecord): string {
-  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, snapshotId: r.snapshotId, round: r.round, agentId: r.agentId, stance: r.stance, rationale: r.rationale, evidenceIds: r.evidenceIds, createdAt: r.createdAt });
+  return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, snapshotId: r.snapshotId, round: r.round, agentId: r.agentId, stance: r.stance, rationale: r.rationale, evidenceIds: r.evidenceIds, risks: r.risks, assumptions: r.assumptions, createdAt: r.createdAt });
 }
 function topicActionProposalFingerprint(r: TopicActionProposalRecord): string {
   return stableHash({ namespaceId: r.namespaceId, sessionId: r.sessionId, round: r.round, rank: r.rank, effect: r.effect, title: r.title, payload: r.payload, status: r.status, version: r.version, metadata: r.metadata, createdAt: r.createdAt, updatedAt: r.updatedAt });
@@ -4096,8 +4096,8 @@ export class TopicDecisionRepository {
       throw new TopicDecisionIdempotencyConflictError(position.id, "position");
     }
     try {
-      this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), position.createdAt);
+      this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, risks_json, assumptions_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), toJson(position.risks ?? []), toJson(position.assumptions ?? []), position.createdAt);
     } catch (err) {
       if (err instanceof Error && /UNIQUE constraint failed: project_topic_agent_positions\.session_id, project_topic_agent_positions\.snapshot_id, project_topic_agent_positions\.round, project_topic_agent_positions\.agent_id/i.test(err.message)) {
         throw new TopicDecisionImmutablePositionError(position.sessionId, position.snapshotId, position.round, position.agentId);
@@ -4204,7 +4204,7 @@ export class TopicDecisionRepository {
 
 interface TopicDecisionSessionSqlRow { id: string; namespace_id: string; topic_id: string; input_hash: string; state: string; version: number; metadata_json: string; created_at: string; updated_at: string }
 interface TopicDecisionSnapshotSqlRow { id: string; namespace_id: string; session_id: string; round: number; payload_json: string; created_at: string }
-interface TopicAgentPositionSqlRow { id: string; namespace_id: string; session_id: string; snapshot_id: string; round: number; agent_id: string; stance: string; rationale: string; evidence_ids_json: string; created_at: string }
+interface TopicAgentPositionSqlRow { id: string; namespace_id: string; session_id: string; snapshot_id: string; round: number; agent_id: string; stance: string; rationale: string; evidence_ids_json: string; risks_json: string; assumptions_json: string; created_at: string }
 interface TopicDebateRoundSqlRow { id: string; namespace_id: string; session_id: string; round: number; status: string; summary: string; metadata_json: string; version: number; created_at: string; updated_at: string }
 interface TopicEvidenceRequestSqlRow { id: string; namespace_id: string; session_id: string; round: number; question: string; verification: TopicEvidenceRequestRecord["verification"]; status: string; metadata_json: string; version: number; created_at: string; updated_at: string }
 interface TopicActionProposalSqlRow { id: string; namespace_id: string; session_id: string; round: number; rank: number; effect: TopicActionProposalRecord["effect"]; title: string; payload_json: string; status: string; version: number; metadata_json: string; created_at: string; updated_at: string }
@@ -4212,7 +4212,7 @@ interface TopicExecutionRunSqlRow { id: string; namespace_id: string; session_id
 
 function topicDecisionSessionFromSql(row: TopicDecisionSessionSqlRow): TopicDecisionSessionRecord { return { id: row.id, namespaceId: row.namespace_id, topicId: row.topic_id, inputHash: row.input_hash, state: row.state as TopicDecisionSessionRecord["state"], version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicDecisionSnapshotFromSql(row: TopicDecisionSnapshotSqlRow): TopicDecisionSnapshotRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, payload: parseJson(row.payload_json, {}) as TopicDecisionSnapshotPayload, createdAt: row.created_at }; }
-function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), createdAt: row.created_at }; }
+function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), risks: parseJson(row.risks_json, []), assumptions: asStringArray(parseJson(row.assumptions_json, [])), createdAt: row.created_at }; }
 function topicDebateRoundFromSql(row: TopicDebateRoundSqlRow): TopicDebateRoundRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, status: row.status, summary: row.summary, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicEvidenceRequestFromSql(row: TopicEvidenceRequestSqlRow): TopicEvidenceRequestRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, question: row.question, verification: row.verification, status: row.status, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicActionProposalFromSql(row: TopicActionProposalSqlRow): TopicActionProposalRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, rank: row.rank, effect: row.effect, title: row.title, payload: parseJson(row.payload_json, {}), status: row.status, version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }

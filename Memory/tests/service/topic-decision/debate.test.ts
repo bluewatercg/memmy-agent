@@ -316,6 +316,111 @@ describe("debate orchestrator — round boundaries", () => {
     expect(["max_rounds", "resolved_after_round2"]).toContain(lastRound.metadata.stopReason as string);
   });
 
+  it("irrelevant empty-risk response cannot resolve a conflict", async () => {
+    const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    // Insert contradicting positions → high-severity conflict (structured risks)
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-evidence_analyst",
+      stance: "support",
+      rationale: "evidence shows X",
+      evidenceIds: ["ev-1"],
+      risks: [{ severity: "high" as const, description: "critical dependency" }]
+    });
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-risk_challenger",
+      stance: "oppose",
+      rationale: "evidence shows not-X",
+      evidenceIds: ["ev-1"],
+      risks: [{ severity: "high" as const, description: "critical failure mode" }]
+    });
+
+    // LLM returns responses with empty remainingRisks but does NOT name the conflict ID
+    createLlmClientSpy.mockImplementation((_model: string) => ({
+      config: { provider: "openai_compatible" as const, model: _model, enableThinking: false, temperature: 0, timeoutMs: 30000, maxRetries: 0, malformedRetries: 0 },
+      isConfigured: () => true,
+      status: () => ({ configured: true, lastCheck: nowIso() }),
+      complete: async () => "{}",
+      completeJson: async () => ({
+        judgment: "neutral",
+        confidence: 0.5,
+        resolvedConflicts: [],  // Does NOT explicitly resolve any conflict
+        remainingRisks: [],     // Empty — but should NOT auto-resolve conflicts
+        evidenceIds: ["ev-1"],
+        facts: [{ claim: "irrelevant", evidenceIds: ["ev-1"] }],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    await service.runDebate(namespace, sessionId);
+
+    const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
+    const lastRound = rounds[rounds.length - 1]!;
+    const conflicts = (lastRound.metadata.conflicts as Array<{ resolved: boolean; severity: string }>) || [];
+    // The conflict must NOT be resolved just because remainingRisks is empty
+    const highOrMediumConflicts = conflicts.filter(c => c.severity === "high" || c.severity === "medium");
+    for (const c of highOrMediumConflicts) {
+      expect(c.resolved).toBe(false);
+    }
+  });
+
+  it("rejects unknown conflict IDs in resolvedConflicts", async () => {
+    const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-evidence_analyst",
+      stance: "support",
+      rationale: "evidence shows X",
+      evidenceIds: ["ev-1"]
+    });
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-risk_challenger",
+      stance: "oppose",
+      rationale: "evidence shows not-X",
+      evidenceIds: ["ev-1"]
+    });
+
+    // LLM returns response with a bogus conflict ID — should be ignored
+    createLlmClientSpy.mockImplementation((_model: string) => ({
+      config: { provider: "openai_compatible" as const, model: _model, enableThinking: false, temperature: 0, timeoutMs: 30000, maxRetries: 0, malformedRetries: 0 },
+      isConfigured: () => true,
+      status: () => ({ configured: true, lastCheck: nowIso() }),
+      complete: async () => "{}",
+      completeJson: async () => ({
+        judgment: "neutral",
+        confidence: 0.5,
+        resolvedConflicts: ["nonexistent-conflict-id"],  // Unknown ID
+        remainingRisks: [],
+        evidenceIds: ["ev-1"],
+        facts: [{ claim: "irrelevant", evidenceIds: ["ev-1"] }],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+
+    await service.runDebate(namespace, sessionId);
+
+    const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
+    const lastRound = rounds[rounds.length - 1]!;
+    const conflicts = (lastRound.metadata.conflicts as Array<{ resolved: boolean }>) || [];
+    // No real conflict should be resolved by an unknown ID
+    const resolvedConflicts = conflicts.filter(c => c.resolved);
+    expect(resolvedConflicts.length).toBe(0);
+  });
+
   it("every round persists compact summary and deltas", async () => {
     const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
     const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
@@ -376,7 +481,7 @@ async function insertPosition(
   namespaceId: string,
   sessionId: string,
   snapshotId: string,
-  data: { agentId: string; stance: string; rationale: string; evidenceIds: string[] }
+  data: { agentId: string; stance: string; rationale: string; evidenceIds: string[]; risks?: Array<{ severity: "low" | "medium" | "high"; description: string }>; assumptions?: string[] }
 ): Promise<TopicAgentPositionRecord> {
   return repos.topicDecisions.insertPosition({
     id: newId("tdpos"),
@@ -388,6 +493,8 @@ async function insertPosition(
     stance: data.stance,
     rationale: data.rationale,
     evidenceIds: data.evidenceIds,
+    risks: data.risks,
+    assumptions: data.assumptions,
     createdAt: nowIso()
   });
 }
