@@ -1,0 +1,378 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import YAML from "yaml";
+import { MemoryDb, MemoryService, Repositories } from "../../../src/index.js";
+import { loadMemmyConfig } from "../../../src/config/index.js";
+import type { RuntimeNamespace, TopicActionEffect, TopicActionProposalRecord } from "../../../src/types.js";
+import { nowIso } from "../../../src/utils/time.js";
+import { stableHash } from "../../../src/utils/id.js";
+import { namespaceIdFromContext } from "../../../src/service/namespace/namespace-scope.js";
+import type { TopicActionHandler, TopicProposalAction, TopicExecutionContext, TopicActionOutcome } from "../../../src/service/topic-decision/proposal-executor.js";
+
+const roots: string[] = [];
+
+beforeEach(() => {
+  process.env.MEMMY_TOPIC_DECISIONS_ENABLED = "true";
+  process.env.MEMMY_TOPIC_DECISION_MODELS = "MiniMax-M2.5";
+});
+
+afterEach(() => {
+  for (const root of roots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+  vi.restoreAllMocks();
+});
+
+interface Setup {
+  service: MemoryService;
+  repos: Repositories;
+  namespaceId: string;
+  namespace: RuntimeNamespace;
+}
+
+function tempRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), "execution-test-"));
+  roots.push(root);
+  return root;
+}
+
+async function setup(): Promise<Setup> {
+  const root = tempRoot();
+  const configPath = join(root, "config.yaml");
+  const dbPath = join(root, "memory.sqlite");
+  writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+  const { config } = loadMemmyConfig(configPath);
+  const db = new MemoryDb({ path: dbPath });
+  const repos = new Repositories(db.db);
+  const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1", projectId: "proj-1" };
+  const namespaceId = stableHash(namespace);
+  repos.topics.insertTopic({
+    id: "topic-1",
+    namespaceId,
+    title: "Test Topic",
+    summary: "Test",
+    status: "active",
+    version: 1,
+    sourceMemoryIds: [],
+    metadata: {},
+    createdAt: nowIso(),
+    updatedAt: nowIso()
+  });
+  const service = new MemoryService({ db, config, configPath, mode: "dev" });
+  return { service, repos, namespaceId, namespace };
+}
+
+function setupSync(): { repos: Repositories; namespaceId: string } {
+  const root = tempRoot();
+  const dbPath = join(root, "memory.sqlite");
+  const db = new MemoryDb({ path: dbPath });
+  const repos = new Repositories(db.db);
+  const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+  const namespaceId = stableHash(namespace);
+  return { repos, namespaceId };
+}
+
+function insertProposal(
+  repos: Repositories,
+  namespaceId: string,
+  sessionId: string,
+  overrides: Partial<TopicActionProposalRecord> & { effect: TopicActionEffect }
+): TopicActionProposalRecord {
+  const now = nowIso();
+  return repos.topicDecisions.insertProposal({
+    id: overrides.id ?? `tdprop-${Math.random().toString(36).slice(2, 8)}`,
+    namespaceId,
+    sessionId,
+    round: overrides.round ?? 0,
+    rank: overrides.rank ?? 1,
+    effect: overrides.effect,
+    title: overrides.title ?? "Test proposal",
+    payload: overrides.payload ?? {
+      dependencies: [],
+      actions: [
+        {
+          id: "action-1",
+          effect: overrides.effect,
+          target: "test-target",
+          input: {},
+          dependsOn: [],
+          recoveryPoint: overrides.effect === "draft" || overrides.effect === "create_candidate_task" ? "pre-execution" : "pre",
+          acceptanceCondition: "done"
+        }
+      ]
+    },
+    status: overrides.status ?? "draft",
+    version: overrides.version ?? 1,
+    metadata: overrides.metadata ?? {
+      recommended: true,
+      acceptanceCondition: "done",
+      recoveryPoint: "pre-execution",
+      artifact: "test-artifact",
+      permission: "test"
+    },
+    createdAt: overrides.createdAt ?? now,
+    updatedAt: overrides.updatedAt ?? now
+  });
+}
+
+describe("approveProposal", () => {
+  it("rejects when session not found", async () => {
+    const { service, namespace } = await setup();
+    await expect(
+      service.approveProposal(namespace, "nonexistent-session", "prop-1", 1, { userId: "user-1" })
+    ).rejects.toThrow(/not found/i);
+  });
+
+  it("rejects when proposal not found", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    await expect(
+      service.approveProposal(namespace, session.session.id, "nonexistent-proposal", 1, { userId: "user-1" })
+    ).rejects.toThrow(/not found/i);
+  });
+
+  it("rejects stale proposal version", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft",
+      version: 2
+    });
+    await expect(
+      service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" })
+    ).rejects.toThrow(/version/i);
+  });
+
+  it("rejects non-recommended proposal", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft",
+      metadata: { recommended: false, acceptanceCondition: "done", recoveryPoint: "pre", artifact: "a", permission: "p" }
+    });
+    await expect(
+      service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" })
+    ).rejects.toThrow(/recommended/i);
+  });
+
+  it("rejects unknown effect at proposal insert (SQLite CHECK constraint)", () => {
+    const { repos, namespaceId } = setupSync();
+    expect(() =>
+      insertProposal(repos, namespaceId, "session-1", {
+        id: "tdprop-1",
+        effect: "unknown_effect" as TopicActionEffect
+      })
+    ).toThrow();
+  });
+
+  it("executes automatic draft action and completes run", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(run.status).toBe("completed");
+    const result = run.result as any;
+    expect(result.actions).toHaveLength(1);
+    expect(result.actions[0].status).toBe("succeeded");
+  });
+
+  it("pauses at confirmation-required action with awaiting_confirmation", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "authoritative_write"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(run.status).toBe("awaiting_confirmation");
+    expect(run.result.pendingAction).toBeDefined();
+  });
+
+  it("executes automatic create_candidate_task action", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "create_candidate_task",
+      payload: {
+        dependencies: [],
+        actions: [
+          {
+            id: "action-1",
+            effect: "create_candidate_task",
+            target: "work-item",
+            input: {
+              title: "Test task",
+              summary: "Test summary",
+              nextStep: "Do something"
+            },
+            dependsOn: [],
+            recoveryPoint: "pre-execution",
+            acceptanceCondition: "work item created"
+          }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(run.status).toBe("completed");
+    const projectNamespaceId = namespaceIdFromContext(namespace);
+    const workItems = repos.projectContext.listWorkItems(projectNamespaceId);
+    expect(workItems).toHaveLength(1);
+    expect(workItems[0]!.status).toBe("pending");
+    expect(workItems[0]!.focused).toBe(false);
+    expect(workItems[0]!.provenance.topicProposalId).toBe(proposal.id);
+    expect(workItems[0]!.provenance.topicSessionId).toBe(session.session.id);
+  });
+});
+
+describe("confirmExecutionAction", () => {
+  it("rejects confirmation for different namespace", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "authoritative_write"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const otherNamespace: RuntimeNamespace = { source: "test", profileId: "other-profile", userId: "user-2" };
+    await expect(
+      service.confirmExecutionAction(otherNamespace, run.id, "action-1", 1, true, { userId: "user-2" })
+    ).rejects.toThrow(/namespace|not found/i);
+  });
+
+  it("rejects confirmation for different action", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "authoritative_write"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    await expect(
+      service.confirmExecutionAction(namespace, run.id, "wrong-action-id", run.version, true, { userId: "user-1" })
+    ).rejects.toThrow(/action not pending confirmation/i);
+  });
+
+  it("rejects stale run version", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "authoritative_write"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    await expect(
+      service.confirmExecutionAction(namespace, run.id, "action-1", 0, true, { userId: "user-1" })
+    ).rejects.toThrow(/version/i);
+  });
+
+  it("cancels run on rejection", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "authoritative_write"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const updated = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, false, { userId: "user-1" });
+    expect(updated.status).toBe("cancelled");
+  });
+});
+
+describe("execution idempotency and dependency order", () => {
+  it("does not repeat successful actions on resume", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executeSpy = vi.fn().mockResolvedValue({ status: "succeeded", output: { data: "test" } } satisfies TopicActionOutcome);
+    const handler: TopicActionHandler = {
+      effect: "draft",
+      execute: executeSpy
+    };
+    service.registerActionHandler(handler);
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft"
+    });
+    const run1 = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    const run2 = await service.resumeExecution(namespace, run1.id);
+    expect(executeSpy).toHaveBeenCalledTimes(1);
+    expect(run2.status).toBe("completed");
+  });
+
+  it("executes actions in dependency order", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const executionOrder: string[] = [];
+    const handler: TopicActionHandler = {
+      effect: "draft",
+      execute: async (action: TopicProposalAction) => {
+        executionOrder.push(action.id);
+        return { status: "succeeded", output: {} };
+      }
+    };
+    service.registerActionHandler(handler);
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft",
+      payload: {
+        dependencies: [],
+        actions: [
+          { id: "action-b", effect: "draft", target: "t", input: {}, dependsOn: ["action-a"], recoveryPoint: "pre", acceptanceCondition: "done" },
+          { id: "action-a", effect: "draft", target: "t", input: {}, dependsOn: [], recoveryPoint: "pre", acceptanceCondition: "done" },
+          { id: "action-c", effect: "draft", target: "t", input: {}, dependsOn: ["action-b"], recoveryPoint: "pre", acceptanceCondition: "done" }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(executionOrder).toEqual(["action-a", "action-b", "action-c"]);
+    expect(run.status).toBe("completed");
+  });
+
+  it("fails run on action failure without claiming success", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const handler: TopicActionHandler = {
+      effect: "draft",
+      execute: async () => ({ status: "failed", error: "handler error" })
+    };
+    service.registerActionHandler(handler);
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft"
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    expect(run.status).toBe("failed");
+    const result = run.result as any;
+    expect(result.actions[0].status).toBe("failed");
+  });
+
+  it("stops pending actions when snapshot is stale", async () => {
+    const { service, repos, namespaceId, namespace } = await setup();
+    const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, session.session.id, {
+      id: "tdprop-1",
+      effect: "draft",
+      payload: {
+        dependencies: [],
+        actions: [
+          { id: "action-a", effect: "draft", target: "t", input: {}, dependsOn: [], recoveryPoint: "pre", acceptanceCondition: "done" },
+          { id: "action-b", effect: "draft", target: "t", input: {}, dependsOn: ["action-a"], recoveryPoint: "pre", acceptanceCondition: "done" }
+        ]
+      }
+    });
+    const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
+    // Mark session as stale
+    const currentSession = repos.topicDecisions.getSession(namespaceId, session.session.id)!;
+    repos.topicDecisions.updateSession({ ...currentSession, state: "stale", version: currentSession.version + 1, updatedAt: nowIso() }, currentSession.version);
+    const resumed = await service.resumeExecution(namespace, run.id);
+    expect(resumed.status).toBe("failed");
+    expect(resumed.result.error).toMatch(/stale/i);
+  });
+});

@@ -4200,6 +4200,12 @@ export class TopicDecisionRepository {
     return next;
   }
 
+  getRun(namespaceId: string, runId: string): TopicExecutionRunRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_execution_runs WHERE id = ? AND namespace_id = ?`)
+      .get(runId, namespaceId) as TopicExecutionRunSqlRow | undefined;
+    return row ? topicExecutionRunFromSql(row) : undefined;
+  }
+
 }
 
 interface TopicDecisionSessionSqlRow { id: string; namespace_id: string; topic_id: string; input_hash: string; state: string; version: number; metadata_json: string; created_at: string; updated_at: string }

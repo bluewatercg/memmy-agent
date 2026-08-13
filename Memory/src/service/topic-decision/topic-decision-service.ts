@@ -1,5 +1,5 @@
 import type { Repositories } from "../../storage/repositories.js";
-import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSnapshotPayload } from "../../types.js";
+import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSnapshotPayload, TopicExecutionRunRecord } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { recommendAgents } from "./agent-roster.js";
@@ -10,9 +10,12 @@ import { EvidenceAcquisitionService } from "./evidence-acquisition.js";
 import { DecisionabilityService } from "./decisionability.js";
 import { DebateOrchestrator } from "./debate-orchestrator.js";
 import { ProposalSynthesis } from "./proposal-synthesis.js";
+import { ProposalExecutor } from "./proposal-executor.js";
+import type { TopicActionHandler } from "./proposal-executor.js";
 import { createLlmClient } from "../../model/llm.js";
 import type { LlmConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
+import type { ProjectContextService } from "../project-context/project-context-service.js";
 
 export interface TopicDecisionServiceOptions {
   repos: Repositories;
@@ -20,6 +23,7 @@ export interface TopicDecisionServiceOptions {
   models: string[];
   llmConfigs?: Record<string, LlmConfig>;
   createLlmClient?: (model: string) => LlmClient;
+  projectContextService?: ProjectContextService;
 }
 
 export class TopicDecisionService {
@@ -29,6 +33,7 @@ export class TopicDecisionService {
   private readonly decisionabilityService: DecisionabilityService;
   private readonly debateOrchestrator: DebateOrchestrator;
   private readonly proposalSynthesis: ProposalSynthesis;
+  private readonly proposalExecutor: ProposalExecutor;
 
   constructor(private readonly options: TopicDecisionServiceOptions) {
     this.snapshotBuilder = new EvidenceSnapshotBuilder(options.repos);
@@ -61,6 +66,15 @@ export class TopicDecisionService {
     this.proposalSynthesis = new ProposalSynthesis({
       repos: options.repos,
       createLlmClient: createClient
+    });
+
+    if (!options.projectContextService) {
+      throw new Error("TopicDecisionService requires projectContextService");
+    }
+
+    this.proposalExecutor = new ProposalExecutor({
+      repos: options.repos,
+      projectContextService: options.projectContextService
     });
   }
 
@@ -434,6 +448,59 @@ export class TopicDecisionService {
 
     // Return updated session detail
     return this.read(namespace, sessionId);
+  }
+
+  /**
+   * Approve and execute a recommended proposal.
+   */
+  async approveProposal(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    proposalId: string,
+    expectedProposalVersion: number,
+    actor: Record<string, unknown>
+  ): Promise<TopicExecutionRunRecord> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    return this.proposalExecutor.approveProposal(namespace, sessionId, proposalId, expectedProposalVersion, actor);
+  }
+
+  /**
+   * Resume a paused or failed execution run.
+   */
+  async resumeExecution(namespace: RuntimeNamespace, runId: string): Promise<TopicExecutionRunRecord> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    return this.proposalExecutor.resumeExecution(namespace, runId);
+  }
+
+  /**
+   * Confirm or reject a pending confirmation-required action.
+   */
+  async confirmExecutionAction(
+    namespace: RuntimeNamespace,
+    runId: string,
+    actionId: string,
+    expectedRunVersion: number,
+    approved: boolean,
+    actor: Record<string, unknown>
+  ): Promise<TopicExecutionRunRecord> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    return this.proposalExecutor.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor);
+  }
+
+  /**
+   * Register a custom action handler for a specific effect.
+   */
+  registerActionHandler(handler: TopicActionHandler): void {
+    this.proposalExecutor.registerHandler(handler);
   }
 
   private createSnapshotRecord(

@@ -176,7 +176,7 @@ import { ProjectTopicInboxService } from "./topic-inbox/project-topic-inbox.js";
 import type { TopicCandidateDecision, TopicInboxQuery } from "./topic-inbox/topic-inbox-types.js";
 import { TopicDecisionService } from "./topic-decision/topic-decision-service.js";
 import type { TopicDecisionStartInput, TopicDecisionStartResult, TopicDecisionDetail } from "./topic-decision/decision-types.js";
-import type { TopicAgentSpec } from "../types.js";
+import type { TopicAgentSpec, TopicExecutionRunRecord } from "../types.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
 
@@ -377,11 +377,13 @@ export class MemoryService {
       return createLlmClient(config);
     });
 
+    this.projectContext = new ProjectContextService({ repositories: this.repos });
     this.topicDecisions = new TopicDecisionService({
       repos: this.repos,
       enabled: this.config.algorithm.topicDecisions.enabled,
       models: this.config.algorithm.topicDecisions.models,
-      createLlmClient: createTopicDecisionLlm
+      createLlmClient: createTopicDecisionLlm,
+      projectContextService: this.projectContext
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -563,7 +565,6 @@ export class MemoryService {
       namespaceIdFromContext,
       withTimeout
     });
-    this.projectContext = new ProjectContextService({ repositories: this.repos });
     const sessionTurnOwner = this;
     this.sessionTurns = new SessionTurnService({
       repos: this.repos,
@@ -1917,6 +1918,35 @@ export class MemoryService {
 
   async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
     return this.topicDecisions.synthesizeProposals(namespace, sessionId);
+  }
+
+  async approveProposal(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    proposalId: string,
+    expectedProposalVersion: number,
+    actor: Record<string, unknown>
+  ): Promise<TopicExecutionRunRecord> {
+    return this.topicDecisions.approveProposal(namespace, sessionId, proposalId, expectedProposalVersion, actor);
+  }
+
+  async resumeExecution(namespace: RuntimeNamespace, runId: string): Promise<TopicExecutionRunRecord> {
+    return this.topicDecisions.resumeExecution(namespace, runId);
+  }
+
+  async confirmExecutionAction(
+    namespace: RuntimeNamespace,
+    runId: string,
+    actionId: string,
+    expectedRunVersion: number,
+    approved: boolean,
+    actor: Record<string, unknown>
+  ): Promise<TopicExecutionRunRecord> {
+    return this.topicDecisions.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor);
+  }
+
+  registerActionHandler(handler: import("./topic-decision/proposal-executor.js").TopicActionHandler): void {
+    this.topicDecisions.registerActionHandler(handler);
   }
 
   private assertProjectContextScope(namespace: RuntimeNamespace): void {
