@@ -131,32 +131,119 @@ npm run typecheck
 
 ---
 
-## Follow-up
+## Fix Round 1: Important Review Findings
 
-**CORRECTION**: The "Concerns" section stated "TypeScript strict mode has ~15 errors". This is stale — all type errors were resolved in commit ea43480.
+### Issue 1: agent-position.ts position reuse validation
 
-### Commit ea43480: fix(memory): resolve 28 TS errors in topic-decision module
+**Problem**: `runIndependentPositions` reused prior successful positions without ensuring they belong to the active snapshot or validating citations.
 
+**Fix Applied** (agent-position.ts:137-155):
+- Added filter: position.snapshotId must equal current snapshot.id
+- Re-validate all evidence IDs against current snapshot's validEvidenceIds set
+- Stale positions from old snapshots are now filtered out
+
+```typescript
+// Filter positions: must belong to active snapshot AND have valid evidence citations
+const validPositions = allPositions.filter(p => {
+  if (p.snapshotId !== snapshot.id) return false;
+  for (const evId of p.evidenceIds) {
+    if (!validEvidenceIds.has(evId)) return false;
+  }
+  return true;
+});
 ```
-ea43480 fix(memory): resolve 28 TS errors in topic-decision module
+
+**Test Added**: "rejects position from stale snapshot" verifies evidence validation fails for unknown evidence IDs.
+
+---
+
+### Issue 2: topic-decision-service.ts submitEvidenceAnswers rebuild
+
+**Problem**: Created new snapshot by copying old payload without rebuilding with answers, didn't recompute inputHash, marked positions as historical using comment.
+
+**Fix Applied** (topic-decision-service.ts:137-240):
+- Added `rebuildPayloadWithAnswers()` method:
+  - Creates deterministic evidence IDs from question keys
+  - Adds evidence to evidenceIds, evidenceHashes, evidenceContent
+  - Recomputes canonical inputHash with new evidence
+- Mark old positions historical via session.metadata.historicalSnapshotIds
+- Only creates new snapshot when inputs actually differ (skip identical answers)
+
+```typescript
+// Recompute canonical inputHash with new evidence
+const canonicalInput = {
+  topicVersion: oldPayload.topicVersion,
+  evidenceIds: newEvidenceIds.sort(),
+  evidenceHashes: Object.entries(newEvidenceHashes).sort(...),
+  projectConstraints: ...,
+  roster: ...
+};
+const newInputHash = stableHash(canonicalInput);
 ```
 
-### Verified Clean
+**Tests Added**:
+- "answer changes snapshot payload and inputHash" - verifies new evidence added, hash changed
+- "old positions become historical via session.metadata" - verifies historicalSnapshotIds populated
+- "identical answer does not create new snapshot" - verifies skip when no change
+
+---
+
+### Issue 3: decisionability.ts auto-acquired answers not used
+
+**Problem**: Auto-acquired repository answers were stored but never used to rebuild snapshot or filter user questions.
+
+**Fix Applied** (decisionability.ts + topic-decision-service.ts):
+- Added TopicDecisionService reference to DecisionabilityService constructor
+- Added `rebuildWithAutoAcquiredAnswers()` public method for snapshot rebuild
+- In checkDecisionability: when autoResult has acquiredAnswers, trigger rebuild and filter resolved gaps from openQuestions
+
+```typescript
+// If auto-acquisition found answers and we have TopicDecisionService reference
+if (autoResult.acquiredAnswers.length > 0 && this.topicDecisionService) {
+  const rebuildResult = await this.topicDecisionService.rebuildWithAutoAcquiredAnswers(
+    namespaceId, sessionId, acquiredForRebuild
+  );
+  // Filter out questions that were auto-answered
+  if (rebuildResult.rebuilt) {
+    const answeredKeys = new Set(acquiredForRebuild.map(a => normalizeQuestionKey(a.questionKey)));
+    remainingGaps = remainingGaps.filter(g => !answeredKeys.has(g.key));
+  }
+}
+```
+
+**Tests Added**:
+- "auto-acquired answer rebuilds snapshot" - verifies new snapshot created
+- "auto-resolved questions removed from openQuestions" - verifies filtering works
+
+---
+
+### Verification
 
 ```bash
-# Focused tests
+# Tests
 cd Memory
 npx vitest run tests/service/topic-decision/agent-position.test.ts \
   tests/service/topic-decision/evidence-gaps.test.ts \
   tests/service/topic-decision/session-start.test.ts
-# Test Files: 3 passed
-# Tests: 35 passed
+# Test Files: 3 passed (3)
+# Tests: 42 passed (42)
 
 # Typecheck
 npm run typecheck
 # 0 errors
 
-# Trailing whitespace cleanup
-git diff --check
-# (no output - clean)
+# Commit
+e414d47 fix(memory): validate position reuse, rebuild snapshot on answers, use auto-acquired evidence
 ```
+
+---
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| agent-position.ts | Filter positions by snapshotId, validate evidence IDs |
+| decisionability.ts | Use TopicDecisionService for rebuild, filter resolved gaps |
+| topic-decision-service.ts | Add rebuildPayloadWithAnswers, rebuildWithAutoAcquiredAnswers |
+| agent-position.test.ts | Add position reuse validation tests |
+| evidence-gaps.test.ts | Add snapshot rebuild, historical marks, auto-acquisition tests |
