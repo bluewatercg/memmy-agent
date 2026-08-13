@@ -23,6 +23,89 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// Test for Fix #1: Stale snapshot position should NOT be reused
+describe("position reuse validation", () => {
+  it("rejects position from stale snapshot - FAILS BEFORE FIX", async () => {
+    const { service, repos, namespaceId } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+
+    // Create an OLD snapshot (round 0)
+    const oldSnapshot = repos.topicDecisions.insertSnapshot({
+      id: "old-snap",
+      namespaceId,
+      sessionId: result.session.id,
+      round: 0,
+      payload: { ...result.snapshot.payload, evidenceIds: ["ev-old"] },
+      createdAt: nowIso()
+    });
+
+    // Insert position from OLD snapshot (should NOT be reused for current)
+    await repos.topicDecisions.insertPosition({
+      id: "pos-stale",
+      namespaceId,
+      sessionId: result.session.id,
+      snapshotId: "old-snap", // Different from current snapshot
+      round: 0,
+      agentId: "agent-evidence_analyst",
+      stance: "support",
+      rationale: "from stale snapshot",
+      evidenceIds: ["ev-old"],
+      createdAt: nowIso()
+    });
+
+    // Get current active snapshot's valid evidence IDs
+    const currentValidEvidenceIds = new Set(result.snapshot.payload.evidenceIds);
+
+    // Import parseAgentPosition
+    const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
+
+    // Try to parse position citing evidence NOT in current snapshot
+    const stalePositionWithUnknownEvidence = {
+      judgment: "support" as const,
+      confidence: 0.8,
+      evidenceIds: ["ev-old"], // Not in current snapshot
+      facts: [],
+      assumptions: [],
+      missingInformation: [],
+      risks: [],
+      counterarguments: [],
+      suggestedActions: []
+    };
+
+    // This should REJECT because evidence not in current snapshot
+    const parseResult = parseAgentPosition(stalePositionWithUnknownEvidence, currentValidEvidenceIds);
+    expect(parseResult).toHaveProperty("code", "UNKNOWN_EVIDENCE_CITATION");
+  });
+
+  it("accepts position with valid evidence IDs from active snapshot - FAILS BEFORE FIX", async () => {
+    const { service, repos, namespaceId } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+
+    // Current snapshot has ev-1 in evidenceIds
+    const currentValidEvidenceIds = new Set(result.snapshot.payload.evidenceIds);
+
+    const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
+
+    // Position with evidence from current snapshot should PASS
+    const validPosition = {
+      judgment: "support" as const,
+      confidence: 0.8,
+      evidenceIds: ["ev-1"], // In current snapshot
+      facts: [],
+      assumptions: [],
+      missingInformation: [],
+      risks: [],
+      counterarguments: [],
+      suggestedActions: []
+    };
+
+    const parseResult = parseAgentPosition(validPosition, currentValidEvidenceIds);
+    expect(parseResult).not.toHaveProperty("code");
+  });
+});
+
 // Tests that verify the position parsing logic without needing actual LLM calls
 describe("parseAgentPosition", () => {
   it("parses valid position with all fields", async () => {

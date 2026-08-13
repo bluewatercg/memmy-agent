@@ -4,6 +4,9 @@ import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { EvidenceAcquisitionService } from "./evidence-acquisition.js";
 
+// Forward declaration for TopicDecisionService
+type TopicDecisionService = import("./topic-decision-service.js").TopicDecisionService;
+
 export interface OpenQuestion {
   question: string;
   whyNeeded: string;
@@ -47,12 +50,15 @@ function scoreDecisionImpact(impact: string): number {
 
 export class DecisionabilityService {
   private readonly options: { repos: Repositories };
+  private readonly topicDecisionService?: TopicDecisionService;
 
   constructor(
     options: { repos: Repositories },
-    private readonly evidenceAcquisition: EvidenceAcquisitionService
+    private readonly evidenceAcquisition: EvidenceAcquisitionService,
+    topicDecisionService?: TopicDecisionService
   ) {
     this.options = options;
+    this.topicDecisionService = topicDecisionService;
   }
 
   /**
@@ -149,23 +155,51 @@ export class DecisionabilityService {
       snapshot
     );
 
+    // If auto-acquisition found answers and we have a reference to TopicDecisionService,
+    // rebuild the snapshot through the same path and update status
+    let remainingGaps = topGaps;
+    if (autoResult.acquiredAnswers.length > 0 && this.topicDecisionService) {
+      // Convert acquired answers to question keys
+      const acquiredForRebuild = autoResult.acquiredAnswers
+        .filter(a => a.answer)
+        .map(a => ({
+          questionKey: a.source || "auto_acquired",
+          answer: a.answer!
+        }));
+
+      if (acquiredForRebuild.length > 0) {
+        const rebuildResult = await this.topicDecisionService.rebuildWithAutoAcquiredAnswers(
+          namespaceId,
+          sessionId,
+          acquiredForRebuild
+        );
+
+        // If snapshot was rebuilt, filter out questions that were auto-answered
+        if (rebuildResult.rebuilt) {
+          const answeredKeys = new Set(acquiredForRebuild.map(a => normalizeQuestionKey(a.questionKey)));
+          remainingGaps = remainingGaps.filter(g => !answeredKeys.has(g.key));
+        }
+      }
+    }
+
     // Determine final status - contradictions alone block decision
     let status: DecisionabilityResult["status"];
+    const finalBlockingGaps = remainingGaps.filter(g => g.blocking).map(g => g.key);
 
     if (hasContradictions) {
       status = "blocked_by_evidence";
-    } else if (autoResult.state === "ready") {
+    } else if (autoResult.state === "ready" && remainingGaps.length === 0) {
       status = "ready";
-    } else if (blockingGaps.length > 0) {
+    } else if (finalBlockingGaps.length > 0) {
       status = "blocked_by_evidence";
-    } else if (topGaps.length > 0) {
+    } else if (remainingGaps.length > 0) {
       status = "awaiting_user_input";
     } else {
       status = "ready";
     }
 
-    // Build open questions with required fields
-    const openQuestions: OpenQuestion[] = topGaps.map(gap => ({
+    // Build open questions with required fields - only unresolved gaps
+    const openQuestions: OpenQuestion[] = remainingGaps.map(gap => ({
       question: gap.question,
       whyNeeded: `Needed by ${gap.agentId} to form a position`,
       decisionImpact: gap.decisionImpact,
@@ -175,9 +209,9 @@ export class DecisionabilityService {
 
     return {
       status,
-      blockingGaps,
+      blockingGaps: finalBlockingGaps,
       openQuestions,
-      summary: this.buildSummary(status, positions.length, topGaps.length)
+      summary: this.buildSummary(status, positions.length, remainingGaps.length)
     };
   }
 

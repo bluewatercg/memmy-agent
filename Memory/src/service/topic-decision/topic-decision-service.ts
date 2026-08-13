@@ -1,5 +1,5 @@
 import type { Repositories } from "../../storage/repositories.js";
-import type { RuntimeNamespace, TopicAgentSpec } from "../../types.js";
+import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSnapshotPayload } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { recommendAgents } from "./agent-roster.js";
@@ -31,7 +31,8 @@ export class TopicDecisionService {
     this.evidenceAcquisitionService = new EvidenceAcquisitionService({ repos: options.repos });
     this.decisionabilityService = new DecisionabilityService(
       { repos: options.repos },
-      this.evidenceAcquisitionService
+      this.evidenceAcquisitionService,
+      this // Pass self-reference for snapshot rebuild capability
     );
 
     // Create LLM client factory - use provided or default
@@ -156,6 +157,140 @@ export class TopicDecisionService {
   }
 
   /**
+   * Rebuild snapshot with auto-acquired answers from repository.
+   * Public method for DecisionabilityService to use when auto-acquisition resolves gaps.
+   */
+  async rebuildWithAutoAcquiredAnswers(
+    namespaceId: string,
+    sessionId: string,
+    acquiredAnswers: Array<{ questionKey: string; answer: string }>
+  ): Promise<{ newSnapshotId: string; rebuilt: boolean }> {
+    const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const oldSnapshot = snapshots[snapshots.length - 1];
+
+    if (!oldSnapshot) {
+      return { newSnapshotId: "", rebuilt: false };
+    }
+
+    // Convert to same format as user answers
+    const answers = acquiredAnswers.map(a => ({
+      questionKey: a.questionKey,
+      answer: a.answer,
+      source: "user_supplied_unverified" as const
+    }));
+
+    // Rebuild payload
+    const newPayload = this.rebuildPayloadWithAnswers(oldSnapshot.payload, answers);
+
+    if (!newPayload || newPayload.inputHash === oldSnapshot.payload.inputHash) {
+      return { newSnapshotId: oldSnapshot.id, rebuilt: false };
+    }
+
+    // Update session input hash
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (session) {
+      const historicalSnapshots = (session.metadata?.historicalSnapshotIds as string[] || []);
+      const now = nowIso();
+      this.options.repos.topicDecisions.updateSession(
+        {
+          ...session,
+          inputHash: newPayload.inputHash,
+          state: "gathering_evidence",
+          version: session.version + 1,
+          metadata: {
+            ...session.metadata,
+            historicalSnapshotIds: [...historicalSnapshots, oldSnapshot.id]
+          },
+          updatedAt: now
+        },
+        session.version
+      );
+
+      // Create new snapshot
+      const newSnapshot = this.options.repos.topicDecisions.insertSnapshot({
+        id: newId("tdsnap"),
+        namespaceId,
+        sessionId: session.id,
+        round: oldSnapshot.round + 1,
+        payload: newPayload,
+        createdAt: now
+      });
+
+      return { newSnapshotId: newSnapshot.id, rebuilt: true };
+    }
+
+    return { newSnapshotId: oldSnapshot.id, rebuilt: false };
+  }
+
+  /**
+   * Rebuild snapshot payload incorporating user answers.
+   * Returns new payload if answers changed, null if equivalent.
+   */
+  private rebuildPayloadWithAnswers(
+    oldPayload: TopicDecisionSnapshotPayload,
+    answers: Array<{ questionKey: string; answer: string; source: "user_authoritative" | "user_supplied_unverified" }>
+  ): TopicDecisionSnapshotPayload | null {
+    // Build new evidence entries for answers
+    const newEvidenceIds: string[] = [...oldPayload.evidenceIds];
+    const newEvidenceHashes = { ...oldPayload.evidenceHashes };
+    const newEvidenceContent = { ...oldPayload.evidenceContent };
+
+    for (const answer of answers) {
+      // Create deterministic evidence ID from question key
+      const answerEvId = `answer:${stableHash(answer.questionKey).slice(0, 16)}`;
+
+      // Only add if not already present
+      if (!newEvidenceIds.includes(answerEvId)) {
+        newEvidenceIds.push(answerEvId);
+
+        // Hash with verification type for deterministic content
+        const contentHash = stableHash({
+          questionKey: answer.questionKey,
+          answer: answer.answer,
+          verification: answer.source
+        });
+        newEvidenceHashes[answerEvId] = contentHash;
+        newEvidenceContent[answerEvId] = `[${answer.source}] ${answer.questionKey}: ${answer.answer}`;
+      }
+    }
+
+    // Check if any new evidence was actually added
+    if (newEvidenceIds.length === oldPayload.evidenceIds.length) {
+      // No new evidence - check if any answers differ from existing content
+      let changed = false;
+      for (const answer of answers) {
+        const answerEvId = `answer:${stableHash(answer.questionKey).slice(0, 16)}`;
+        const existingContent = newEvidenceContent[answerEvId];
+        const newContent = `[${answer.source}] ${answer.questionKey}: ${answer.answer}`;
+        if (existingContent !== newContent) {
+          changed = true;
+          newEvidenceContent[answerEvId] = newContent;
+        }
+      }
+      if (!changed) return null; // No changes, don't create new snapshot
+    }
+
+    // Recompute canonical inputHash with new evidence
+    const canonicalInput = {
+      topicVersion: oldPayload.topicVersion,
+      evidenceIds: newEvidenceIds.sort(),
+      evidenceHashes: Object.entries(newEvidenceHashes).sort(([a], [b]) => a.localeCompare(b)),
+      projectConstraints: oldPayload.projectConstraints.map((c: Record<string, unknown>) => c.id || JSON.stringify(c)).sort(),
+      roster: oldPayload.roster.map((a: TopicAgentSpec) => ({ id: a.id, role: a.role, model: a.model, reason: a.reason }))
+    };
+    const newInputHash = stableHash(canonicalInput);
+
+    // Return rebuilt payload
+    return {
+      ...oldPayload,
+      evidenceIds: newEvidenceIds,
+      evidenceHashes: newEvidenceHashes,
+      evidenceContent: newEvidenceContent,
+      inputHash: newInputHash
+    };
+  }
+
+  /**
    * Submit evidence answers from user.
    */
   async submitEvidenceAnswers(
@@ -188,35 +323,64 @@ export class TopicDecisionService {
 
     await this.evidenceAcquisitionService.submitAnswers(namespaceId, sessionId, expectedVersion, mappedAnswers);
 
-    // Rebuild snapshot with new evidence (if answer changed inputs)
+    // Rebuild snapshot with new evidence
     const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
-    if (snapshots.length > 0) {
-      // Mark old positions as historical
-      const oldSnapshot = snapshots[snapshots.length - 1]!;
-      const positions = this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, oldSnapshot.id);
-      // Positions remain accessible but are now from previous snapshot
+    const oldSnapshot = snapshots[snapshots.length - 1];
+
+    if (!oldSnapshot) {
+      throw new Error(`no snapshot found for session: ${sessionId}`);
+    }
+
+    // Rebuild payload with answers
+    const newPayload = this.rebuildPayloadWithAnswers(oldSnapshot.payload, mappedAnswers);
+
+    // Check if we need a new snapshot (only when inputs changed)
+    if (newPayload && newPayload.inputHash !== oldSnapshot.payload.inputHash) {
+      // Mark old snapshot's positions as historical via session metadata
+      const now = nowIso();
+      const historicalSnapshots = (session.metadata?.historicalSnapshotIds as string[] || []);
+
+      // Update session with historical reference and new inputHash
+      const updatedSession = this.options.repos.topicDecisions.updateSession(
+        {
+          ...session,
+          inputHash: newPayload.inputHash,
+          state: "gathering_evidence",
+          version: session.version + 1,
+          metadata: {
+            ...session.metadata,
+            historicalSnapshotIds: [...historicalSnapshots, oldSnapshot.id]
+          },
+          updatedAt: now
+        },
+        expectedVersion
+      );
 
       // Create new snapshot round
       const newRound = oldSnapshot.round + 1;
       const newSnapshot = this.options.repos.topicDecisions.insertSnapshot({
         id: newId("tdsnap"),
         namespaceId,
-        sessionId: session.id,
+        sessionId: updatedSession.id,
         round: newRound,
-        payload: oldSnapshot.payload, // In real implementation, would rebuild with new evidence
-        createdAt: nowIso()
+        payload: newPayload,
+        createdAt: now
       });
+
+      return {
+        session: updatedSession,
+        snapshots: [...snapshots.slice(0, -1), newSnapshot]
+      };
     }
 
-    // Update session state - use valid state from schema
+    // No changes - update session state but don't create new snapshot
     const now = nowIso();
     const updatedSession = this.options.repos.topicDecisions.updateSession(
       { ...session, state: "awaiting_user_input", version: session.version + 1, updatedAt: now },
       expectedVersion
     );
 
-    const updatedSnapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
-    return { session: updatedSession, snapshots: updatedSnapshots };
+    return { session: updatedSession, snapshots };
   }
 
   /**

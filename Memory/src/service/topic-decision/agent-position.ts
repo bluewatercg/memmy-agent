@@ -174,14 +174,27 @@ export class AgentPositionService {
     const snapshot = snapshots[snapshots.length - 1]!;
     const roster = snapshot.payload.roster;
 
-    // Get existing positions to check for reuse
-    const existingPositions = this.options.repos.topicDecisions.listPositions(
+    // Get existing positions - must filter to ensure they belong to active snapshot
+    // and revalidate all cited evidence IDs against current snapshot
+    const allPositions = this.options.repos.topicDecisions.listPositions(
       namespaceId,
       sessionId,
       snapshot.id
     );
 
-    const existingPositionMap = new Map(existingPositions.map(p => [p.agentId, p]));
+    // Filter positions: must belong to active snapshot AND have valid evidence citations
+    const validPositions = allPositions.filter(p => {
+      // Must be from the current active snapshot
+      if (p.snapshotId !== snapshot.id) return false;
+
+      // Re-validate all cited evidence IDs against current snapshot
+      for (const evId of p.evidenceIds) {
+        if (!validEvidenceIds.has(evId)) return false;
+      }
+      return true;
+    });
+
+    const existingPositionMap = new Map(validPositions.map(p => [p.agentId, p]));
 
     // Build valid evidence IDs set
     const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
