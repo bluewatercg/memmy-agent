@@ -885,6 +885,7 @@ async function routeRequest(
     const sessionId = decodeMatchSegment(topicDecisionRun, 1);
     try {
       await service.idempotent("topic-decision.run", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
+      return { accepted: true };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -897,6 +898,7 @@ async function routeRequest(
     const sessionId = decodeMatchSegment(topicDecisionPositions, 1);
     try {
       await service.idempotent("topic-decision.positions", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
+      return { accepted: true };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -968,9 +970,12 @@ async function routeRequest(
     try {
       const run = await service.idempotent("topic-decision.resume", request, { sessionId, runId, request }, async () => {
         const detail = service.readTopicDecisionSession(request.namespace, sessionId);
-        if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
+        if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) {
+          throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
+        }
         return service.resumeExecution(request.namespace, runId);
       }, { exactReplay: true });
+      return { result: publicTopicExecutionRun(run) };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -989,7 +994,7 @@ async function routeRequest(
       const run = await service.idempotent("topic-decision.confirm", request, { runId, actionId, request }, async () => {
         return service.confirmExecutionAction(request.namespace, runId, actionId, request.expectedRunVersion, request.approved, decisionActor(request), request.idempotencyKey);
       }, { exactReplay: true });
-      return publicTopicExecutionRun(run);
+      return { result: publicTopicExecutionRun(run) };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }

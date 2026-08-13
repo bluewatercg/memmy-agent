@@ -7,6 +7,7 @@ import { createMemoryServiceFixture, configWithMemoryGates } from "../fixtures/m
 const { cleanup, createTestService } = createMemoryServiceFixture();
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
 });
 
@@ -69,7 +70,7 @@ describe("Topic Decision REST contract", () => {
       const startOk = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/decisions`, {
         method: "POST",
         headers: headers("writer"),
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-auth-start" })
       });
       expect(startOk.status).toBe(200);
 
@@ -77,7 +78,7 @@ describe("Topic Decision REST contract", () => {
       const agentsDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/agents`, {
         method: "PATCH",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace, agents: [] })
+        body: JSON.stringify({ namespace, agents: [], adapterId: "test", requestId: "req-auth-agents" })
       });
       expect(agentsDenied.status).toBe(403);
 
@@ -85,7 +86,7 @@ describe("Topic Decision REST contract", () => {
       const runDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/run`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-auth-run" })
       });
       expect(runDenied.status).toBe(403);
 
@@ -93,7 +94,7 @@ describe("Topic Decision REST contract", () => {
       const answersDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/answers`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace, expectedVersion: 1, answers: [] })
+        body: JSON.stringify({ namespace, expectedVersion: 1, answers: [], adapterId: "test", requestId: "req-auth-answers" })
       });
       expect(answersDenied.status).toBe(403);
 
@@ -101,7 +102,7 @@ describe("Topic Decision REST contract", () => {
       const approveDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/proposals/prop-1/approve`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace, expectedProposalVersion: 1 })
+        body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "test", requestId: "req-auth-approve" })
       });
       expect(approveDenied.status).toBe(403);
 
@@ -109,7 +110,7 @@ describe("Topic Decision REST contract", () => {
       const resumeDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/resume`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-auth-resume" })
       });
       expect(resumeDenied.status).toBe(403);
 
@@ -117,7 +118,7 @@ describe("Topic Decision REST contract", () => {
       const confirmDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/actions/action-1/confirm`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1" })
+        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1", adapterId: "test", requestId: "req-auth-confirm" })
       });
       expect(confirmDenied.status).toBe(403);
 
@@ -125,7 +126,7 @@ describe("Topic Decision REST contract", () => {
       const cancelDenied = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/cancel`, {
         method: "POST",
         headers: headers("reader"),
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-auth-cancel" })
       });
       expect(cancelDenied.status).toBe(403);
     });
@@ -241,7 +242,7 @@ describe("Topic Decision REST contract", () => {
       const disabledStart = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/decisions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-disabled" })
       });
       expect(disabledStart.status).toBe(404);
       const disabledBody = await disabledStart.json() as { error: { code: string } };
@@ -265,7 +266,7 @@ describe("Topic Decision REST contract", () => {
         const conflict = await fetch(`${cBase}/api/v1/topic-inbox/topics/topic-1/decisions`, {
           method: "POST",
           headers,
-          body: JSON.stringify({ namespace })
+          body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-conflict" })
         });
         expect(conflict.status).toBe(409);
         const conflictBody = await conflict.json() as { error: { code: string }; details: { sessionId: string; currentVersion: number; currentState: string } };
@@ -280,6 +281,7 @@ describe("Topic Decision REST contract", () => {
   it("preserves 409 error details for stale version in answers, approve, confirm", async () => {
     const { db, service } = createTestService({ topicDecisionEnabled: true });
     const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
+    service.readTopicDecisionSession = () => ({ session: { id: "session-1", namespaceId: "ns", topicId: "topic-1", inputHash: "h1", state: "draft", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" }, snapshots: [], executionRuns: [{ id: "run-1", sessionId: "session-1" }] } as any);
 
     // Setup mock conflict behaviors
     service.submitEvidenceAnswers = async () => { throw Object.assign(new Error("stale version"), { name: "TopicDecisionConflictError", entityId: "session-1", currentVersion: 3, currentState: "gathering_evidence" }); };
@@ -301,7 +303,7 @@ describe("Topic Decision REST contract", () => {
       const answersConflict = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/answers`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, expectedVersion: 1, answers: [{ questionKey: "q1", answer: "a", source: "user_preference" }] })
+        body: JSON.stringify({ namespace, expectedVersion: 1, answers: [{ questionKey: "q1", answer: "a", source: "user_preference" }], adapterId: "test", requestId: "req-answers-conflict" })
       });
       expect(answersConflict.status).toBe(409);
       const answersBody = await answersConflict.json() as { error: { code: string }; details: { sessionId: string; currentVersion: number } };
@@ -312,7 +314,7 @@ describe("Topic Decision REST contract", () => {
       const approveConflict = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/proposals/prop-1/approve`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, expectedProposalVersion: 1 })
+        body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "test", requestId: "req-approve-conflict" })
       });
       expect(approveConflict.status).toBe(409);
       const approveBody = await approveConflict.json() as { error: { code: string }; details: { proposalId: string; currentVersion: number } };
@@ -323,7 +325,7 @@ describe("Topic Decision REST contract", () => {
       const confirmConflict = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/actions/action-1/confirm`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1" })
+        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1", adapterId: "test", requestId: "req-confirm-conflict" })
       });
       expect(confirmConflict.status).toBe(409);
       const confirmBody = await confirmConflict.json() as { error: { code: string }; details: { runId: string; currentVersion: number } };
@@ -348,6 +350,11 @@ describe("Topic Decision REST contract", () => {
     let confirmCount = 0;
     let cancelCount = 0;
     let agentsCount = 0;
+    service.readTopicDecisionSession = () => ({
+      session: { id: "session-1", namespaceId: "ns", topicId: "topic-1", inputHash: "h1", state: "draft", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" },
+      snapshots: [],
+      executionRuns: [{ id: "run-1", namespaceId: "ns", sessionId: "session-1", round: 1, rank: 1, effect: "test", title: "test", payload: {}, status: "running", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" }]
+    } as any);
 
     // Mock service methods to track calls while returning stable results
     service.startTopicDecisionSession = () => {
@@ -475,7 +482,7 @@ describe("Topic Decision REST contract", () => {
       const start = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/decisions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-sanitize" })
       });
       const body = await start.json() as { session: Record<string, unknown>; snapshot: Record<string, unknown> };
       expect(start.status).toBe(200);
@@ -505,7 +512,7 @@ describe("Topic Decision REST contract", () => {
       const positions = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/positions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-positions" })
       });
       expect([200, 202]).toContain(positions.status);
 
@@ -514,7 +521,7 @@ describe("Topic Decision REST contract", () => {
       const debate = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/debate`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-debate" })
       });
       expect([200, 202]).toContain(debate.status);
 
@@ -523,7 +530,7 @@ describe("Topic Decision REST contract", () => {
       const proposals = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/proposals`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-proposals" })
       });
       expect([200, 202]).toContain(proposals.status);
 
@@ -629,7 +636,7 @@ describe("Topic Decision REST contract", () => {
       const forbidden = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/proposals/prop-1/approve`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, expectedProposalVersion: 1 })
+        body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "test", requestId: "req-policy" })
       });
       expect(forbidden.status).toBe(403);
       const body = await forbidden.json() as { error: { code: string; message: string } };
@@ -642,6 +649,7 @@ describe("Topic Decision REST contract", () => {
   it("maps invalid confirmation to 400", async () => {
     const { db, service } = createTestService({ topicDecisionEnabled: true });
     const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
+    service.readTopicDecisionSession = () => ({ session: { id: "session-1", namespaceId: "ns", topicId: "topic-1", inputHash: "h1", state: "draft", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" }, snapshots: [], executionRuns: [{ id: "run-1", sessionId: "session-1" }] } as any);
 
     service.confirmExecutionAction = async () => {
       const err = new Error("action not awaiting confirmation");
@@ -663,7 +671,7 @@ describe("Topic Decision REST contract", () => {
       const invalidConfirm = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/actions/action-1/confirm`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1" })
+        body: JSON.stringify({ namespace, expectedRunVersion: 1, approved: true, idempotencyKey: "k1", adapterId: "test", requestId: "req-invalid-confirm" })
       });
       expect(invalidConfirm.status).toBe(400);
       const body = await invalidConfirm.json() as { error: { code: string } };
@@ -676,6 +684,11 @@ describe("Topic Decision REST contract", () => {
     const { db, service } = createTestService({ topicDecisionEnabled: true });
     const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
 
+    service.readTopicDecisionSession = () => ({
+      session: { id: "session-1", namespaceId: "ns", topicId: "topic-1", inputHash: "h1", state: "draft", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" },
+      snapshots: [],
+      executionRuns: [{ id: "run-1", namespaceId: "ns", sessionId: "session-1", round: 1, rank: 1, effect: "test", title: "test", payload: {}, status: "running", version: 1, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" }]
+    } as any);
     service.resumeExecution = async () => {
       const err = new Error("execution failed: apiKey=secret123");
       (err as any).name = "TopicExecutionError";
@@ -698,7 +711,7 @@ describe("Topic Decision REST contract", () => {
       const execFailed = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/resume`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-exec-failed" })
       });
       expect(execFailed.status).toBe(500);
       const body = await execFailed.json() as { error: { code: string; message: string } };
@@ -1001,14 +1014,14 @@ describe("Topic Decision REST contract", () => {
   it("sanitizes nested execution result fields", async () => {
     const { db, service } = createTestService({ topicDecisionEnabled: true });
     const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
-    const run = { id: "r1", namespaceId: "ns", sessionId: "s1", proposalId: "p1", status: "failed", result: { status: "failed", action: { id: "a1", status: "failed", output: { token: "secret", safe: "ok" }, error: { code: "E_FAIL", message: "safe", providerPayload: { apiKey: "secret" } }, providerPayload: { secret: "x" } } }, version: 2, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
+    const run = { id: "r1", namespaceId: "ns", sessionId: "s1", proposalId: "p1", status: "failed", result: { status: "failed", actions: [{ id: "a1", status: "failed", output: { token: "secret", safe: "ok" }, error: { code: "E_FAIL", message: "safe", providerPayload: { apiKey: "secret" } }, providerPayload: { secret: "x" } }] }, version: 2, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" };
     service.approveProposal = async () => run as any;
     const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { writer: { namespace, scopes: ["panel:write"] } } } });
     await withServerClosed(server, async () => {
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("expected TCP address");
-      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/s1/proposals/p1/approve`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "a", requestId: "r" }) });
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/s1/proposals/p1/approve`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace, expectedProposalVersion: 1, adapterId: "sanitizer-test", requestId: "req-nested-sanitizer" }) });
       const body = await response.json() as any;
       expect(body.result.actions[0].output).toEqual({});
       expect(body.result.actions[0].error).toEqual({ code: "E_FAIL", message: "safe" });

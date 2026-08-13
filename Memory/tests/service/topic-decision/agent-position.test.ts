@@ -210,17 +210,6 @@ describe("runIndependentPositions", () => {
     const allPositions = repos.topicDecisions.listPositions(namespaceId, sessionId, activeSnapshot.id);
     expect(allPositions.length).toBeGreaterThan(0);
 
-    // Debug: verify the snapshot and position data before calling runIndependentPositions
-    const snapshotsBefore = repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
-    const activeSnap = snapshotsBefore[0]; // newest by round ASC
-    const allPositionsBefore = repos.topicDecisions.listPositions(namespaceId, sessionId, activeSnap?.id ?? "");
-    const roster = activeSnap?.payload.roster ?? [];
-    const rosterAgentIds = roster.map(a => a.id);
-    const positionsByAgent = new Map(allPositionsBefore.map(p => [p.agentId, p]));
-
-    // Debug output
-    console.log("DEBUG: rosterAgentIds:", rosterAgentIds);
-    console.log("DEBUG: positions count:", allPositionsBefore.length);
 
     const mockLlmClient = vi.fn().mockImplementation(() => ({
       completeJson: async () => ({
