@@ -5,7 +5,7 @@
 
 ## Commit
 `9dca9dd` — `feat(memory): execute approved reversible topic actions`
-`1cfa76d` — `fix(memory): require two confirmations for irreversible execution effects`
+`efd34b2` — `fix(memory): require two confirmations for irreversible execution effects`
 
 ## Fix Round 1: Irreversible Two-Confirmation Flow
 

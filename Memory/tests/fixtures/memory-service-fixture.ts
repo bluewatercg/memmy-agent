@@ -21,6 +21,7 @@ export function createMemoryServiceFixture(): {
     llm?: LlmClient;
     skillLlm?: LlmClient;
     embedder?: Embedder;
+    topicDecisionEnabled?: boolean;
   }) => {
     root: string;
     db: MemoryDb;
@@ -50,6 +51,7 @@ export function createMemoryServiceFixture(): {
     llm?: LlmClient;
     skillLlm?: LlmClient;
     embedder?: Embedder;
+    topicDecisionEnabled?: boolean;
   } = {}): {
     root: string;
     db: MemoryDb;
@@ -59,13 +61,17 @@ export function createMemoryServiceFixture(): {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
+    const baseConfig = options.config ?? DEFAULT_MEMMY_CONFIG;
+    const config = options.topicDecisionEnabled !== undefined
+      ? { ...baseConfig, topicDecisions: { enabled: options.topicDecisionEnabled, models: [] } }
+      : baseConfig;
     return {
       root,
       db,
       service: createTestMemoryService({
         db,
         mode: options.mode ?? "dev",
-        config: options.config,
+        config,
         llm: options.llm,
         skillLlm: options.skillLlm,
         embedder: options.embedder ?? createCapturingEmbedder([])

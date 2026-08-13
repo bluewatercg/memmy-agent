@@ -1,7 +1,7 @@
 import type {
   HealthResponse, MemoryAddRequest, MemoryGovernanceRequest, MemoryMarkdownImportRequest, MemoryReloadConfigRequest,
-  MemoryReloadConfigResponse, MemorySearchRequest, RequestEnvelope, SessionCheckpointRequest, SessionOpenRequest,
-  TurnCompleteRequest, TurnStartRequest
+  MemoryReloadConfigResponse, MemorySearchRequest, RequestEnvelope, RuntimeNamespace, SessionCheckpointRequest, SessionOpenRequest,
+  TopicAgentSpec, TurnCompleteRequest, TurnStartRequest
 } from "../types.js";
 import type {
   TopicCandidateDecisionInput, TopicCandidateDecisionOutput, TopicInboxEvidenceInput, TopicInboxEvidenceOutput,
@@ -123,7 +123,51 @@ export class MemoryRestClient {
     return this.request("GET", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/evidence${queryString({ namespace: JSON.stringify(input.namespace), limit: input.limit })}`) as Promise<TopicInboxEvidenceOutput>;
   }
 
-  private async request(method: "GET" | "POST" | "DELETE", path: string, body?: unknown): Promise<unknown> {
+  startTopicDecision(topicId: string, input: { namespace: RuntimeNamespace; agents?: TopicAgentSpec[]; requestId?: string }): Promise<{ session: unknown; snapshot: unknown; reused: boolean }> {
+    return this.request("POST", `/api/v1/topic-inbox/topics/${encodeURIComponent(topicId)}/decisions`, input) as Promise<{ session: unknown; snapshot: unknown; reused: boolean }>;
+  }
+
+  readTopicDecision(sessionId: string): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("GET", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}`) as Promise<{ session: unknown; snapshots: unknown[] }>;
+  }
+
+  patchTopicDecisionAgents(sessionId: string, input: { namespace: RuntimeNamespace; agents: TopicAgentSpec[]; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("PATCH", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/agents`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
+  }
+
+  runTopicDecisionPositions(sessionId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<{ accepted: boolean }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/positions`, input) as Promise<{ accepted: boolean }>;
+  }
+
+  runTopicDecisionDebate(sessionId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/debate`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
+  }
+
+  runTopicDecisionProposals(sessionId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/proposals`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
+  }
+
+  submitTopicDecisionAnswers(sessionId: string, input: { namespace: RuntimeNamespace; expectedVersion: number; answers: Array<{ questionKey: string; answer: string; source: "user_preference" | "user_supplied_unverified" }>; requestId?: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/answers`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
+  }
+
+  approveTopicDecisionProposal(sessionId: string, proposalId: string, input: { namespace: RuntimeNamespace; expectedProposalVersion: number; requestId?: string }): Promise<unknown> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/proposals/${encodeURIComponent(proposalId)}/approve`, input);
+  }
+
+  resumeTopicDecisionExecution(sessionId: string, runId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<unknown> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/executions/${encodeURIComponent(runId)}/resume`, input);
+  }
+
+  confirmTopicDecisionAction(sessionId: string, runId: string, actionId: string, input: { namespace: RuntimeNamespace; expectedRunVersion: number; approved: boolean; idempotencyKey: string; requestId?: string }): Promise<unknown> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/executions/${encodeURIComponent(runId)}/actions/${encodeURIComponent(actionId)}/confirm`, input);
+  }
+
+  cancelTopicDecision(sessionId: string, input: { namespace: RuntimeNamespace; requestId?: string }): Promise<{ accepted: boolean }> {
+    return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/cancel`, input) as Promise<{ accepted: boolean }>;
+  }
+
+  private async request(method: "GET" | "POST" | "DELETE" | "PATCH", path: string, body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.endpoint}${path}`, {
       method,
       headers: {
