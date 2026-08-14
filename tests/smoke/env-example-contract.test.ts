@@ -22,4 +22,12 @@ describe(".env.example contract", () => {
     const topicIndex = content.indexOf("MEMMY_TOPIC_DECISIONS_ENABLED");
     expect(topicIndex).toBeGreaterThan(evolutionIndex);
   });
+
+  it("passes topic decision settings into the Docker Memory service", () => {
+    const composePath = join(process.cwd(), "deploy", "memory", "docker-compose.yml");
+    const content = readFileSync(composePath, "utf-8");
+
+    expect(content).toContain('MEMMY_TOPIC_DECISIONS_ENABLED: "${MEMMY_TOPIC_DECISIONS_ENABLED:-false}"');
+    expect(content).toContain('MEMMY_TOPIC_DECISION_MODELS: "${MEMMY_TOPIC_DECISION_MODELS:-MiniMax-M2.5,qwen3.7-plus,kimi-k2.5,glm-5}"');
+  });
 });
