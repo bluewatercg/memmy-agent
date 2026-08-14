@@ -29,6 +29,26 @@ describe("memoryPanelHtml", () => {
     expect(html).toContain('$("topicDecisionDetail").classList.remove("hidden")');
   });
 
+  it("runs the full topic decision pipeline using refreshed session versions", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain("async function runTopicDecisionPipeline(sessionId, namespace, requestPrefix)");
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "run", detail.session.version');
+    expect(html).toContain('detail = await readTopicDecisionDetail(sessionId, namespace)');
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "debate", detail.session.version');
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "proposals", detail.session.version');
+    expect(html).toContain("runTopicDecisionPipeline(started.session.id, namespace, requestPrefix)");
+  });
+
+  it("shows progress and stops automatic analysis on blocked decision states", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain("Analyzing topic");
+    expect(html).toContain("Gathering positions");
+    expect(html).toContain("Running debate");
+    expect(html).toContain("Generating proposals");
+    expect(html).toContain('const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "stale", "failed", "cancelled"])');
+    expect(html).toContain("if (topicDecisionStopStates.has(detail.session.state)) return detail");
+  });
+
   it("keeps topic cards linked to a full-width decision surface", () => {
     const html = memoryPanelHtml();
     expect(html).toContain('data-topic-action="decision"');

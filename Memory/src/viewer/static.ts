@@ -1439,11 +1439,52 @@ export function memoryPanelHtml(): string {
       $("topicDecisionDetail").classList.remove("hidden");
       for (const button of $("topicDecisionBody").querySelectorAll("button[data-decision-action]")) button.onclick = () => handleTopicDecisionAction(button);
     }
+    const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "stale", "failed", "cancelled"]);
+    function renderTopicDecisionProgress(step) {
+      $("topicDecisionDetail").classList.remove("hidden");
+      $("topicDecisionBody").innerHTML = '<div class="decision-progress"><strong>Analyzing topic</strong><div>' + esc(step) + '</div></div>';
+    }
+    function readTopicDecisionDetail(sessionId, namespace) {
+      return api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(sessionId) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace)));
+    }
+    function topicDecisionMutationStep(sessionId, action, expectedVersion, namespace, requestId) {
+      return api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(sessionId) + "/" + action, { method: "POST", body: JSON.stringify({ namespace, expectedVersion, adapterId: "memory-console", requestId }) });
+    }
+    async function runTopicDecisionPipeline(sessionId, namespace, requestPrefix) {
+      let detail = await readTopicDecisionDetail(sessionId, namespace);
+      renderTopicDecisionProgress("Gathering positions");
+      await topicDecisionMutationStep(sessionId, "run", detail.session.version, namespace, requestPrefix + "-run");
+      detail = await readTopicDecisionDetail(sessionId, namespace);
+      if (topicDecisionStopStates.has(detail.session.state)) return detail;
+      renderTopicDecisionProgress("Running debate");
+      await topicDecisionMutationStep(sessionId, "debate", detail.session.version, namespace, requestPrefix + "-debate");
+      detail = await readTopicDecisionDetail(sessionId, namespace);
+      if (topicDecisionStopStates.has(detail.session.state)) return detail;
+      renderTopicDecisionProgress("Generating proposals");
+      await topicDecisionMutationStep(sessionId, "proposals", detail.session.version, namespace, requestPrefix + "-proposals");
+      return readTopicDecisionDetail(sessionId, namespace);
+    }
     async function openTopicDecision(topicId) {
+      if (state.topicDecisionInFlight) return;
       state.topicDecisionInFlight = true;
-      const agents = [{ id: "evidence-analyst", role: "evidence_analyst", model: "default", reason: "evidence" }, { id: "domain-analyst", role: "domain_analyst", model: "default", reason: "domain" }, { id: "risk-challenger", role: "risk_challenger", model: "default", reason: "risk" }];
-      try { const started = await api("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/decisions", { method: "POST", body: JSON.stringify({ ...topicMutation(selectedTopicNamespace()), agents }) }); renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(started.session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(selectedTopicNamespace())))); }
-      catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } finally { state.topicDecisionInFlight = false; }
+      const namespace = selectedTopicNamespace();
+      const requestPrefix = "web-analysis-" + Date.now();
+      let sessionId = "";
+      try {
+        renderTopicDecisionProgress("Starting analysis");
+        const started = await api("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/decisions", { method: "POST", body: JSON.stringify(topicMutation(namespace)) });
+        sessionId = started.session.id;
+        renderTopicDecision(await readTopicDecisionDetail(sessionId, namespace));
+        renderTopicDecision(await runTopicDecisionPipeline(started.session.id, namespace, requestPrefix));
+      } catch (error) {
+        if (error.status === 409 && sessionId) {
+          renderTopicDecision(await readTopicDecisionDetail(sessionId, namespace));
+          return;
+        }
+        throw error;
+      } finally {
+        state.topicDecisionInFlight = false;
+      }
     }
     async function handleTopicDecisionAction(button) {
       const action = button.dataset.decisionAction; const detail = state.topicDecision || {}; const session = detail.session || {}; const namespace = selectedTopicNamespace(); state.topicDecisionInFlight = true; button.disabled = true;

@@ -370,12 +370,15 @@ export class MemoryService {
       upsertMemory: (memory) => this.evolutionJobs.upsertEvolutionMemory(memory),
       enqueueJob: this.workerHandlers.enqueueJob
     });
-    // Create LLM client factory for topic decisions
-    const createTopicDecisionLlm = options.createLlmClient ?? ((model: string) => {
-      // Use default config with model, requiring API key to be configured
-      const config = { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
-      return createLlmClient(config);
-    });
+    // Topic decision agents share the configured evolution provider credentials
+    // while selecting the model assigned by the decision roster.
+    const createTopicDecisionLlm = options.createLlmClient ?? ((model: string) => createLlmClient(
+      { ...resolveEvolutionConfig(this.config), model, enableThinking: false },
+      {
+        modelRole: "memory_evolution",
+        agentRegion: resolveMemoryAgentRegion(this.config.activeProfile)
+      }
+    ));
 
     this.projectContext = new ProjectContextService({ repositories: this.repos });
     this.topicDecisions = new TopicDecisionService({

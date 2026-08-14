@@ -541,6 +541,10 @@ function openAiCompatibleThinkingControl(input: {
   model: string;
   requested: boolean;
 }): ThinkingControl {
+  const endpoint = input.endpoint.toLowerCase();
+  if (endpoint.includes("coding.dashscope") && isMiniMaxM2ThinkingOnlyModel(input.model)) {
+    return { enabled: true, fields: { enable_thinking: true } };
+  }
   const style = openAiCompatibleThinkingStyle(input.vendor, input.endpoint, input.model);
   const enabled = input.requested || isOpenAiCompatibleThinkingOnlyModel(input.vendor, input.endpoint, input.model);
   if (isAlwaysOnModelWithoutThinkingToggle(input.model)) {
@@ -560,7 +564,7 @@ function openAiCompatibleThinkingControl(input: {
     case "thinking_type":
       return { enabled, fields: { thinking: { type: enabled ? "enabled" : "disabled" } } };
     case "thinking_adaptive":
-      return { enabled, fields: { thinking: { type: enabled ? "adaptive" : "disabled" } } };
+      return { enabled, fields: { thinking: { type: enabled ? "auto" : "disabled" } } };
     case "enable_thinking":
       return { enabled, fields: { enable_thinking: enabled } };
     case "minimax_direct":

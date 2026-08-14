@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import YAML from "yaml";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MEMMY_CONFIG, MemoryDb, MemoryService, Repositories } from "../../../src/index.js";
 import { loadMemmyConfig } from "../../../src/config/index.js";
 import type { RuntimeNamespace, TopicAgentSpec } from "../../../src/types.js";
@@ -27,6 +27,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+  vi.unstubAllGlobals();
 });
 
 describe("topic decision config", () => {
@@ -406,6 +407,62 @@ describe("TopicDecisionService.start", () => {
 
     expect(result.snapshot.payload.roster).toEqual(agents);
     expect(result.snapshot.payload.inputHash).toBeDefined();
+  });
+
+  it("uses configured evolution credentials for default topic decision models", async () => {
+    setEnv("MEMMY_EVOLUTION_PROVIDER", "openai_compatible");
+    setEnv("MEMMY_EVOLUTION_ENDPOINT", "https://coding.dashscope.aliyuncs.com/v1");
+    setEnv("MEMMY_EVOLUTION_API_KEY", "decision-secret");
+    setEnv("MEMMY_EVOLUTION_ENABLE_THINKING", "true");
+    const { service, repos, namespaceId } = await setupService();
+    repos.topics.insertTopic({
+      id: "topic-default-models",
+      namespaceId,
+      title: "Default model routing",
+      summary: "Verify configured credentials",
+      status: "active",
+      version: 1,
+      sourceMemoryIds: [],
+      metadata: {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: [],
+        facts: [],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      }) } }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-default-models" });
+    await service.runIndependentPositions(namespace, result.session.id, result.session.version);
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const requests = fetchMock.mock.calls.map(([url, init]) => {
+      const body = JSON.parse(String(init?.body));
+      return {
+        url: String(url),
+        authorization: new Headers(init?.headers).get("authorization"),
+        model: body.model,
+        thinking: body.thinking,
+        enableThinking: body.enable_thinking
+      };
+    });
+    expect(requests.map((request) => request.url)).toEqual(Array(4).fill("https://coding.dashscope.aliyuncs.com/v1/chat/completions"));
+    expect(requests.map((request) => request.authorization)).toEqual(Array(4).fill("Bearer decision-secret"));
+    expect(requests.map((request) => request.model)).toEqual(["MiniMax-M2.5", "qwen3.7-plus", "kimi-k2.5", "glm-5"]);
+    expect(requests[0]?.thinking).toBeUndefined();
+    expect(requests[0]?.enableThinking).toBe(true);
+    expect(requests[1]?.enableThinking).toBe(false);
   });
 });
 

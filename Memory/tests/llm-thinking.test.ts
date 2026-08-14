@@ -136,7 +136,25 @@ describe("memory LLM thinking configuration", () => {
       operation: "evolution.induction",
       thinkingMode: "enabled"
     });
-    expect(requestBody(fetchMock)).toMatchObject({ thinking: { type: "adaptive" } });
+    expect(requestBody(fetchMock)).toMatchObject({ thinking: { type: "auto" } });
+  });
+
+  it("uses mandatory enable_thinking for MiniMax M2 on coding DashScope", async () => {
+    const fetchMock = openAiFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createLlmClient(llmConfig({
+      endpoint: "https://coding.dashscope.aliyuncs.com/v1",
+      model: "MiniMax-M2.5",
+      enableThinking: false
+    }));
+
+    await client.completeJson([{ role: "user", content: "decide" }], {
+      operation: "topic.decision.position.evidence_analyst",
+      thinkingMode: "disabled"
+    });
+
+    expect(requestBody(fetchMock)).toMatchObject({ enable_thinking: true });
+    expect(requestBody(fetchMock)).not.toHaveProperty("thinking");
   });
 
   it("keeps thinking enabled when the selected model cannot disable it", async () => {
