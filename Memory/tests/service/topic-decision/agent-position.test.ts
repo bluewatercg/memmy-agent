@@ -9,6 +9,7 @@ import type { RuntimeNamespace } from "../../../src/types.js";
 import { AgentPositionService } from "../../../src/service/topic-decision/agent-position.js";
 import { nowIso } from "../../../src/utils/time.js";
 import { stableHash } from "../../../src/utils/id.js";
+import { namespaceIdFromContext } from "../../../src/service/namespace/namespace-scope.js";
 
 const roots: string[] = [];
 
@@ -144,6 +145,38 @@ describe("runIndependentPositions", () => {
     // Before fix: ReferenceError: Cannot access 'validEvidenceIds' before initialization
     await expect(agentPosService.runIndependentPositions(namespace, sessionId))
       .resolves.not.toThrow();
+  });
+
+  it("persists parsed confidence, missing information, assumptions, and risks", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const risk = { severity: "high" as const, description: "Shared premise is unsupported" };
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: () => ({
+        completeJson: async () => ({
+          judgment: "support",
+          confidence: 0.8,
+          evidenceIds: result.snapshot.payload.evidenceIds,
+          facts: [],
+          assumptions: ["Demand remains stable"],
+          missingInformation: ["Current demand forecast"],
+          risks: [risk],
+          counterarguments: [],
+          suggestedActions: []
+        })
+      }) as never
+    });
+
+    await agentPosService.runIndependentPositions(namespace, result.session.id);
+
+    const positions = repos.topicDecisions.listPositions(namespaceId, result.session.id, result.snapshot.id);
+    expect(positions).toHaveLength(result.snapshot.payload.roster.length);
+    expect(positions[0]?.confidence).toBe(0.8);
+    expect(positions[0]?.missingInformation).toEqual(["Current demand forecast"]);
+    expect(positions[0]?.assumptions).toEqual(["Demand remains stable"]);
+    expect(positions[0]?.risks).toEqual([risk]);
   });
 
   it("builds validEvidenceIds before filter callback executes", async () => {
@@ -505,7 +538,7 @@ async function setupService(): Promise<{
   const repos = new Repositories(db.db);
 
   const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
 
   // Insert topic
   repos.topics.insertTopic({
@@ -560,7 +593,7 @@ async function setupServiceWithAgentPosition(): Promise<{
   const repos = new Repositories(db.db);
 
   const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
 
   // Insert topic
   repos.topics.insertTopic({

@@ -1,5 +1,5 @@
 import type { Repositories } from "../../storage/repositories.js";
-import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSnapshotPayload, TopicExecutionRunRecord } from "../../types.js";
+import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSessionRecord, TopicDecisionSnapshotPayload, TopicDecisionState, TopicExecutionRunRecord } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { recommendAgents } from "./agent-roster.js";
@@ -16,12 +16,20 @@ import { createLlmClient } from "../../model/llm.js";
 import type { LlmConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import type { ProjectContextService } from "../project-context/project-context-service.js";
+import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
+
+export class TopicDecisionStaleVersionError extends Error {
+  readonly name = "TopicDecisionStaleVersionError";
+  constructor(readonly sessionId: string, readonly currentVersion: number, readonly currentState: string) {
+    super(`stale version: expected ${currentVersion}, session is at ${currentVersion} (${currentState})`);
+  }
+}
 
 export interface TopicDecisionServiceOptions {
   repos: Repositories;
   enabled: boolean;
   models: string[];
-  llmConfigs?: Record<string, LlmConfig>;
+  llmConfigs?: Record<string, unknown>;
   createLlmClient?: (model: string) => LlmClient;
   projectContextService?: ProjectContextService;
 }
@@ -35,7 +43,11 @@ export class TopicDecisionService {
   private readonly proposalSynthesis: ProposalSynthesis;
   private readonly proposalExecutor: ProposalExecutor;
 
+  get enabled(): boolean {
+    return this.options.enabled;
+  }
   constructor(private readonly options: TopicDecisionServiceOptions) {
+
     this.snapshotBuilder = new EvidenceSnapshotBuilder(options.repos);
     this.evidenceAcquisitionService = new EvidenceAcquisitionService({ repos: options.repos });
     this.decisionabilityService = new DecisionabilityService(
@@ -77,9 +89,46 @@ export class TopicDecisionService {
       projectContextService: options.projectContextService
     });
   }
+  private audit(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    action: string,
+    targetKind: string,
+    targetId: string,
+    meta: Record<string, unknown> = {}
+  ): void {
+    this.options.repos.runtime.insertAudit({
+      userId: namespace.userId ?? "system",
+      sessionId,
+      actor: { namespace },
+      action,
+      targetKind,
+      targetId,
+      meta
+    });
+  }
+
+
+  private assertMutationAllowed(
+    session: TopicDecisionSessionRecord,
+    operation: string,
+    allowedStates?: readonly TopicDecisionState[]
+  ): void {
+    const blockedStates: readonly TopicDecisionState[] = ["executing", "completed", "stale", "failed", "cancelled"];
+    const allowed = allowedStates
+      ? allowedStates.includes(session.state)
+      : !blockedStates.includes(session.state);
+    if (allowed) {
+      return;
+    }
+
+    const error = new Error(`cannot ${operation} in state: ${session.state}`);
+    error.name = "TopicDecisionPolicyError";
+    throw error;
+  }
 
   recommendAgents(namespace: RuntimeNamespace, topicId: string): TopicAgentSpec[] {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const topic = this.options.repos.topics.getTopic(topicId, namespaceId);
     const metadata = topic?.metadata;
     return recommendAgents(this.options.models, metadata);
@@ -90,7 +139,7 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(input.namespace);
+    const namespaceId = namespaceIdFromContext(input.namespace)
     const agents = input.agents ?? this.recommendAgents(input.namespace, input.topicId);
 
     const snapshotData = this.snapshotBuilder.build({
@@ -130,6 +179,9 @@ export class TopicDecisionService {
     });
 
     const snapshot = this.createSnapshotRecord(session, snapshotData);
+    this.audit(input.namespace, session.id, "topic_decision_session_created", "topic_decision_session", session.id, { topicId: session.topicId });
+    this.audit(input.namespace, session.id, "topic_decision_snapshot_created", "topic_decision_snapshot", snapshot.id, { round: snapshot.round });
+
 
     return { session, snapshot, reused: false };
   }
@@ -139,7 +191,7 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) {
       throw new Error(`session not found: ${sessionId}`);
@@ -162,13 +214,114 @@ export class TopicDecisionService {
   /**
    * Run independent position analysis for all agents.
    */
-  async runIndependentPositions(namespace: RuntimeNamespace, sessionId: string): Promise<void> {
+  async runIndependentPositions(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<void> {
     if (!this.options.enabled) {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    if (expectedVersion !== undefined && session.version !== expectedVersion) {
+      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+    }
+    this.assertMutationAllowed(session, "run independent positions");
     await this.agentPositionService.runIndependentPositions(namespace, sessionId);
+    const snapshot = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId).at(-1);
+    if (snapshot) {
+      for (const position of this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, snapshot.id)) {
+        this.audit(namespace, sessionId, "topic_decision_position_created", "topic_decision_position", position.id, { snapshotId: snapshot.id, agentId: position.agentId, round: position.round });
+      }
+    }
+  }
+
+  /**
+   * Update session agents and bump version.
+   */
+  async updateTopicDecisionSessionAgents(
+    namespace: RuntimeNamespace,
+    sessionId: string,
+    expectedVersion: number,
+    agents: TopicAgentSpec[]
+  ): Promise<TopicDecisionDetail> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+
+    const namespaceId = namespaceIdFromContext(namespace);
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    if (session.version !== expectedVersion) {
+      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+    }
+
+    const updatedSession = {
+      ...session,
+      agents,
+      version: session.version + 1,
+      updatedAt: nowIso()
+    };
+    this.options.repos.topicDecisions.updateSession(updatedSession, session.version);
+
+    return this.read(namespace, sessionId);
+  }
+
+
+  async runDecision(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<void> {
+    if (!this.options.enabled) {
+      throw new Error("topic decisions disabled");
+    }
+    const namespaceId = namespaceIdFromContext(namespace)
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    if (expectedVersion !== undefined && session.version !== expectedVersion) {
+      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+    }
+    this.assertMutationAllowed(session, "run decision");
+    
+    // First run independent positions to gather agent stances
+    await this.runIndependentPositions(namespace, sessionId);
+    
+    // Now check decisionability with the positions we just gathered
+    const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
+    const snapshot = snapshots.at(-1);
+    
+    if (!snapshot) {
+      throw new Error(`no snapshot found for session: ${sessionId}`);
+    }
+    
+    const decisionability = await this.decisionabilityService.checkDecisionability(
+      namespaceId,
+      sessionId,
+      snapshot
+    );
+    
+    const newState = decisionability.status === "ready" ? "ready_for_decision" : decisionability.status;
+
+    // Get the current session state after runIndependentPositions
+    const currentSession = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!currentSession) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+
+    this.options.repos.topicDecisions.updateSession(
+      {
+        ...currentSession,
+        state: newState,
+        version: currentSession.version + 1,
+        updatedAt: nowIso()
+      },
+      currentSession.version
+    );
+    for (const request of this.options.repos.topicDecisions.listEvidenceRequests(namespaceId, sessionId)) {
+      this.audit(namespace, sessionId, "topic_decision_evidence_question_created", "topic_decision_evidence_request", request.id, { round: request.round, verification: request.verification, status: request.status });
+    }
   }
 
   /**
@@ -179,7 +332,7 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) {
       throw new Error(`session not found: ${sessionId}`);
@@ -341,11 +494,13 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) {
       throw new Error(`session not found: ${sessionId}`);
     }
+
+    this.assertMutationAllowed(session, "submit evidence answers");
 
     // Validate expected version for optimistic locking
     if (session.version !== expectedVersion) {
@@ -404,6 +559,11 @@ export class TopicDecisionService {
         payload: newPayload,
         createdAt: now
       });
+      for (const request of this.options.repos.topicDecisions.listEvidenceRequests(namespaceId, sessionId)) {
+        if (request.status === "answered") this.audit(namespace, sessionId, "topic_decision_evidence_answered", "topic_decision_evidence_request", request.id, { snapshotId: newSnapshot.id, round: request.round, verification: request.verification });
+      }
+      this.audit(namespace, sessionId, "topic_decision_snapshot_created", "topic_decision_snapshot", newSnapshot.id, { previousSnapshotId: oldSnapshot.id, round: newSnapshot.round });
+
 
       return {
         session: updatedSession,
@@ -433,13 +593,25 @@ export class TopicDecisionService {
   /**
    * Run adaptive debate with bounded rounds.
    */
-  async runDebate(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+  async runDebate(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<TopicDecisionDetail> {
     if (!this.options.enabled) {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
-    await this.debateOrchestrator.runDebate(namespace, sessionId);
+    const namespaceId = namespaceIdFromContext(namespace)
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    if (expectedVersion !== undefined && session.version !== expectedVersion) {
+      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+    }
+    this.assertMutationAllowed(session, "run debate");
+    const startedAt = Date.now();
+    const debate = await this.debateOrchestrator.runDebate(namespace, sessionId);
+    for (const round of debate.roundRecords) {
+      this.audit(namespace, sessionId, "topic_decision_debate_round_completed", "topic_decision_debate_round", round.id, { round: round.round, status: round.status, durationMs: Math.max(0, Date.now() - startedAt) });
+    }
 
     // Return updated session detail
     return this.read(namespace, sessionId);
@@ -448,13 +620,24 @@ export class TopicDecisionService {
   /**
    * Synthesize proposals from debate results.
    */
-  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
+  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<TopicDecisionDetail> {
     if (!this.options.enabled) {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
-    await this.proposalSynthesis.synthesizeProposals(namespace, sessionId);
+    const namespaceId = namespaceIdFromContext(namespace)
+    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
+    if (!session) {
+      throw new Error(`session not found: ${sessionId}`);
+    }
+    if (expectedVersion !== undefined && session.version !== expectedVersion) {
+      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+    }
+    this.assertMutationAllowed(session, "synthesize proposals");
+    const result = await this.proposalSynthesis.synthesizeProposals(namespace, sessionId);
+    for (const proposal of result.proposals) {
+      this.audit(namespace, sessionId, "topic_decision_proposal_created", "topic_decision_proposal", proposal.id, { round: proposal.round, rank: proposal.rank, effect: proposal.effect, status: proposal.status });
+    }
 
     // Return updated session detail
     return this.read(namespace, sessionId);
@@ -474,7 +657,18 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    return this.proposalExecutor.approveProposal(namespace, sessionId, proposalId, expectedProposalVersion, actor);
+    const startedAt = Date.now();
+    const run = await this.proposalExecutor.approveProposal(namespace, sessionId, proposalId, expectedProposalVersion, actor);
+    this.audit(namespace, sessionId, "topic_decision_proposal_approved", "topic_decision_proposal", proposalId, { runId: run.id, status: run.status, durationMs: Math.max(0, Date.now() - startedAt) });
+    this.audit(namespace, sessionId, "topic_decision_execution_started", "topic_decision_execution", run.id, { proposalId, status: run.status });
+    for (const action of Array.isArray(run.result.actions) ? run.result.actions : []) {
+      if (typeof action === "object" && action !== null) {
+        const value = action as Record<string, unknown>;
+        this.audit(namespace, sessionId, "topic_decision_execution_action", "topic_decision_execution_action", String(value.id ?? "unknown"), { runId: run.id, status: value.status });
+      }
+    }
+    if (run.status === "completed") this.audit(namespace, sessionId, "topic_decision_execution_completed", "topic_decision_execution", run.id, { proposalId, status: run.status });
+    return run;
   }
 
   /**
@@ -506,7 +700,10 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    return this.proposalExecutor.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor, idempotencyKey);
+    const run = await this.proposalExecutor.confirmExecutionAction(namespace, runId, actionId, expectedRunVersion, approved, actor, idempotencyKey);
+    this.audit(namespace, run.sessionId, "topic_decision_execution_action_confirmed", "topic_decision_execution_action", actionId, { runId, approved, status: run.status });
+    if (run.status === "completed") this.audit(namespace, run.sessionId, "topic_decision_execution_completed", "topic_decision_execution", run.id, { proposalId: run.proposalId, status: run.status });
+    return run;
   }
 
   /**
@@ -525,7 +722,7 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) {
       throw new Error(`session not found: ${sessionId}`);
@@ -636,7 +833,7 @@ export class TopicDecisionService {
       throw new Error("topic decisions disabled");
     }
 
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) {
       throw new Error(`session not found: ${sessionId}`);

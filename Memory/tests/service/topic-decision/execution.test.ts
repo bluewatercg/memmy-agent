@@ -27,6 +27,7 @@ afterEach(() => {
 
 interface Setup {
   service: MemoryService;
+  db: MemoryDb;
   repos: Repositories;
   namespaceId: string;
   namespace: RuntimeNamespace;
@@ -47,7 +48,7 @@ async function setup(): Promise<Setup> {
   const db = new MemoryDb({ path: dbPath });
   const repos = new Repositories(db.db);
   const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1", projectId: "proj-1" };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
   repos.topics.insertTopic({
     id: "topic-1",
     namespaceId,
@@ -61,7 +62,7 @@ async function setup(): Promise<Setup> {
     updatedAt: nowIso()
   });
   const service = new MemoryService({ db, config, configPath, mode: "dev" });
-  return { service, repos, namespaceId, namespace };
+  return { service, repos, db, namespaceId, namespace };
 }
 
 function setupSync(): { repos: Repositories; namespaceId: string } {
@@ -70,7 +71,7 @@ function setupSync(): { repos: Repositories; namespaceId: string } {
   const db = new MemoryDb({ path: dbPath });
   const repos = new Repositories(db.db);
   const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
   return { repos, namespaceId };
 }
 
@@ -81,7 +82,7 @@ function insertProposal(
   overrides: Partial<TopicActionProposalRecord> & { effect: TopicActionEffect }
 ): TopicActionProposalRecord {
   const now = nowIso();
-  return repos.topicDecisions.insertProposal({
+  const proposal = repos.topicDecisions.insertProposal({
     id: overrides.id ?? `tdprop-${Math.random().toString(36).slice(2, 8)}`,
     namespaceId,
     sessionId,
@@ -115,6 +116,19 @@ function insertProposal(
     createdAt: overrides.createdAt ?? now,
     updatedAt: overrides.updatedAt ?? now
   });
+  markSessionReady(repos, namespaceId, sessionId);
+  return proposal;
+}
+
+function markSessionReady(repos: Repositories, namespaceId: string, sessionId: string): void {
+  const session = repos.topicDecisions.getSession(namespaceId, sessionId);
+  if (!session || session.state === "ready_for_decision") {
+    return;
+  }
+  repos.topicDecisions.updateSession(
+    { ...session, state: "ready_for_decision", version: session.version + 1, updatedAt: nowIso() },
+    session.version
+  );
 }
 
 describe("approveProposal", () => {
@@ -128,6 +142,7 @@ describe("approveProposal", () => {
   it("rejects when proposal not found", async () => {
     const { service, repos, namespaceId, namespace } = await setup();
     const session = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    markSessionReady(repos, namespaceId, session.session.id);
     await expect(
       service.approveProposal(namespace, session.session.id, "nonexistent-proposal", 1, { userId: "user-1" })
     ).rejects.toThrow(/not found/i);
@@ -158,6 +173,21 @@ describe("approveProposal", () => {
       service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" })
     ).rejects.toThrow(/recommended/i);
   });
+  it("rolls back run and proposal when the session transition conflicts", async () => {
+    const { service, repos, db, namespaceId, namespace } = await setup();
+    const started = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const proposal = insertProposal(repos, namespaceId, started.session.id, {
+      id: "tdprop-atomic",
+      effect: "draft"
+    });
+    db.db.exec(`CREATE TRIGGER fail_topic_session_update BEFORE UPDATE ON project_topic_decision_sessions BEGIN SELECT RAISE(ABORT, 'topic decision session version conflict'); END`);
+
+    await expect(
+      service.approveProposal(namespace, started.session.id, proposal.id, proposal.version, { userId: "user-1" })
+    ).rejects.toThrow(/session version conflict/i);
+    expect(repos.topicDecisions.listExecutionRuns(namespaceId, started.session.id)).toEqual([]);
+    expect(repos.topicDecisions.listProposals(namespaceId, started.session.id).find(item => item.id === proposal.id)?.status).toBe("draft");
+  });
 
   it("rejects unknown effect at proposal insert (SQLite CHECK constraint)", () => {
     const { repos, namespaceId } = setupSync();
@@ -178,6 +208,7 @@ describe("approveProposal", () => {
     });
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     expect(run.status).toBe("completed");
+    expect(repos.topicDecisions.getSession(namespaceId, session.session.id)?.state).toBe("completed");
     const result = run.result as any;
     expect(result.actions).toHaveLength(1);
     expect(result.actions[0].status).toBe("succeeded");
@@ -283,6 +314,7 @@ describe("confirmExecutionAction", () => {
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     const updated = await service.confirmExecutionAction(namespace, run.id, "action-1", run.version, false, { userId: "user-1" }, "key-1");
     expect(updated.status).toBe("cancelled");
+    expect(repos.topicDecisions.getSession(namespaceId, session.session.id)?.state).toBe("cancelled");
   });
 });
 
@@ -349,6 +381,7 @@ describe("execution idempotency and dependency order", () => {
     });
     const run = await service.approveProposal(namespace, session.session.id, proposal.id, 1, { userId: "user-1" });
     expect(run.status).toBe("failed");
+    expect(repos.topicDecisions.getSession(namespaceId, session.session.id)?.state).toBe("failed");
     const result = run.result as any;
     expect(result.actions[0].status).toBe("failed");
   });

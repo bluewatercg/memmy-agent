@@ -1,4 +1,5 @@
 import type { MemmyConfig } from "../../config/index.js";
+import type { TopicDecisionAggregateMetrics } from "../../storage/repositories.js";
 import { isRecord } from "../../utils/json.js";
 import type { StorageBackendCapabilities } from "../../storage/backend.js";
 import type {
@@ -284,6 +285,7 @@ export class PanelReadModel {
     jobs: Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number>;
     embeddingRetries: Record<"pending" | "in_progress" | "succeeded" | "failed", number>;
     models: HealthResponse["models"];
+    topicDecisions?: TopicDecisionAggregateMetrics;
     serverTime: string;
   } {
     const overview = this.panelOverview(input);
@@ -299,6 +301,9 @@ export class PanelReadModel {
       jobs: overview.stats.jobs,
       embeddingRetries: overview.stats.embeddingRetries,
       models: this.deps.models(),
+      ...(this.deps.config().algorithm.topicDecisions.enabled
+        ? { topicDecisions: this.deps.repos.runtime.aggregateTopicDecisionMetrics() }
+        : {}),
       serverTime: this.now()
     };
   }

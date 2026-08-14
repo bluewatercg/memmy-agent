@@ -1,7 +1,7 @@
 import type { RuntimeNamespace, TopicActionEffect, TopicActionProposalRecord, TopicExecutionRunRecord } from "../../types.js";
 import type { Repositories } from "../../storage/repositories.js";
 import type { ProjectContextService } from "../project-context/project-context-service.js";
-import { newId, stableHash } from "../../utils/id.js";
+import { newId } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import { evaluateExecutionPolicy, isIrreversibleEffect } from "./execution-policy.js";
 import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
@@ -92,7 +92,7 @@ export class ProposalExecutor {
     expectedProposalVersion: number,
     actor: Record<string, unknown>
   ): Promise<TopicExecutionRunRecord> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
 
     // Validate session exists
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
@@ -100,9 +100,10 @@ export class ProposalExecutor {
       throw new Error(`session not found: ${sessionId}`);
     }
 
-    // Validate session is not stale
-    if (session.state === "stale") {
-      throw new Error(`session is stale: ${sessionId}`);
+    if (session.state !== "ready_for_decision") {
+      const error = new Error(`cannot approve proposal in state: ${session.state}`);
+      error.name = "TopicDecisionPolicyError";
+      throw error;
     }
 
     // Validate proposal exists and version matches
@@ -136,31 +137,30 @@ export class ProposalExecutor {
       }
     }
 
-    // Create execution run
+    // Persist approval state atomically before executing external handlers.
     const now = nowIso();
-    const run = this.options.repos.topicDecisions.createExecutionRun({
-      id: newId("tdrun"),
-      namespaceId,
-      sessionId,
-      proposalId,
-      status: "running",
-      result: { actions: actions.map(a => ({ id: a.id, status: "pending", confirmationEvents: [] })) },
-      version: 1,
-      createdAt: now,
-      updatedAt: now
+    const run = this.options.repos.transaction(() => {
+      const createdRun = this.options.repos.topicDecisions.createExecutionRun({
+        id: newId("tdrun"),
+        namespaceId,
+        sessionId,
+        proposalId,
+        status: "running",
+        result: { actions: actions.map(a => ({ id: a.id, status: "pending", confirmationEvents: [] })) },
+        version: 1,
+        createdAt: now,
+        updatedAt: now
+      });
+      this.options.repos.topicDecisions.updateProposal(
+        { ...proposal, status: "approved", version: proposal.version + 1, updatedAt: now },
+        proposal.version
+      );
+      this.options.repos.topicDecisions.updateSession(
+        { ...session, state: "executing", version: session.version + 1, updatedAt: now },
+        session.version
+      );
+      return createdRun;
     });
-
-    // Update proposal status to approved
-    this.options.repos.topicDecisions.updateProposal(
-      { ...proposal, status: "approved", version: proposal.version + 1, updatedAt: now },
-      proposal.version
-    );
-
-    // Update session state to executing
-    this.options.repos.topicDecisions.updateSession(
-      { ...session, state: "executing", version: session.version + 1, updatedAt: now },
-      session.version
-    );
 
     // Execute actions
     const context: TopicExecutionContext = {
@@ -178,8 +178,14 @@ export class ProposalExecutor {
   }
 
   async resumeExecution(namespace: RuntimeNamespace, runId: string): Promise<TopicExecutionRunRecord> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const run = this.getRun(namespaceId, runId);
+
+    if (run.status === "cancelled") {
+      const error = new Error(`cannot resume cancelled execution run: ${runId}`);
+      error.name = "TopicDecisionPolicyError";
+      throw error;
+    }
 
     // Check session staleness
     const session = this.options.repos.topicDecisions.getSession(namespaceId, run.sessionId);
@@ -243,7 +249,7 @@ export class ProposalExecutor {
     actor: Record<string, unknown>,
     idempotencyKey: string
   ): Promise<TopicExecutionRunRecord> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const run = this.getRun(namespaceId, runId);
 
     // Validate run version
@@ -583,10 +589,24 @@ export class ProposalExecutor {
     result: RunResult,
     updatedAt: string
   ): TopicExecutionRunRecord {
-    return this.options.repos.topicDecisions.updateExecutionRun(
-      { ...run, status, result: result as unknown as Record<string, unknown>, version: run.version + 1, updatedAt },
-      run.version
-    );
+    return this.options.repos.transaction(() => {
+      const updatedRun = this.options.repos.topicDecisions.updateExecutionRun(
+        { ...run, status, result: result as unknown as Record<string, unknown>, version: run.version + 1, updatedAt },
+        run.version
+      );
+
+      if (status === "completed" || status === "failed" || status === "cancelled") {
+        const session = this.options.repos.topicDecisions.getSession(run.namespaceId, run.sessionId);
+        if (session?.state === "executing") {
+          this.options.repos.topicDecisions.updateSession(
+            { ...session, state: status, version: session.version + 1, updatedAt },
+            session.version
+          );
+        }
+      }
+
+      return updatedRun;
+    });
   }
 
   private registerDefaultHandlers(): void {

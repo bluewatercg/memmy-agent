@@ -279,6 +279,7 @@ export interface ChangeLogRecord {
   namespaceId?: string;
   kind?: string;
   op?: string;
+
   entityId?: string;
   userId: string;
   changeType: string;
@@ -287,6 +288,15 @@ export interface ChangeLogRecord {
   after?: unknown;
   source: string;
   createdAt: string;
+}
+export interface TopicDecisionAggregateMetrics {
+  sessions: number;
+  snapshots: number;
+  positions: number;
+  evidenceQuestions: number;
+  proposalsApproved: number;
+  executionRuns: number;
+  totalDurationMs: number;
 }
 
 export interface SkillTrialRecord {
@@ -3479,6 +3489,57 @@ export class RuntimeRepository {
       params.push(value);
     }
   }
+  aggregateTopicDecisionMetrics(): TopicDecisionAggregateMetrics {
+    const entityCount = (table: string): number => {
+      const row = this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
+      return row.count;
+    };
+    const rows = this.db.prepare(`SELECT action, meta_json FROM audit_logs WHERE session_id IS NOT NULL`).all() as Array<{ action: string; meta_json: string }>;
+    const auditCount = (suffix: string): number => rows.filter((row) => row.action.endsWith(suffix)).length;
+    const totalDurationMs = rows.reduce((total, row) => {
+      const meta = parseJson<unknown>(row.meta_json, {});
+      return !isRecord(meta) || typeof meta.durationMs !== "number" || !Number.isFinite(meta.durationMs)
+        ? total
+        : total + Math.max(0, Math.round(meta.durationMs));
+    }, 0);
+    return {
+      sessions: entityCount("project_topic_decision_sessions"),
+      snapshots: entityCount("project_topic_decision_snapshots"),
+      positions: entityCount("project_topic_agent_positions"),
+      evidenceQuestions: entityCount("project_topic_evidence_requests"),
+      proposalsApproved: auditCount("proposal_approved"),
+      executionRuns: entityCount("project_topic_execution_runs"),
+      totalDurationMs
+    };
+  }
+
+  topicDecisionMetrics(sessionId: string): {
+    sessionId: string;
+    snapshots: number;
+    positions: number;
+    evidenceQuestions: number;
+    proposalsApproved: number;
+    executionRuns: number;
+    totalDurationMs: number;
+  } {
+    const rows = this.db.prepare(`SELECT action, meta_json FROM audit_logs WHERE session_id = ?`).all(sessionId) as Array<{ action: string; meta_json: string }>;
+    const count = (suffix: string): number => rows.filter((row) => row.action.endsWith(suffix)).length;
+    const totalDurationMs = rows.reduce((total, row) => {
+      const meta = parseJson<unknown>(row.meta_json, {});
+      if (!isRecord(meta) || typeof meta.durationMs !== "number" || !Number.isFinite(meta.durationMs)) return total;
+      return total + Math.max(0, Math.round(meta.durationMs));
+    }, 0);
+    return {
+      sessionId,
+      snapshots: count("snapshot_created"),
+      positions: count("position_created"),
+      evidenceQuestions: count("evidence_question_created") + count("evidence_answered"),
+      proposalsApproved: count("proposal_approved"),
+      executionRuns: count("execution_started"),
+      totalDurationMs
+    };
+  }
+
 
   insertApiLog(input: Omit<ApiLogRecord, "id">): ApiLogRecord {
     const result = this.db
@@ -4096,8 +4157,8 @@ export class TopicDecisionRepository {
       throw new TopicDecisionIdempotencyConflictError(position.id, "position");
     }
     try {
-      this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, risks_json, assumptions_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), toJson(position.risks ?? []), toJson(position.assumptions ?? []), position.createdAt);
+      this.db.prepare(`INSERT INTO project_topic_agent_positions (id, namespace_id, session_id, snapshot_id, round, agent_id, stance, rationale, evidence_ids_json, confidence, missing_information_json, risks_json, assumptions_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(position.id, position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId, position.stance, position.rationale, toJson(position.evidenceIds), position.confidence ?? null, toJson(position.missingInformation ?? []), toJson(position.risks ?? []), toJson(position.assumptions ?? []), position.createdAt);
     } catch (err) {
       if (err instanceof Error && /UNIQUE constraint failed: project_topic_agent_positions\.session_id, project_topic_agent_positions\.snapshot_id, project_topic_agent_positions\.round, project_topic_agent_positions\.agent_id/i.test(err.message)) {
         throw new TopicDecisionImmutablePositionError(position.sessionId, position.snapshotId, position.round, position.agentId);
@@ -4209,12 +4270,36 @@ export class TopicDecisionRepository {
     const rows = this.db.prepare(`SELECT * FROM project_topic_execution_runs WHERE namespace_id = ? AND session_id = ? ORDER BY created_at`).all(namespaceId, sessionId) as TopicExecutionRunSqlRow[];
     return rows.map(topicExecutionRunFromSql);
   }
-
+  markSessionsStaleForTopic(namespaceId: string, topicId: string, reason: string, at: string): { sessions: number; runs: number } {
+    return this.db.transaction(() => {
+      const sessions = this.db.prepare(`SELECT * FROM project_topic_decision_sessions WHERE namespace_id = ? AND topic_id = ? AND state IN ('draft', 'gathering_evidence', 'debating', 'ready_for_decision', 'awaiting_user_input', 'blocked_by_evidence', 'executing')`).all(namespaceId, topicId) as TopicDecisionSessionSqlRow[];
+      let runs = 0;
+      for (const row of sessions) {
+        const session = topicDecisionSessionFromSql(row);
+        const metadata = { ...session.metadata, staleReason: reason, staleAt: at };
+        this.db.prepare(`UPDATE project_topic_decision_sessions SET state = 'stale', version = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`).run(session.version + 1, toJson(metadata), at, session.id, namespaceId, session.version);
+        const executionRows = this.db.prepare(`SELECT * FROM project_topic_execution_runs WHERE namespace_id = ? AND session_id = ? AND status IN ('running', 'awaiting_confirmation', 'awaiting_second_confirmation')`).all(namespaceId, session.id) as TopicExecutionRunSqlRow[];
+        for (const executionRow of executionRows) {
+          const run = topicExecutionRunFromSql(executionRow);
+          const result = isRecordLike(run.result) ? { ...run.result } : {};
+          const actions = Array.isArray(result.actions) ? result.actions.map((action) => {
+            if (!isRecordLike(action)) return action;
+            const status = action.status;
+            return status === 'pending' || status === 'awaiting_confirmation' || status === 'awaiting_second_confirmation' ? { ...action, status: 'skipped' } : action;
+          }) : result.actions;
+          const nextResult = { ...result, actions, error: `session is stale; ${reason}` };
+          this.db.prepare(`UPDATE project_topic_execution_runs SET status = 'failed', result_json = ?, version = ?, updated_at = ? WHERE id = ? AND namespace_id = ? AND version = ?`).run(toJson(nextResult), run.version + 1, at, run.id, namespaceId, run.version);
+          runs += 1;
+        }
+      }
+      return { sessions: sessions.length, runs };
+    })();
+  }
 }
 
 interface TopicDecisionSessionSqlRow { id: string; namespace_id: string; topic_id: string; input_hash: string; state: string; version: number; metadata_json: string; created_at: string; updated_at: string }
 interface TopicDecisionSnapshotSqlRow { id: string; namespace_id: string; session_id: string; round: number; payload_json: string; created_at: string }
-interface TopicAgentPositionSqlRow { id: string; namespace_id: string; session_id: string; snapshot_id: string; round: number; agent_id: string; stance: string; rationale: string; evidence_ids_json: string; risks_json: string; assumptions_json: string; created_at: string }
+interface TopicAgentPositionSqlRow { id: string; namespace_id: string; session_id: string; snapshot_id: string; round: number; agent_id: string; stance: string; rationale: string; evidence_ids_json: string; confidence: number | null; missing_information_json: string | null; risks_json: string; assumptions_json: string; created_at: string }
 interface TopicDebateRoundSqlRow { id: string; namespace_id: string; session_id: string; round: number; status: string; summary: string; metadata_json: string; version: number; created_at: string; updated_at: string }
 interface TopicEvidenceRequestSqlRow { id: string; namespace_id: string; session_id: string; round: number; question: string; verification: TopicEvidenceRequestRecord["verification"]; status: string; metadata_json: string; version: number; created_at: string; updated_at: string }
 interface TopicActionProposalSqlRow { id: string; namespace_id: string; session_id: string; round: number; rank: number; effect: TopicActionProposalRecord["effect"]; title: string; payload_json: string; status: string; version: number; metadata_json: string; created_at: string; updated_at: string }
@@ -4222,7 +4307,7 @@ interface TopicExecutionRunSqlRow { id: string; namespace_id: string; session_id
 
 function topicDecisionSessionFromSql(row: TopicDecisionSessionSqlRow): TopicDecisionSessionRecord { return { id: row.id, namespaceId: row.namespace_id, topicId: row.topic_id, inputHash: row.input_hash, state: row.state as TopicDecisionSessionRecord["state"], version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicDecisionSnapshotFromSql(row: TopicDecisionSnapshotSqlRow): TopicDecisionSnapshotRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, payload: parseJson(row.payload_json, {}) as TopicDecisionSnapshotPayload, createdAt: row.created_at }; }
-function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), risks: parseJson(row.risks_json, []), assumptions: asStringArray(parseJson(row.assumptions_json, [])), createdAt: row.created_at }; }
+function topicAgentPositionFromSql(row: TopicAgentPositionSqlRow): TopicAgentPositionRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, snapshotId: row.snapshot_id, round: row.round, agentId: row.agent_id, stance: row.stance, rationale: row.rationale, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), confidence: row.confidence ?? undefined, missingInformation: asStringArray(parseJson(row.missing_information_json ?? "[]", [])), risks: parseJson(row.risks_json, []), assumptions: asStringArray(parseJson(row.assumptions_json, [])), createdAt: row.created_at }; }
 function topicDebateRoundFromSql(row: TopicDebateRoundSqlRow): TopicDebateRoundRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, status: row.status, summary: row.summary, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicEvidenceRequestFromSql(row: TopicEvidenceRequestSqlRow): TopicEvidenceRequestRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, question: row.question, verification: row.verification, status: row.status, metadata: parseJson(row.metadata_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicActionProposalFromSql(row: TopicActionProposalSqlRow): TopicActionProposalRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, rank: row.rank, effect: row.effect, title: row.title, payload: parseJson(row.payload_json, {}), status: row.status, version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }

@@ -569,6 +569,151 @@ memmyMemory:
 The built-in viewer at `/viewer` includes a Topic Inbox panel for interactive
 review, decision, merge, and split operations.
 
+
+## Topic Decisions (Multi-Agent)
+
+Topic Decisions extends Topic Inbox with a multi-agent deliberation workflow for
+high-stakes topic actions. Multiple LLM agents independently evaluate evidence,
+debate conflicts, synthesize proposals, and execute approved actions with
+built-in safety gates.
+
+> **Disabled by default.** This feature incurs significant LLM cost — each
+> decision session runs multiple models through independent positioning, debate
+> (up to 3 rounds), synthesis, and execution phases. Enable only for projects
+> that need structured multi-perspective review.
+
+### Configuration
+
+Topic Decisions is controlled by two environment variables:
+
+```bash
+# Enable the feature (default: false)
+MEMMY_TOPIC_DECISIONS_ENABLED=true
+
+# Comma-separated model roster (see note below)
+MEMMY_TOPIC_DECISION_MODELS=gpt-4o-mini,claude-3-5-sonnet,qwen3.7-plus
+```
+
+Equivalent `config.yaml` form:
+
+```yaml
+memmyMemory:
+  algorithm:
+    topicDecisions:
+      enabled: true
+      models:
+        - gpt-4o-mini
+        - claude-3-5-sonnet
+        - qwen3.7-plus
+```
+
+When `enabled` is `false` (the default), all topic-decision API routes return
+errors and no LLM calls are made.
+
+**Model roster defaults:** The config default for `models` is an empty list.
+When the list is empty at runtime, the parser falls back to a built-in roster
+of `MiniMax-M2.5`, `qwen3.7-plus`, `kimi-k2.5`, `glm-5`. Set
+`MEMMY_TOPIC_DECISION_MODELS` to override.
+
+### Model Cost Implications
+
+Each decision session invokes every model in the roster multiple times:
+
+| Phase | Calls per model | Notes |
+|---|---|---|
+| Independent positioning | 1 | Each agent submits an initial position |
+| Debate | up to 3 rounds | Each round, each agent responds to conflicts |
+| Synthesis | 1 | Single call to merge proposals |
+| **Total (3-model roster, max debate)** | **up to 15 LLM calls** | Per decision session |
+
+With the 4-model fallback roster and 3 debate rounds, a single session can
+produce 20+ LLM calls. Monitor usage and choose models accordingly — mixing
+expensive frontier models with cheaper ones balances quality and cost.
+
+### Debate Workflow
+
+```
+start session
+     │
+     ▼
+independent positions (each agent, parallel)
+     │
+     ▼
+debate rounds (max 3)
+     │
+     ├─ no material conflict  ──► ready_for_decision
+     ├─ convergence            ──► ready_for_decision
+     ├─ max rounds reached     ──► ready_for_decision (or blocked if high-severity)
+     └─ blocked by evidence    ──► awaiting_user_input
+     │
+     ▼
+synthesize proposals
+     │
+     ▼
+human approves proposal
+     │
+     ▼
+execute actions (with confirmation gates)
+```
+
+The debate phase runs **at most 3 rounds**. After round 3, the session moves to
+`ready_for_decision` regardless of remaining conflicts — unless unresolved
+high-severity conflicts exist, in which case the session is `blocked_by_evidence`
+and waits for user-supplied evidence.
+
+### Second Confirmation for Irreversible Effects
+
+Actions with irreversible effects require **two separate confirmations** before
+execution. The confirmation is a versioned two-step protocol:
+
+1. **First confirmation** — caller sends `approved: true` to the confirm
+   endpoint. The executor persists a `ConfirmationEvent` (ordinal 1), sets the
+   action status to `awaiting_second_confirmation`, and increments the run
+   version. The run status becomes `awaiting_second_confirmation`.
+2. **Second confirmation** — caller sends another `approved: true` with the
+   updated `expectedRunVersion`. The executor persists a second
+   `ConfirmationEvent` (ordinal 2) and executes the action handler.
+
+Both confirmations may come from the same actor — the protocol enforces two
+distinct API calls with a version boundary between them, not two distinct
+identities. There is no enforced time delay (cooling-off period); the safety
+comes from requiring the caller to re-read current state (via the updated
+`expectedRunVersion`) before the irreversible effect executes.
+
+Rejecting at either stage (`approved: false`) cancels the run and skips all
+remaining actions.
+
+Effects requiring two confirmations:
+
+- `delete` — memory or topic deletion
+- `topic_mutation` — structural topic changes (merge, split)
+- `memory_promotion` — L1 → L2/L3 promotion
+- `authoritative_write` — writes to authoritative knowledge stores
+- `external_write` — writes to external systems
+
+Effects that execute after a single confirmation:
+
+- `read`, `analyze`, `draft`, `create_candidate_task`
+
+### REST API
+
+All routes are under `/api/v1/topic-inbox/`. Mutation routes require
+`panel:write` capability; the read route requires `panel:read`. All mutations
+accept a `requestId` for idempotency.
+
+| Method | Path | Capability | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/topic-inbox/topics/:topicId/decisions` | `panel:write` | Start a decision session |
+| `GET` | `/api/v1/topic-inbox/decisions/:sessionId` | `panel:read` | Read session detail |
+| `PATCH` | `/api/v1/topic-inbox/decisions/:sessionId/agents` | `panel:write` | Update agent roster |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/run` | `panel:write` | Run independent positions |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/answers` | `panel:write` | Submit evidence answers |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/proposals/:proposalId/approve` | `panel:write` | Approve a proposal |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/executions/:runId/resume` | `panel:write` | Resume execution |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/executions/:runId/actions/:actionId/confirm` | `panel:write` | Confirm an action (first or second) |
+| `POST` | `/api/v1/topic-inbox/decisions/:sessionId/cancel` | `panel:write` | Cancel a session |
+
+
 ## Topic Inbox Usage Guide
 
 This guide helps you understand and use the Topic Inbox feature effectively.

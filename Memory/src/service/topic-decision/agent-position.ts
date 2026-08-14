@@ -1,7 +1,8 @@
 import type { Repositories } from "../../storage/repositories.js";
 import type { RuntimeNamespace, TopicAgentSpec, TopicDecisionSnapshotPayload } from "../../types.js";
-import { newId, stableHash } from "../../utils/id.js";
+import { newId } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
+import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
 import type { LlmClient, LlmMessage, LlmCompletionOptions } from "../../model/types.js";
 import type { TopicAgentPositionRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotRecord } from "../../types.js";
 
@@ -11,7 +12,7 @@ export interface AgentPositionResult {
   evidenceIds: string[];
   facts: Array<{ claim: string; evidenceIds: string[] }>;
   assumptions: string[];
-  missingInformation: Array<{ key: string; question: string; blocking: boolean; decisionImpact: string }>;
+  missingInformation: string[];
   risks: Array<{ severity: "low" | "medium" | "high"; description: string }>;
   counterarguments: string[];
   suggestedActions: string[];
@@ -99,13 +100,18 @@ export function parseAgentPosition(
     return { code: "MISSING_FIELD", message: "missingInformation must be an array" };
   }
 
+  const normalizedMissingInformation: string[] = [];
   for (const mi of missingInformation) {
-    if (!mi || typeof mi !== "object") return { code: "MISSING_FIELD", message: "missingInformation item must be an object" };
-    const m = mi as Record<string, unknown>;
-    if (typeof m.key !== "string") return { code: "MISSING_FIELD", message: "missingInformation.key must be a string" };
-    if (typeof m.question !== "string") return { code: "MISSING_FIELD", message: "missingInformation.question must be a string" };
-    if (typeof m.blocking !== "boolean") return { code: "MISSING_FIELD", message: "missingInformation.blocking must be a boolean" };
-    if (typeof m.decisionImpact !== "string") return { code: "MISSING_FIELD", message: "missingInformation.decisionImpact must be a string" };
+    if (typeof mi === "string") {
+      normalizedMissingInformation.push(mi);
+    } else if (mi && typeof mi === "object") {
+      const m = mi as Record<string, unknown>;
+      if (typeof m.question === "string") {
+        normalizedMissingInformation.push(m.question);
+      } else if (typeof m.key === "string") {
+        normalizedMissingInformation.push(m.key);
+      }
+    }
   }
 
   // Parse risks
@@ -131,14 +137,13 @@ export function parseAgentPosition(
   if (!Array.isArray(suggestedActions)) {
     return { code: "MISSING_FIELD", message: "suggestedActions must be an array" };
   }
-
   return {
     judgment: judgment as string,
     confidence,
     evidenceIds,
     facts: facts as AgentPositionResult["facts"],
     assumptions: assumptions as string[],
-    missingInformation: missingInformation as AgentPositionResult["missingInformation"],
+    missingInformation: normalizedMissingInformation,
     risks: risks as AgentPositionResult["risks"],
     counterarguments: counterarguments as string[],
     suggestedActions: suggestedActions as string[]
@@ -157,7 +162,7 @@ export class AgentPositionService {
     namespace: RuntimeNamespace,
     sessionId: string
   ): Promise<void> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
 
     // Get session
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
@@ -244,6 +249,10 @@ export class AgentPositionService {
           stance: parsed.judgment,
           rationale: parsed.facts.map(f => f.claim).join("; ") + " " + parsed.assumptions.join("; "),
           evidenceIds: parsed.evidenceIds,
+          confidence: parsed.confidence,
+          missingInformation: parsed.missingInformation,
+          risks: parsed.risks,
+          assumptions: parsed.assumptions,
           createdAt: nowIso()
         };
 

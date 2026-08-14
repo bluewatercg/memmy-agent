@@ -676,10 +676,17 @@ export class MemoryService {
           "panel.items"
         ],
         memoryLayers: ["L1", "L2", "L3", "Skill"],
+        ...(this.topicDecisions.enabled
+          ? { topicDecisions: { enabled: true as const, models: [...this.config.algorithm.topicDecisions.models] } }
+          : {}),
         supportsCli: true
       },
       serverTime: nowIso()
     };
+  }
+
+  topicDecisionsEnabled(): boolean {
+    return this.topicDecisions.enabled;
   }
 
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
@@ -1891,8 +1898,12 @@ export class MemoryService {
     return this.topicDecisions.read(namespace, sessionId);
   }
 
-  async runIndependentPositions(namespace: RuntimeNamespace, sessionId: string): Promise<void> {
-    return this.topicDecisions.runIndependentPositions(namespace, sessionId);
+  async runIndependentPositions(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<void> {
+    return this.topicDecisions.runIndependentPositions(namespace, sessionId, expectedVersion);
+  }
+
+  async runTopicDecision(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<void> {
+    return this.topicDecisions.runDecision(namespace, sessionId, expectedVersion);
   }
 
   async checkDecisionability(namespace: RuntimeNamespace, sessionId: string) {
@@ -1912,12 +1923,12 @@ export class MemoryService {
     return this.topicDecisions.getEvidenceSource();
   }
 
-  async runDebate(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
-    return this.topicDecisions.runDebate(namespace, sessionId);
+  async runDebate(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<TopicDecisionDetail> {
+    return this.topicDecisions.runDebate(namespace, sessionId, expectedVersion);
   }
 
-  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string): Promise<TopicDecisionDetail> {
-    return this.topicDecisions.synthesizeProposals(namespace, sessionId);
+  async synthesizeProposals(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<TopicDecisionDetail> {
+    return this.topicDecisions.synthesizeProposals(namespace, sessionId, expectedVersion);
   }
 
   async approveProposal(

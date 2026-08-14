@@ -628,6 +628,8 @@ const statements = [
     stance TEXT NOT NULL,
     rationale TEXT NOT NULL,
     evidence_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_ids_json)),
+    confidence REAL,
+    missing_information_json TEXT DEFAULT '[]' CHECK (missing_information_json IS NULL OR json_valid(missing_information_json)),
     risks_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(risks_json)),
     assumptions_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(assumptions_json)),
     created_at TEXT NOT NULL,

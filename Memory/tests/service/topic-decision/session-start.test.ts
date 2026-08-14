@@ -8,6 +8,7 @@ import { loadMemmyConfig } from "../../../src/config/index.js";
 import type { RuntimeNamespace, TopicAgentSpec } from "../../../src/types.js";
 import { nowIso } from "../../../src/utils/time.js";
 import { stableHash } from "../../../src/utils/id.js";
+import { namespaceIdFromContext } from "../../../src/service/namespace/namespace-scope.js";
 
 const roots: string[] = [];
 const envBackup: Record<string, string | undefined> = {};
@@ -188,6 +189,9 @@ describe("TopicDecisionService.start", () => {
 
     // Verify snapshot payload
     expect(result.snapshot.payload.topicVersion).toBe(3);
+    expect(result.snapshot.payload.topicTitle).toBe("Test Topic");
+    expect(result.snapshot.payload.topicSummary).toBe("Test summary");
+    expect(result.snapshot.payload.sourceMemoryIds).toEqual([]);
     expect(result.snapshot.payload.evidenceIds).toEqual(["ev-1"]);
     expect(result.snapshot.payload.evidenceHashes).toBeDefined();
     expect(result.snapshot.payload.inputHash).toBeDefined();
@@ -437,7 +441,7 @@ async function setupService(options: { projectId?: string } = {}): Promise<{
     userId: "user-1",
     projectId: options.projectId
   };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
 
   const service = new MemoryService({
     db,

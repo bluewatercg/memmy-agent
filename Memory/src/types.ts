@@ -189,6 +189,8 @@ export interface TopicAgentPositionRecord {
   stance: string;
   rationale: string;
   evidenceIds: string[];
+  confidence?: number;
+  missingInformation?: string[];
   risks?: Array<{ severity: "low" | "medium" | "high"; description: string }>;
   assumptions?: string[];
   createdAt: IsoTime;
@@ -688,6 +690,10 @@ export interface HealthResponse {
     tools: string[];
     memoryLayers: MemoryLayer[];
     supportsCli: boolean;
+    topicDecisions?: {
+      enabled: true;
+      models: string[];
+    };
   };
   serverTime: IsoTime;
 }

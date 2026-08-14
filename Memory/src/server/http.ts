@@ -52,8 +52,7 @@ const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
 const agentTokenStatsService = createAgentTokenStatsService();
 
-export const API_ROUTES = [
-  "GET /api/v1/health",
+const TOPIC_DECISION_API_ROUTES = [
   "POST /api/v1/topic-inbox/topics/:topicId/decisions",
   "GET /api/v1/topic-inbox/decisions/:sessionId",
   "PATCH /api/v1/topic-inbox/decisions/:sessionId/agents",
@@ -62,7 +61,12 @@ export const API_ROUTES = [
   "POST /api/v1/topic-inbox/decisions/:sessionId/proposals/:proposalId/approve",
   "POST /api/v1/topic-inbox/decisions/:sessionId/executions/:runId/resume",
   "POST /api/v1/topic-inbox/decisions/:sessionId/executions/:runId/actions/:actionId/confirm",
-  "POST /api/v1/topic-inbox/decisions/:sessionId/cancel",
+  "POST /api/v1/topic-inbox/decisions/:sessionId/cancel"
+] as const;
+
+export const API_ROUTES = [
+  "GET /api/v1/health",
+  ...TOPIC_DECISION_API_ROUTES,
   "POST /api/v1/admin/reload-config",
   "POST /api/v1/admin/shutdown",
   "POST /api/v1/sessions/open",
@@ -122,6 +126,12 @@ export const API_ROUTES = [
   "DELETE /api/v1/panel/tasks/:id",
   "GET /api/v1/agent-token-stats"
 ] as const;
+
+function advertisedApiRoutes(service: MemoryService): string[] {
+  if (service.topicDecisionsEnabled()) return [...API_ROUTES];
+  const decisionRoutes = new Set<string>(TOPIC_DECISION_API_ROUTES);
+  return API_ROUTES.filter((route) => !decisionRoutes.has(route));
+}
 
 export interface MemoryHttpServerOptions {
   service: MemoryService;
@@ -440,7 +450,7 @@ async function routeRequest(
   const path = url.pathname;
 
   if (method === "GET" && path === "/api/v1/health") {
-    return service.health([...API_ROUTES]);
+    return service.health(advertisedApiRoutes(service));
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
     requireAdminWrite(principal);
@@ -884,7 +894,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.run", principal);
     const sessionId = decodeMatchSegment(topicDecisionRun, 1);
     try {
-      await service.idempotent("topic-decision.run", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
+      await service.idempotent("topic-decision.run", request, { sessionId, request }, async () => service.runTopicDecision(request.namespace, sessionId, request.expectedVersion), { exactReplay: true });
       return { accepted: true };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -897,7 +907,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.positions", principal);
     const sessionId = decodeMatchSegment(topicDecisionPositions, 1);
     try {
-      await service.idempotent("topic-decision.positions", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId), { exactReplay: true });
+      await service.idempotent("topic-decision.positions", request, { sessionId, request }, async () => service.runIndependentPositions(request.namespace, sessionId, request.expectedVersion), { exactReplay: true });
       return { accepted: true };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -910,7 +920,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.debate", principal);
     const sessionId = decodeMatchSegment(topicDecisionDebate, 1);
     try {
-      const result = await service.idempotent("topic-decision.debate", request, { sessionId, request }, async () => service.runDebate(request.namespace, sessionId), { exactReplay: true });
+      const result = await service.idempotent("topic-decision.debate", request, { sessionId, request }, async () => service.runDebate(request.namespace, sessionId, request.expectedVersion), { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -923,7 +933,7 @@ async function routeRequest(
     const request = topicDecisionMutation(body, "topic-decision.proposals", principal);
     const sessionId = decodeMatchSegment(topicDecisionProposals, 1);
     try {
-      const result = await service.idempotent("topic-decision.proposals", request, { sessionId, request }, async () => service.synthesizeProposals(request.namespace, sessionId), { exactReplay: true });
+      const result = await service.idempotent("topic-decision.proposals", request, { sessionId, request }, async () => service.synthesizeProposals(request.namespace, sessionId, request.expectedVersion), { exactReplay: true });
       return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -1057,7 +1067,7 @@ async function routeRequest(
     requirePanelRead(principal);
     return service.adminStatus({
       namespace: principal.namespace
-    }, [...API_ROUTES]);
+    }, advertisedApiRoutes(service));
   }
 
   if (method === "GET" && path === "/api/v1/panel/config") {
@@ -2027,11 +2037,12 @@ function topicDecisionStartInput(body: unknown, routeName: string, principal: Au
   return { namespace: request.namespace!, agents: obj.agents as TopicAgentSpec[] | undefined, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
-function topicDecisionMutation(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; adapterId: string; requestId: string } {
+function topicDecisionMutation(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; adapterId: string; requestId: string; expectedVersion?: number } {
   const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
   if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
   if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
-  return { namespace: request.namespace!, adapterId: obj.adapterId, requestId: obj.requestId };
+  const expectedVersion = typeof obj.expectedVersion === "number" && Number.isInteger(obj.expectedVersion) && obj.expectedVersion >= 1 ? obj.expectedVersion as number : undefined;
+  return { namespace: request.namespace!, adapterId: obj.adapterId, requestId: obj.requestId, expectedVersion };
 }
 
 function topicDecisionAgentsInput(
@@ -2191,6 +2202,14 @@ function publicTopicExecutionRun(run: TopicExecutionRunRecord): Record<string, u
 function mapTopicDecisionError(error: unknown): Error {
   if (!(error instanceof Error)) return error as Error;
   const name = error.name;
+  if (name === "TopicDecisionStaleVersionError") {
+    const err = error as Error & { sessionId?: string; currentVersion?: number; currentState?: string };
+    const details: Record<string, unknown> = {};
+    if (err.sessionId) details.sessionId = err.sessionId;
+    if (err.currentVersion !== undefined) details.currentVersion = err.currentVersion;
+    if (err.currentState) details.currentState = err.currentState;
+    return new MemoryServiceError("conflict", error.message, 409, undefined, details);
+  }
   if (name === "TopicDecisionConflictError") {
     const err = error as Error & { entityId?: string; entityType?: string; currentVersion?: number; currentState?: string };
     const details: Record<string, unknown> = {};

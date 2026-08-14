@@ -94,12 +94,15 @@ export class EvidenceSnapshotBuilder {
 
     return {
       topicVersion: topic.version,
-      evidenceIds: evidence.map((e) => e.id),
+      topicTitle: topic.title,
+      topicSummary: topic.summary,
+      sourceMemoryIds: topic.sourceMemoryIds ?? [],
+      evidenceIds: evidence.map((ev) => ev.id),
       evidenceHashes,
       evidenceContent,
       projectConstraints,
       roster,
-      inputHash
+      inputHash,
     };
   }
 }

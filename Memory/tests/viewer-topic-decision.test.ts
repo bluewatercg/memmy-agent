@@ -9,11 +9,15 @@ describe("topic decision console", () => {
     expect(html.indexOf("Decision summary")).toBeLessThan(html.indexOf("Debate details"));
   });
 
-  it("renders blocked questions instead of an approval action", () => {
+  it("derives blocked, risk, and low-confidence banners from persisted decision state", () => {
     const html = memoryPanelHtml();
+    expect(html).toContain('session.state === "blocked_by_evidence"');
+    expect(html).toContain("position.missingInformation");
+    expect(html).toContain('risk.severity === "high"');
+    expect(html).toContain("position.confidence < 0.5");
     expect(html).toContain("Missing information");
-    expect(html).toContain("Submit answers");
     expect(html).toContain("Unresolved high-risk disagreement");
+    expect(html).toContain("Low confidence");
   });
 
   it("requires explicit first and second confirmation clicks for irreversible effects", () => {

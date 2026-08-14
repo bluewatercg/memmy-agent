@@ -8,6 +8,7 @@ import { loadMemmyConfig } from "../../../src/config/index.js";
 import type { RuntimeNamespace } from "../../../src/types.js";
 import { nowIso } from "../../../src/utils/time.js";
 import { newId, stableHash } from "../../../src/utils/id.js";
+import { namespaceIdFromContext } from "../../../src/service/namespace/namespace-scope.js";
 
 const roots: string[] = [];
 
@@ -605,7 +606,7 @@ async function setupService(): Promise<{
     profileId: "test-profile",
     userId: "user-1"
   };
-  const namespaceId = stableHash(namespace);
+  const namespaceId = namespaceIdFromContext(namespace)
 
   repos.topics.insertTopic({
     id: "topic-1",

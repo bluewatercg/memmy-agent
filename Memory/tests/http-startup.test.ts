@@ -81,6 +81,9 @@ function stubService(reconcile: () => void): MemoryService {
     health() {
       return { ok: true };
     },
+    topicDecisionsEnabled() {
+      return false;
+    },
     reconcileWorkerStartup: reconcile,
     async runWorkerOnce() {
       return workerResult(0);

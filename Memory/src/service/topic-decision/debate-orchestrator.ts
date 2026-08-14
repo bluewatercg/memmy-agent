@@ -8,6 +8,7 @@ import type {
 } from "../../types.js";
 import { newId, stableHash } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
+import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage } from "../../model/types.js";
 
 export type DebateStopReason =
@@ -65,7 +66,7 @@ export class DebateOrchestrator {
     namespace: RuntimeNamespace,
     sessionId: string
   ): Promise<{ roundRecords: TopicDebateRoundRecord[]; finalState: string }> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) throw new Error(`session not found: ${sessionId}`);
 

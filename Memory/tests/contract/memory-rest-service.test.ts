@@ -85,7 +85,10 @@ describe("MemoryService / REST contract", () => {
     });
     const health = await client.health();
     expect(health.storage.backendId).toBe("sqlite-local");
-    expect(health.capabilities.routes).toEqual([...API_ROUTES]);
+    expect(health.capabilities.routes).toContain("GET /api/v1/topic-inbox");
+    expect(health.capabilities.routes).toContain("POST /api/v1/topic-inbox/candidates/:id/decision");
+    expect(health.capabilities.routes).not.toContain("POST /api/v1/topic-inbox/topics/:topicId/decisions");
+    expect(health.capabilities.routes).not.toContain("GET /api/v1/topic-inbox/decisions/:sessionId");
     expect(health.capabilities.tools).toEqual([
       "session.open",
       "session.close",
@@ -100,6 +103,19 @@ describe("MemoryService / REST contract", () => {
       "panel.items"
     ]);
 
+    });
+    db.close();
+  });
+  it("advertises governed topic decision routes when enabled", async () => {
+    const { db, service } = createTestService({ topicDecisionEnabled: true });
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
+      const health = await client.health();
+      expect(health.capabilities.routes).toEqual([...API_ROUTES]);
     });
     db.close();
   });

@@ -89,8 +89,10 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
         const metadata: Record<string, unknown> = { ...current.metadata, signals: unique([...stringArray(current.metadata.signals), ...topicSignalsForMemory(memory)]), centroidInputHash: centroidHash };
         if (embeddingCentroid.length) metadata.embeddingCentroid = embeddingCentroid;
         else delete metadata.embeddingCentroid;
-        if (materiallyChanged) this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata, version: current.version + 1, updatedAt: at }, current.version);
-        else if (centroidChanged || current.metadata.centroidInputHash !== centroidHash) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
+        if (materiallyChanged) {
+          this.deps.repos.topics.updateTopic({ ...current, title: analysis.topic.title, summary: analysis.topic.summary, sourceMemoryIds, metadata, version: current.version + 1, updatedAt: at }, current.version);
+          this.deps.repos.topicDecisions.markSessionsStaleForTopic(namespaceId, topic.id, "topic evidence changed", at);
+        } else if (centroidChanged || current.metadata.centroidInputHash !== centroidHash) this.deps.repos.topics.updateTopicMetadata(current.id, namespaceId, metadata, at);
         const pending = this.deps.repos.topics.listCandidates(topic.id, namespaceId).filter((candidate) => candidate.status === "pending");
         const pendingByIdentity = new Map(pending.map((candidate) => [candidateIdentityFromRecord(candidate), candidate]));
         const retained = new Set<string>();
@@ -145,9 +147,11 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       if (source.version !== input.expectedVersion) throw new TopicVersionConflictError(source.id, source.version, source.status);
       if (target.version !== input.targetExpectedVersion) throw new TopicVersionConflictError(target.id, target.version, target.status);
       const at = this.now();
-      this.deps.repos.topics.moveEvidence(source.id, target.id, namespaceId);
       const updatedTarget = this.deps.repos.topics.updateTopic({ ...target, sourceMemoryIds: unique([...target.sourceMemoryIds, ...source.sourceMemoryIds]), version: target.version + 1, updatedAt: at }, target.version);
+      this.deps.repos.topicDecisions.markSessionsStaleForTopic(namespaceId, target.id, "topic merged", at);
+      this.deps.repos.topics.moveEvidence(source.id, target.id, namespaceId);
       this.deps.repos.topics.updateTopic({ ...source, sourceMemoryIds: [], status: "merged", version: source.version + 1, metadata: { ...source.metadata, mergedIntoTopicId: target.id }, updatedAt: at }, source.version);
+      this.deps.repos.topicDecisions.markSessionsStaleForTopic(namespaceId, source.id, "topic merged", at);
       const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_merged", targetKind: "project_topic", targetId: target.id, before: { source, target }, after: updatedTarget, meta: { sourceTopicId: source.id, targetTopicId: target.id }, createdAt: at });
       return { topic: updatedTarget, mergedTopicId: source.id, auditId: audit.id };
     });
@@ -166,6 +170,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
       this.deps.repos.topics.insertTopic(topic);
       this.deps.repos.topics.moveEvidence(source.id, topic.id, namespaceId, [...selected]);
       const updatedSource = this.deps.repos.topics.updateTopic({ ...source, sourceMemoryIds: source.sourceMemoryIds.filter((id) => !selected.has(id)), version: source.version + 1, updatedAt: at }, source.version);
+      this.deps.repos.topicDecisions.markSessionsStaleForTopic(namespaceId, source.id, "topic split", at);
       const audit = this.deps.repos.runtime.insertAudit({ userId: namespace.userId ?? "local", actor: input.actor ?? { type: "user" }, action: "project_topic_split", targetKind: "project_topic", targetId: source.id, before: source, after: { source: updatedSource, topic }, meta: { sourceTopicId: source.id, newTopicId: topic.id, evidenceMemoryIds: [...selected] }, createdAt: at });
       return { topic, sourceTopic: updatedSource, auditId: audit.id };
     });

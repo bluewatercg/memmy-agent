@@ -22,6 +22,7 @@ export function createMemoryServiceFixture(): {
     skillLlm?: LlmClient;
     embedder?: Embedder;
     topicDecisionEnabled?: boolean;
+    createLlmClient?: (model: string) => LlmClient;
   }) => {
     root: string;
     db: MemoryDb;
@@ -52,6 +53,7 @@ export function createMemoryServiceFixture(): {
     skillLlm?: LlmClient;
     embedder?: Embedder;
     topicDecisionEnabled?: boolean;
+    createLlmClient?: (model: string) => LlmClient;
   } = {}): {
     root: string;
     db: MemoryDb;
@@ -74,6 +76,7 @@ export function createMemoryServiceFixture(): {
         config,
         llm: options.llm,
         skillLlm: options.skillLlm,
+        createLlmClient: options.createLlmClient,
         embedder: options.embedder ?? createCapturingEmbedder([])
       })
     };

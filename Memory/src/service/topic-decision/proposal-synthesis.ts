@@ -6,8 +6,9 @@ import type {
   TopicAgentPositionRecord,
   TopicDecisionSnapshotPayload
 } from "../../types.js";
-import { newId, stableHash } from "../../utils/id.js";
+import { newId } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
+import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
 import type { LlmClient, LlmCompletionOptions, LlmMessage } from "../../model/types.js";
 import type { TopicConflict } from "./debate-orchestrator.js";
 
@@ -17,6 +18,16 @@ export interface ProposalActionContract {
   artifact: string;
   acceptanceCondition: string;
   recoveryPoint: string;
+}
+
+export interface SynthesizedProposalAction {
+  id: string;
+  effect: TopicActionEffect;
+  target: string;
+  input: Record<string, unknown>;
+  dependsOn: string[];
+  recoveryPoint: string;
+  acceptanceCondition: string;
 }
 
 export interface SynthesizedProposal {
@@ -34,6 +45,7 @@ export interface SynthesizedProposal {
   acceptanceCondition: string;
   recoveryPoint: string;
   agentContributions: string[];
+  actions?: SynthesizedProposalAction[];
   recommended?: boolean;
 }
 
@@ -55,7 +67,7 @@ export class ProposalSynthesis {
     namespace: RuntimeNamespace,
     sessionId: string
   ): Promise<{ proposals: TopicActionProposalRecord[]; finalState: string }> {
-    const namespaceId = stableHash(namespace);
+    const namespaceId = namespaceIdFromContext(namespace)
     const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
     if (!session) throw new Error(`session not found: ${sessionId}`);
 
@@ -137,7 +149,8 @@ export class ProposalSynthesis {
           rollbackPlan: proposal.rollbackPlan,
           verificationPlan: proposal.verificationPlan,
           evidenceIds: proposal.evidenceIds,
-          agentContributions: proposal.agentContributions
+          agentContributions: proposal.agentContributions,
+          actions: proposal.actions
         },
         status: "draft",
         version: 1,
@@ -215,6 +228,7 @@ export class ProposalSynthesis {
       const acceptanceCondition = p.acceptanceCondition as string;
       const recoveryPoint = p.recoveryPoint as string;
       const agentContributions = p.agentContributions as string[];
+      const actions = p.actions as SynthesizedProposalAction[] | undefined;
       const recommended = p.recommended as boolean | undefined;
 
       // Validate evidence citations
@@ -246,6 +260,7 @@ export class ProposalSynthesis {
         artifact,
         acceptanceCondition,
         recoveryPoint,
+        actions,
         agentContributions,
         recommended: recommended === true
       });
@@ -365,7 +380,7 @@ export class ProposalSynthesis {
     }
 
     prompt += `\n## Response Format\n`;
-    prompt += `{\n  "proposals": [\n    {\n      "title": "...",\n      "benefit": "...",\n      "risk": "...",\n      "dependencies": [...],\n      "reversible": true/false,\n      "rollbackPlan": "...",\n      "verificationPlan": "...",\n      "evidenceIds": [...],\n      "effectClass": "read"|"analyze"|"draft"|...,\n      "permission": "...",\n      "artifact": "...",\n      "acceptanceCondition": "...",\n      "recoveryPoint": "...",\n      "agentContributions": [...],\n      "recommended": true/false\n    }\n  ]\n}`;
+    prompt += `{\n  "proposals": [\n    {\n      "title": "...",\n      "benefit": "...",\n      "risk": "...",\n      "dependencies": [...],\n      "reversible": true/false,\n      "rollbackPlan": "...",\n      "verificationPlan": "...",\n      "evidenceIds": [...],\n      "effectClass": "read"|"analyze"|"draft"|...,\n      "permission": "...",\n      "artifact": "...",\n      "acceptanceCondition": "...",\n      "recoveryPoint": "...",\n      "agentContributions": [...],\n      "recommended": true/false,\n      "actions": [{ "id": "...", "effect": "draft", "target": "...", "input": {}, "dependsOn": [...], "recoveryPoint": "...", "acceptanceCondition": "..." }]\n    }\n  ]\n}`;
 
     return prompt;
   }
@@ -466,6 +481,53 @@ function parseSynthesisResponse(raw: unknown): { proposals: Array<Record<string,
     const recommended = p.recommended;
     if (recommended !== undefined && typeof recommended !== "boolean") {
       throw new Error(`proposal[${i}].recommended must be boolean if present`);
+    }
+
+    const actions = p.actions;
+    if (actions !== undefined) {
+      if (!Array.isArray(actions) || actions.length === 0) {
+        throw new Error(`proposal[${i}].actions must be a non-empty array if present`);
+      }
+      const actionIds = new Set<string>();
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex++) {
+        const rawAction = actions[actionIndex];
+        if (!rawAction || typeof rawAction !== "object" || Array.isArray(rawAction)) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}] must be an object`);
+        }
+        const action = rawAction as Record<string, unknown>;
+        if (typeof action.id !== "string" || !action.id) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].id must be non-empty string`);
+        }
+        if (actionIds.has(action.id)) {
+          throw new Error(`proposal[${i}].actions contains duplicate id: ${action.id}`);
+        }
+        actionIds.add(action.id);
+        if (typeof action.effect !== "string" || !VALID_EFFECTS.has(action.effect as TopicActionEffect)) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].effect invalid: ${JSON.stringify(action.effect)}`);
+        }
+        if (typeof action.target !== "string" || !action.target) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].target must be non-empty string`);
+        }
+        if (!action.input || typeof action.input !== "object" || Array.isArray(action.input)) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].input must be an object`);
+        }
+        if (!Array.isArray(action.dependsOn) || action.dependsOn.some(dependency => typeof dependency !== "string")) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].dependsOn must be an array of strings`);
+        }
+        if (typeof action.recoveryPoint !== "string" || !action.recoveryPoint) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].recoveryPoint must be non-empty string`);
+        }
+        if (typeof action.acceptanceCondition !== "string" || !action.acceptanceCondition) {
+          throw new Error(`proposal[${i}].actions[${actionIndex}].acceptanceCondition must be non-empty string`);
+        }
+      }
+      for (const action of actions as Array<Record<string, unknown>>) {
+        for (const dependency of action.dependsOn as string[]) {
+          if (!actionIds.has(dependency)) {
+            throw new Error(`proposal[${i}].actions dependency not found: ${dependency}`);
+          }
+        }
+      }
     }
 
     validated.push(p);
