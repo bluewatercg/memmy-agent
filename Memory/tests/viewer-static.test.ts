@@ -1,4 +1,4 @@
-import { Script, createContext } from "node:vm";
+import { Script, createContext, type Context } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { memoryPanelHtml } from "../src/viewer/static.js";
 
@@ -27,6 +27,114 @@ describe("memoryPanelHtml", () => {
   it("reveals the decision detail after analysis starts", () => {
     const html = memoryPanelHtml();
     expect(html).toContain('$("topicDecisionDetail").classList.remove("hidden")');
+  });
+
+  it("runs the full topic decision pipeline using refreshed session versions", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain("async function runTopicDecisionPipeline(sessionId, namespace, requestPrefix)");
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "run", detail.session.version');
+    expect(html).toContain('detail = await readTopicDecisionDetail(sessionId, namespace)');
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "debate", detail.session.version');
+    expect(html).toContain('await topicDecisionMutationStep(sessionId, "proposals", detail.session.version');
+    expect(html).toContain("runTopicDecisionPipeline(started.session.id, namespace, requestPrefix)");
+  });
+
+  it("shows progress and stops automatic analysis on blocked decision states", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain("Analyzing topic");
+    expect(html).toContain("Gathering positions");
+    expect(html).toContain("Running debate");
+    expect(html).toContain("Generating proposals");
+    expect(html).toContain('const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "executing", "completed", "stale", "failed", "cancelled"])');
+  });
+
+  it.each(["blocked_by_evidence", "completed", "executing"])("does not mutate a reusable %s decision session", async (state) => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Record<string, unknown> & {
+      runTopicDecisionPipeline: (sessionId: string, namespace: object, requestPrefix: string) => Promise<DecisionDetailFixture>;
+      readTopicDecisionDetail: () => Promise<DecisionDetailFixture>;
+      topicDecisionMutationStep: () => Promise<void>;
+    };
+    let mutations = 0;
+    context.readTopicDecisionDetail = async () => ({ session: { state, version: 4 } });
+    context.topicDecisionMutationStep = async () => { mutations += 1; };
+
+    const detail = await context.runTopicDecisionPipeline("session-1", {}, "request-1");
+
+    expect(detail.session.state).toBe(state);
+    expect(mutations).toBe(0);
+  });
+
+  it.each([
+    { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [], proposals: [{ id: "proposal-1" }] }, expectedActions: [] },
+    { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [{ id: "round-1" }], proposals: [] }, expectedActions: ["proposals"] },
+    { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [], proposals: [] }, expectedActions: ["debate", "proposals"] },
+    { detail: { session: { state: "draft", version: 4 }, snapshots: [{ id: "snapshot-1", payload: { roster: [{ id: "agent-1" }] } }], positions: [{ agentId: "agent-1", snapshotId: "snapshot-1" }], debateRounds: [], proposals: [] }, expectedActions: ["run", "debate", "proposals"] },
+    { detail: { session: { state: "debating", version: 4 }, snapshots: [], positions: [], debateRounds: [{ id: "round-1" }], proposals: [] }, expectedActions: ["debate", "proposals"] }
+  ])("resumes a reusable session from its authoritative state", async ({ detail, expectedActions }) => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Record<string, unknown> & {
+      runTopicDecisionPipeline: (sessionId: string, namespace: object, requestPrefix: string) => Promise<DecisionDetailFixture>;
+      readTopicDecisionDetail: () => Promise<DecisionDetailFixture>;
+      topicDecisionMutationStep: (_sessionId: string, action: string) => Promise<void>;
+    };
+    const actions: string[] = [];
+    context.readTopicDecisionDetail = async () => detail;
+    context.topicDecisionMutationStep = async (_sessionId, action) => {
+      actions.push(action);
+      if (action === "run") detail.session.state = "ready_for_decision";
+      if (action === "debate") {
+        detail.session.state = "ready_for_decision";
+        detail.debateRounds = [{ id: "round-complete" }];
+      }
+    };
+
+    await context.runTopicDecisionPipeline("session-1", {}, "request-1");
+
+    expect(actions).toEqual(expectedActions);
+  });
+
+  it("disables the initiating analysis control and renders failures until the request settles", async () => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Record<string, unknown> & {
+      openTopicDecision: (topicId: string, button: FakeElement) => Promise<void>;
+      api: () => Promise<never>;
+      selectedTopicNamespace: () => object;
+    };
+    let rejectStart!: (error: Error) => void;
+    context.selectedTopicNamespace = () => ({});
+    context.api = () => new Promise<never>((_resolve, reject) => { rejectStart = reject; });
+    const button = new FakeElement();
+
+    const analysis = context.openTopicDecision("topic-1", button);
+    expect(button.disabled).toBe(true);
+    rejectStart(new Error("model unavailable"));
+    await expect(analysis).rejects.toThrow("model unavailable");
+    expect(button.disabled).toBe(false);
+    expect(harness.element("topicDecisionBody").innerHTML).toContain("Analysis failed");
+  });
+
+  it("renders a failure when stale-version recovery cannot reload the session", async () => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Record<string, unknown> & {
+      openTopicDecision: (topicId: string, button: FakeElement) => Promise<void>;
+      api: () => Promise<{ session: { id: string } }>;
+      readTopicDecisionDetail: () => Promise<never>;
+      runTopicDecisionPipeline: () => Promise<never>;
+      selectedTopicNamespace: () => object;
+    };
+    context.selectedTopicNamespace = () => ({});
+    context.api = async () => ({ session: { id: "session-1" } });
+    let reads = 0;
+    context.readTopicDecisionDetail = async () => {
+      reads += 1;
+      if (reads === 1) return { session: { state: "draft", version: 1 } } as never;
+      throw new Error("reload unavailable");
+    };
+    context.runTopicDecisionPipeline = async () => { throw Object.assign(new Error("stale"), { status: 409 }); };
+
+    await expect(context.openTopicDecision("topic-1", new FakeElement())).rejects.toThrow("reload unavailable");
+    expect(harness.element("topicDecisionBody").innerHTML).toContain("Analysis failed");
   });
 
   it("keeps topic cards linked to a full-width decision surface", () => {
@@ -169,6 +277,7 @@ describe("memoryPanelHtml", () => {
     changeProject();
     await flushPromises();
 
+
     const request = harness.requests().find(({ path }) => path.startsWith("/api/v1/topic-inbox?"));
     expect(request).toBeDefined();
     const url = new URL(request!.path, "http://localhost");
@@ -182,6 +291,13 @@ describe("memoryPanelHtml", () => {
     });
   });
 });
+interface DecisionDetailFixture {
+  session: { state: string; version: number };
+  snapshots?: Array<{ id: string; payload: { roster: Array<{ id: string }> } }>;
+  positions?: Array<{ agentId: string; snapshotId: string }>;
+  debateRounds?: Array<{ id: string }>;
+  proposals?: Array<{ id: string }>;
+}
 
 type FakeRow = FakeElement & {
   dataset: { id: string };
@@ -190,10 +306,15 @@ type FakeRow = FakeElement & {
 
 type DetailResolver = (body: unknown) => void;
 
+interface ViewerHarnessRuntime {
+  document: object;
+  fetch: (path: string, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+}
+
 function runViewerScript(
-  harness: ReturnType<typeof createViewerHarness>,
+  harness: ViewerHarnessRuntime,
   browserContext: Record<string, unknown> = {}
-): void {
+): Context {
   const match = memoryPanelHtml().match(/<script>([\s\S]*)<\/script>/);
   const script = match?.[1];
   if (!script) {
@@ -218,6 +339,7 @@ function runViewerScript(
     ...browserContext
   });
   new Script(script).runInContext(context);
+  return context;
 }
 
 function createViewerHarness() {
