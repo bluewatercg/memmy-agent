@@ -24,6 +24,11 @@ describe("memoryPanelHtml", () => {
     expect(html.indexOf("Decision summary")).toBeLessThan(html.indexOf("Debate details"));
   });
 
+  it("reveals the decision detail after analysis starts", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain('$("topicDecisionDetail").classList.remove("hidden")');
+  });
+
   it("keeps topic cards linked to a full-width decision surface", () => {
     const html = memoryPanelHtml();
     expect(html).toContain('data-topic-action="decision"');
