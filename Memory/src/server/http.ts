@@ -2037,12 +2037,12 @@ function topicDecisionStartInput(body: unknown, routeName: string, principal: Au
   return { namespace: request.namespace!, agents: obj.agents as TopicAgentSpec[] | undefined, adapterId: obj.adapterId, requestId: obj.requestId };
 }
 
-function topicDecisionMutation(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; adapterId: string; requestId: string; expectedVersion?: number } {
+function topicDecisionMutation(body: unknown, routeName: string, principal: AuthPrincipal): { namespace: RuntimeNamespace; adapterId: string; requestId: string; expectedVersion: number } {
   const obj = asObject(body, routeName); const request = envelopeWithPrincipal(obj, principal);
   if (typeof obj.adapterId !== "string" || !obj.adapterId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.adapterId is required`);
   if (typeof obj.requestId !== "string" || !obj.requestId.trim()) throw new MemoryServiceError("invalid_argument", `${routeName}.requestId is required`);
-  const expectedVersion = typeof obj.expectedVersion === "number" && Number.isInteger(obj.expectedVersion) && obj.expectedVersion >= 1 ? obj.expectedVersion as number : undefined;
-  return { namespace: request.namespace!, adapterId: obj.adapterId, requestId: obj.requestId, expectedVersion };
+  if (typeof obj.expectedVersion !== "number" || !Number.isInteger(obj.expectedVersion) || obj.expectedVersion < 1) throw new MemoryServiceError("invalid_argument", `${routeName}.expectedVersion is required and must be a positive integer`);
+  return { namespace: request.namespace!, adapterId: obj.adapterId, requestId: obj.requestId, expectedVersion: obj.expectedVersion as number };
 }
 
 function topicDecisionAgentsInput(
@@ -2203,9 +2203,10 @@ function mapTopicDecisionError(error: unknown): Error {
   if (!(error instanceof Error)) return error as Error;
   const name = error.name;
   if (name === "TopicDecisionStaleVersionError") {
-    const err = error as Error & { sessionId?: string; currentVersion?: number; currentState?: string };
+    const err = error as Error & { sessionId?: string; expectedVersion?: number; currentVersion?: number; currentState?: string };
     const details: Record<string, unknown> = {};
     if (err.sessionId) details.sessionId = err.sessionId;
+    if (err.expectedVersion !== undefined) details.expectedVersion = err.expectedVersion;
     if (err.currentVersion !== undefined) details.currentVersion = err.currentVersion;
     if (err.currentState) details.currentState = err.currentState;
     return new MemoryServiceError("conflict", error.message, 409, undefined, details);
@@ -2228,6 +2229,10 @@ function mapTopicDecisionError(error: unknown): Error {
   }
   if (name === "TopicDecisionConfirmError") {
     return new MemoryServiceError("invalid_argument", error.message, 400);
+  }
+  // Fallback: catch repository-level version conflict errors (TOCTOU race)
+  if (error.message.includes("version conflict")) {
+    return new MemoryServiceError("conflict", error.message, 409);
   }
   if (name === "TopicExecutionError") {
     // Sanitize message to avoid leaking credentials

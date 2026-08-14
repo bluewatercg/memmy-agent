@@ -13,7 +13,7 @@ describe("topic decision console", () => {
     const html = memoryPanelHtml();
     expect(html).toContain('session.state === "blocked_by_evidence"');
     expect(html).toContain("position.missingInformation");
-    expect(html).toContain('risk.severity === "high"');
+    expect(html).toContain('r.severity === "high"');
     expect(html).toContain("position.confidence < 0.5");
     expect(html).toContain("Missing information");
     expect(html).toContain("Unresolved high-risk disagreement");

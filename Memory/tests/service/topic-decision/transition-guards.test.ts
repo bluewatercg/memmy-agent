@@ -28,11 +28,11 @@ describe("topic decision transition guards", () => {
     async (state) => {
       const { service, repos, namespace, namespaceId } = setup();
       const started = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
-      setSessionState(repos, namespaceId, started.session.id, state);
+      const session = setSessionState(repos, namespaceId, started.session.id, state);
 
-      await expect(service.runTopicDecision(namespace, started.session.id)).rejects.toThrow(/state/i);
-      await expect(service.runDebate(namespace, started.session.id)).rejects.toThrow(/state/i);
-      await expect(service.synthesizeProposals(namespace, started.session.id)).rejects.toThrow(/state/i);
+      await expect(service.runTopicDecision(namespace, started.session.id, session.version)).rejects.toThrow(/state/i);
+      await expect(service.runDebate(namespace, started.session.id, session.version)).rejects.toThrow(/state/i);
+      await expect(service.synthesizeProposals(namespace, started.session.id, session.version)).rejects.toThrow(/state/i);
     }
   );
 

@@ -80,11 +80,12 @@ describe("topic decision real-server smoke", () => {
         expect(stale.status).toBe(409);
         const conflict = await stale.json() as {
           error: { code: string };
-          details: { sessionId: string; currentVersion: number; currentState: string };
+          details: { sessionId: string; expectedVersion: number; currentVersion: number; currentState: string };
         };
         expect(conflict.error.code).toBe("conflict");
         expect(conflict.details).toEqual({
           sessionId,
+          expectedVersion: 1,
           currentVersion: 2,
           currentState: "draft"
         });
@@ -177,18 +178,23 @@ describe("topic decision real-server smoke", () => {
     await openServer(service, async (base) => {
       const headers = { authorization: "Bearer smoke", "content-type": "application/json" };
       const post = (path: string, payload: Record<string, unknown>) => fetch(`${base}${path}`, { method: "POST", headers, body: JSON.stringify(payload) });
-      const mutation = (requestId: string) => ({ namespace, adapterId: "smoke", requestId });
+      let currentVersion = 1;
+      const mutation = (requestId: string) => ({ namespace, adapterId: "smoke", requestId, expectedVersion: currentVersion });
       const startedResponse = await post("/api/v1/topic-inbox/topics/lifecycle-topic/decisions", {
         ...mutation("lifecycle-start"),
         agents: [{ id: "agent-1", role: "evidence_analyst", model: "smoke-model", reason: "deterministic" }]
       });
+      // start doesn't bump version, it creates session at version 1
       expect(startedResponse.status, await startedResponse.clone().text()).toBe(200);
       const started = await startedResponse.json() as { session: { id: string } };
       const sessionId = started.session.id;
 
       expect((await post(`/api/v1/topic-inbox/decisions/${sessionId}/positions`, mutation("lifecycle-positions"))).status).toBe(200);
+      // positions does not bump version
       expect((await post(`/api/v1/topic-inbox/decisions/${sessionId}/debate`, mutation("lifecycle-debate"))).status).toBe(200);
+      currentVersion += 2; // debate bumps version twice (to debating + to final state)
       expect((await post(`/api/v1/topic-inbox/decisions/${sessionId}/proposals`, mutation("lifecycle-proposals"))).status).toBe(200);
+      currentVersion++; // proposals bumps version once
 
       const detailResponse = await fetch(`${base}/api/v1/topic-inbox/decisions/${sessionId}?namespace=${encodeURIComponent(JSON.stringify(namespace))}`, { headers });
       expect(detailResponse.status).toBe(200);

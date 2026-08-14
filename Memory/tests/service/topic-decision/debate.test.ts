@@ -52,7 +52,7 @@ describe("debate orchestrator — round boundaries", () => {
     });
 
     // Run debate — round 1 must always run
-    const detail = await service.runDebate(namespace, sessionId);
+    const detail = await service.runDebate(namespace, sessionId, 1);
     expect(detail).toBeDefined();
     // After debate, state should reflect the outcome (debating → ready_for_decision or blocked_by_evidence)
     expect(["ready_for_decision", "blocked_by_evidence"]).toContain(detail.session.state);
@@ -83,7 +83,7 @@ describe("debate orchestrator — round boundaries", () => {
       evidenceIds: ["ev-1"]
     });
 
-    const detail = await service.runDebate(namespace, sessionId);
+    const detail = await service.runDebate(namespace, sessionId, 1);
 
     // With no material conflict, should stop after round 1
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
@@ -156,7 +156,7 @@ describe("debate orchestrator — round boundaries", () => {
       }
     }));
 
-    const detail = await service.runDebate(namespace, sessionId);
+    const detail = await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     // Should have run round 1 (always) and round 2 (high-severity conflict)
@@ -205,7 +205,7 @@ describe("debate orchestrator — round boundaries", () => {
       })
     }));
 
-    const detail = await service.runDebate(namespace, sessionId);
+    const detail = await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     // Should stop after round 2 for medium severity
@@ -252,7 +252,7 @@ describe("debate orchestrator — round boundaries", () => {
 
     // Debate should not throw away existing positions
     try {
-      await service.runDebate(namespace, sessionId);
+      await service.runDebate(namespace, sessionId, 1);
     } catch {
       // Expected to fail
     }
@@ -304,7 +304,7 @@ describe("debate orchestrator — round boundaries", () => {
       })
     }));
 
-    await service.runDebate(namespace, sessionId);
+    await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     // Debug: log round count and stop reasons
@@ -360,7 +360,7 @@ describe("debate orchestrator — round boundaries", () => {
       })
     }));
 
-    await service.runDebate(namespace, sessionId);
+    await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     const lastRound = rounds[rounds.length - 1]!;
@@ -412,7 +412,7 @@ describe("debate orchestrator — round boundaries", () => {
       })
     }));
 
-    await service.runDebate(namespace, sessionId);
+    await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     const lastRound = rounds[rounds.length - 1]!;
@@ -461,7 +461,7 @@ describe("debate orchestrator — round boundaries", () => {
       })
     }));
 
-    await service.runDebate(namespace, sessionId);
+    await service.runDebate(namespace, sessionId, 1);
 
     const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId);
     for (const round of rounds) {

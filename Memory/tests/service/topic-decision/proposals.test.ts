@@ -56,7 +56,7 @@ describe("proposal synthesis — constraints", () => {
       })
     }));
 
-    const detail = await service.synthesizeProposals(namespace, sessionId);
+    const detail = await service.synthesizeProposals(namespace, sessionId, 1);
     const proposals = repos.topicDecisions.listProposals(namespaceId, sessionId);
     expect(proposals.length).toBe(0);
   });
@@ -136,7 +136,7 @@ describe("proposal synthesis — constraints", () => {
       })
     }));
 
-    const detail = await service.synthesizeProposals(namespace, sessionId);
+    const detail = await service.synthesizeProposals(namespace, sessionId, 1);
     const proposals = repos.topicDecisions.listProposals(namespaceId, sessionId);
     expect(proposals.length).toBeGreaterThanOrEqual(1);
     expect(proposals.length).toBeLessThanOrEqual(3);
@@ -189,7 +189,7 @@ describe("proposal synthesis — constraints", () => {
     }));
 
     // Should throw or reject — malformed/uncited outputs fail, not silently accepted
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow();
   });
 
   it("rejects output that omits unresolved high-risk conflict", async () => {
@@ -273,7 +273,7 @@ describe("proposal synthesis — constraints", () => {
     }));
 
     // Should reject — proposals must address unresolved high-risk conflicts
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow();
   });
 
   it("rejects rank 4 — max 3 proposals", async () => {
@@ -311,7 +311,7 @@ describe("proposal synthesis — constraints", () => {
       })
     }));
 
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow();
   });
 
   it("rejects multiple recommended proposals", async () => {
@@ -346,7 +346,7 @@ describe("proposal synthesis — constraints", () => {
       })
     }));
 
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow();
   });
 
   it("rejects action without effect class, permission, artifact, acceptance condition, or recovery point", async () => {
@@ -394,7 +394,7 @@ describe("proposal synthesis — constraints", () => {
       })
     }));
 
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow();
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow();
   });
 
   it("rejects malformed nested proposal with actionable domain error", async () => {
@@ -444,7 +444,7 @@ describe("proposal synthesis — constraints", () => {
     }));
 
     // Should reject with actionable domain error before business validation
-    await expect(service.synthesizeProposals(namespace, sessionId)).rejects.toThrow(/dependencies/i);
+    await expect(service.synthesizeProposals(namespace, sessionId, 1)).rejects.toThrow(/dependencies/i);
   });
 
   it("majority-wrong scenario: risk_challenger identifies unsupported assumption — majority cannot override", async () => {

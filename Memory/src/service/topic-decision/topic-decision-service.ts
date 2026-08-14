@@ -20,8 +20,8 @@ import { namespaceIdFromContext } from "../namespace/namespace-scope.js";
 
 export class TopicDecisionStaleVersionError extends Error {
   readonly name = "TopicDecisionStaleVersionError";
-  constructor(readonly sessionId: string, readonly currentVersion: number, readonly currentState: string) {
-    super(`stale version: expected ${currentVersion}, session is at ${currentVersion} (${currentState})`);
+  constructor(readonly sessionId: string, readonly expectedVersion: number, readonly currentVersion: number, readonly currentState: string) {
+    super(`stale version: expected ${expectedVersion}, session is at ${currentVersion} (${currentState})`);
   }
 }
 
@@ -61,7 +61,7 @@ export class TopicDecisionService {
       if (this.options.createLlmClient) {
         return this.options.createLlmClient(model);
       }
-      const config = this.options.llmConfigs?.[model] || { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
+      const config = (this.options.llmConfigs?.[model] as LlmConfig | undefined) || { provider: "openai_compatible" as const, model, enableThinking: false, temperature: 0.7, timeoutMs: 30000, maxRetries: 3, malformedRetries: 0 };
       return createLlmClient(config);
     };
 
@@ -225,7 +225,7 @@ export class TopicDecisionService {
       throw new Error(`session not found: ${sessionId}`);
     }
     if (expectedVersion !== undefined && session.version !== expectedVersion) {
-      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+      throw new TopicDecisionStaleVersionError(sessionId, expectedVersion, session.version, session.state)
     }
     this.assertMutationAllowed(session, "run independent positions");
     await this.agentPositionService.runIndependentPositions(namespace, sessionId);
@@ -237,38 +237,6 @@ export class TopicDecisionService {
     }
   }
 
-  /**
-   * Update session agents and bump version.
-   */
-  async updateTopicDecisionSessionAgents(
-    namespace: RuntimeNamespace,
-    sessionId: string,
-    expectedVersion: number,
-    agents: TopicAgentSpec[]
-  ): Promise<TopicDecisionDetail> {
-    if (!this.options.enabled) {
-      throw new Error("topic decisions disabled");
-    }
-
-    const namespaceId = namespaceIdFromContext(namespace);
-    const session = this.options.repos.topicDecisions.getSession(namespaceId, sessionId);
-    if (!session) {
-      throw new Error(`session not found: ${sessionId}`);
-    }
-    if (session.version !== expectedVersion) {
-      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
-    }
-
-    const updatedSession = {
-      ...session,
-      agents,
-      version: session.version + 1,
-      updatedAt: nowIso()
-    };
-    this.options.repos.topicDecisions.updateSession(updatedSession, session.version);
-
-    return this.read(namespace, sessionId);
-  }
 
 
   async runDecision(namespace: RuntimeNamespace, sessionId: string, expectedVersion?: number): Promise<void> {
@@ -281,12 +249,12 @@ export class TopicDecisionService {
       throw new Error(`session not found: ${sessionId}`);
     }
     if (expectedVersion !== undefined && session.version !== expectedVersion) {
-      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+      throw new TopicDecisionStaleVersionError(sessionId, expectedVersion, session.version, session.state)
     }
     this.assertMutationAllowed(session, "run decision");
     
     // First run independent positions to gather agent stances
-    await this.runIndependentPositions(namespace, sessionId);
+    await this.runIndependentPositions(namespace, sessionId, session.version);
     
     // Now check decisionability with the positions we just gathered
     const snapshots = this.options.repos.topicDecisions.getSnapshotsForSession(namespaceId, sessionId);
@@ -504,7 +472,7 @@ export class TopicDecisionService {
 
     // Validate expected version for optimistic locking
     if (session.version !== expectedVersion) {
-      throw new Error(`version conflict: expected ${expectedVersion}, got ${session.version}`);
+      throw new TopicDecisionStaleVersionError(sessionId, expectedVersion, session.version, session.state)
     }
 
     // Submit answers - map source to verification type
@@ -604,7 +572,7 @@ export class TopicDecisionService {
       throw new Error(`session not found: ${sessionId}`);
     }
     if (expectedVersion !== undefined && session.version !== expectedVersion) {
-      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+      throw new TopicDecisionStaleVersionError(sessionId, expectedVersion, session.version, session.state)
     }
     this.assertMutationAllowed(session, "run debate");
     const startedAt = Date.now();
@@ -631,7 +599,7 @@ export class TopicDecisionService {
       throw new Error(`session not found: ${sessionId}`);
     }
     if (expectedVersion !== undefined && session.version !== expectedVersion) {
-      throw new TopicDecisionStaleVersionError(sessionId, session.version, session.state);
+      throw new TopicDecisionStaleVersionError(sessionId, expectedVersion, session.version, session.state)
     }
     this.assertMutationAllowed(session, "synthesize proposals");
     const result = await this.proposalSynthesis.synthesizeProposals(namespace, sessionId);

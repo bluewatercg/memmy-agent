@@ -161,6 +161,9 @@ export interface TopicAgentSpec {
 
 export interface TopicDecisionSnapshotPayload {
   topicVersion: number;
+  topicTitle?: string;
+  topicSummary?: string;
+  sourceMemoryIds?: string[];
   evidenceIds: string[];
   evidenceHashes: Record<string, string>;
   evidenceContent: Record<string, string>;

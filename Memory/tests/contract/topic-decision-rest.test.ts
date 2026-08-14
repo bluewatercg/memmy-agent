@@ -512,7 +512,7 @@ describe("Topic Decision REST contract", () => {
       const positions = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/positions`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-positions" })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-positions", expectedVersion: 1 })
       });
       expect([200, 202]).toContain(positions.status);
 
@@ -521,7 +521,7 @@ describe("Topic Decision REST contract", () => {
       const debate = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/debate`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-debate" })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-debate", expectedVersion: 1 })
       });
       expect([200, 202]).toContain(debate.status);
 
@@ -530,7 +530,7 @@ describe("Topic Decision REST contract", () => {
       const proposals = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/proposals`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-proposals" })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-proposals", expectedVersion: 1 })
       });
       expect([200, 202]).toContain(proposals.status);
 
@@ -711,7 +711,7 @@ describe("Topic Decision REST contract", () => {
       const execFailed = await fetch(`${base}/api/v1/topic-inbox/decisions/session-1/executions/run-1/resume`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-exec-failed" })
+        body: JSON.stringify({ namespace, adapterId: "test", requestId: "req-exec-failed", expectedVersion: 1 })
       });
       expect(execFailed.status).toBe(500);
       const body = await execFailed.json() as { error: { code: string; message: string } };
