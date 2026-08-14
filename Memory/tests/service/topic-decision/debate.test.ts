@@ -263,6 +263,49 @@ describe("debate orchestrator — round boundaries", () => {
     expect(positions.map(p => p.stance).sort()).toEqual(["oppose", "support"]);
   });
 
+  it("resumes a persisted debating session from the next round", async () => {
+    const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const sessionId = result.session.id;
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-evidence_analyst", stance: "support", rationale: "evidence supports", evidenceIds: ["ev-1"]
+    });
+    await insertPosition(repos, namespaceId, sessionId, result.snapshot.id, {
+      agentId: "agent-risk_challenger", stance: "oppose", rationale: "high risk", evidenceIds: ["ev-1"]
+    });
+    const persistedSession = repos.topicDecisions.getSession(namespaceId, sessionId)!;
+    repos.topicDecisions.updateSession({ ...persistedSession, state: "debating", version: 2, updatedAt: nowIso() }, 1);
+    repos.topicDecisions.upsertRound({
+      id: newId("tdr"), namespaceId, sessionId, round: 1, status: "completed", summary: "Round 1 persisted",
+      metadata: {
+        stopReason: "pending_next_round",
+        conflicts: [{ id: "conflict-1", severity: "medium", claim: "Persisted disagreement", positionIds: [], evidenceIds: ["ev-1"], resolved: false }],
+        deltas: {}
+      },
+      version: 1, createdAt: nowIso(), updatedAt: nowIso()
+    });
+    const operations: string[] = [];
+    createLlmClientSpy.mockImplementation((_model: string) => ({
+      config: { provider: "openai_compatible" as const, model: _model, enableThinking: false, temperature: 0, timeoutMs: 30000, maxRetries: 0, malformedRetries: 0 },
+      isConfigured: () => true,
+      status: () => ({ configured: true, lastCheck: nowIso() }),
+      complete: async () => "{}",
+      completeJson: async (_messages: unknown, options: { operation: string }) => {
+        operations.push(options.operation);
+        return { judgment: "neutral", confidence: 0.7, resolvedConflicts: [], remainingRisks: [], evidenceIds: ["ev-1"], facts: [], assumptions: [], missingInformation: [], risks: [], counterarguments: [], suggestedActions: [] };
+      }
+    }));
+
+    await service.runDebate(namespace, sessionId, 2);
+
+    expect(operations.length).toBeGreaterThan(0);
+    expect(operations.some((operation) => operation.includes("round1"))).toBe(false);
+    const rounds = repos.topicDecisions.listRounds(namespaceId, sessionId).map((round) => round.round);
+    expect(rounds[0]).toBe(1);
+    expect(new Set(rounds).size).toBe(rounds.length);
+  });
+
   it("round 4 is always rejected — max 3 rounds", async () => {
     const { service, repos, namespaceId, createLlmClientSpy } = await setupService();
     const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };

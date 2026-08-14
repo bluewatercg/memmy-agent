@@ -77,83 +77,53 @@ export class DebateOrchestrator {
     const positions = this.options.repos.topicDecisions.listPositions(namespaceId, sessionId, snapshot.id);
     const roster = snapshot.payload.roster;
 
-    // Update session to debating state
-    const now = nowIso();
-    this.options.repos.topicDecisions.updateSession(
-      { ...session, state: "debating", version: session.version + 1, updatedAt: now },
-      session.version
-    );
-
-    const roundRecords: TopicDebateRoundRecord[] = [];
-
-    // Round 1: Always evaluate contradictions and missing premises
-    const round1Result = await this.runRound(
-      namespaceId,
-      sessionId,
-      snapshot,
-      positions,
-      roster,
-      1
-    );
-    const round1Record = this.persistRound(namespaceId, sessionId, round1Result);
-    roundRecords.push(round1Record);
-
-    // Determine if round 2 is needed
-    const highConflicts = round1Result.conflicts.filter(c => c.severity === "high" && !c.resolved);
-    const mediumConflicts = round1Result.conflicts.filter(c => c.severity === "medium" && !c.resolved);
-
-    if (highConflicts.length > 0 || mediumConflicts.length > 0) {
-      // Round 2: Address high-impact conflicts or expected information gain
-      const round2Positions = this.mergePositions(positions, round1Result);
-      const round2Result = await this.runRound(
-        namespaceId,
-        sessionId,
-        snapshot,
-        round2Positions,
-        roster,
-        2
+    if (session.state !== "debating") {
+      this.options.repos.topicDecisions.updateSession(
+        { ...session, state: "debating", version: session.version + 1, updatedAt: nowIso() },
+        session.version
       );
-      const round2Record = this.persistRound(namespaceId, sessionId, round2Result);
-      roundRecords.push(round2Record);
-
-      // Round 3: Only if high-risk conflict remains after round 2
-      const remainingHigh = round2Result.conflicts.filter(c => c.severity === "high" && !c.resolved);
-      if (remainingHigh.length > 0) {
-        const round3Positions = this.mergePositions(round2Positions, round2Result);
-        const round3Result = await this.runRound(
-          namespaceId,
-          sessionId,
-          snapshot,
-          round3Positions,
-          roster,
-          3
-        );
-        const round3Record = this.persistRound(namespaceId, sessionId, round3Result);
-        roundRecords.push(round3Record);
-      }
     }
 
-    // Determine final state
-    const lastRound = roundRecords[roundRecords.length - 1]!;
-    const lastStopReason = lastRound.metadata.stopReason as DebateStopReason;
-    const hasUnresolvedHigh = (lastRound.metadata.conflicts as TopicConflict[])?.some(
-      (c: TopicConflict) => c.severity === "high" && !c.resolved
-    );
+    const existingRounds = this.options.repos.topicDecisions.listRounds(namespaceId, sessionId);
+    const roundRecords: TopicDebateRoundRecord[] = [];
+    let lastRound = existingRounds.at(-1);
 
-    let finalState: string;
-    if (hasUnresolvedHigh) {
-      finalState = "blocked_by_evidence";
-    } else if (lastStopReason === "no_material_conflict" || lastStopReason === "resolved_after_round2" || lastStopReason === "convergence") {
-      finalState = "ready_for_decision";
-    } else {
-      // max_rounds with no high-severity → still ready for decision
-      finalState = "ready_for_decision";
+    if (!lastRound) {
+      lastRound = this.persistRound(namespaceId, sessionId, await this.runRound(
+        namespaceId, sessionId, snapshot, positions, roster, 1
+      ));
+      roundRecords.push(lastRound);
     }
 
-    // Update session to final state
+    const roundOneConflicts = (lastRound.metadata.conflicts as TopicConflict[] | undefined) ?? [];
+    if (lastRound.round === 1 && roundOneConflicts.some(
+      (conflict) => !conflict.resolved && (conflict.severity === "high" || conflict.severity === "medium")
+    )) {
+      lastRound = this.persistRound(namespaceId, sessionId, await this.runRound(
+        namespaceId, sessionId, snapshot, positions, roster, 2
+      ));
+      roundRecords.push(lastRound);
+    }
+
+    const roundTwoConflicts = (lastRound.metadata.conflicts as TopicConflict[] | undefined) ?? [];
+    if (lastRound.round === 2 && roundTwoConflicts.some(
+      (conflict) => !conflict.resolved && conflict.severity === "high"
+    )) {
+      lastRound = this.persistRound(namespaceId, sessionId, await this.runRound(
+        namespaceId, sessionId, snapshot, positions, roster, 3
+      ));
+      roundRecords.push(lastRound);
+    }
+
+    const lastConflicts = (lastRound.metadata.conflicts as TopicConflict[] | undefined) ?? [];
+    const hasUnresolvedHigh = lastConflicts.some((conflict) => conflict.severity === "high" && !conflict.resolved);
+    const finalState: TopicDecisionSessionRecord["state"] = hasUnresolvedHigh
+      ? "blocked_by_evidence"
+      : "ready_for_decision";
+
     const currentSession = this.options.repos.topicDecisions.getSession(namespaceId, sessionId)!;
     this.options.repos.topicDecisions.updateSession(
-      { ...currentSession, state: finalState as TopicDecisionSessionRecord["state"], version: currentSession.version + 1, updatedAt: nowIso() },
+      { ...currentSession, state: finalState, version: currentSession.version + 1, updatedAt: nowIso() },
       currentSession.version
     );
 

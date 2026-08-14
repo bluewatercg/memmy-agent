@@ -1439,10 +1439,14 @@ export function memoryPanelHtml(): string {
       $("topicDecisionDetail").classList.remove("hidden");
       for (const button of $("topicDecisionBody").querySelectorAll("button[data-decision-action]")) button.onclick = () => handleTopicDecisionAction(button);
     }
-    const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "stale", "failed", "cancelled"]);
+    const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "executing", "completed", "stale", "failed", "cancelled"]);
     function renderTopicDecisionProgress(step) {
       $("topicDecisionDetail").classList.remove("hidden");
       $("topicDecisionBody").innerHTML = '<div class="decision-progress"><strong>Analyzing topic</strong><div>' + esc(step) + '</div></div>';
+    }
+    function renderTopicDecisionFailure(error) {
+      $("topicDecisionDetail").classList.remove("hidden");
+      $("topicDecisionBody").innerHTML = '<div class="decision-banner risk"><strong>Analysis failed</strong><div>' + esc(error instanceof Error ? error.message : "Unknown error") + '</div></div>';
     }
     function readTopicDecisionDetail(sessionId, namespace) {
       return api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(sessionId) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace)));
@@ -1452,21 +1456,27 @@ export function memoryPanelHtml(): string {
     }
     async function runTopicDecisionPipeline(sessionId, namespace, requestPrefix) {
       let detail = await readTopicDecisionDetail(sessionId, namespace);
-      renderTopicDecisionProgress("Gathering positions");
-      await topicDecisionMutationStep(sessionId, "run", detail.session.version, namespace, requestPrefix + "-run");
-      detail = await readTopicDecisionDetail(sessionId, namespace);
-      if (topicDecisionStopStates.has(detail.session.state)) return detail;
-      renderTopicDecisionProgress("Running debate");
-      await topicDecisionMutationStep(sessionId, "debate", detail.session.version, namespace, requestPrefix + "-debate");
-      detail = await readTopicDecisionDetail(sessionId, namespace);
-      if (topicDecisionStopStates.has(detail.session.state)) return detail;
+      if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
+      if (detail.session.state === "draft") {
+        renderTopicDecisionProgress("Gathering positions");
+        await topicDecisionMutationStep(sessionId, "run", detail.session.version, namespace, requestPrefix + "-run");
+        detail = await readTopicDecisionDetail(sessionId, namespace);
+        if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
+      }
+      if (detail.session.state === "debating" || (detail.session.state === "ready_for_decision" && !(detail.debateRounds || []).length)) {
+        renderTopicDecisionProgress("Running debate");
+        await topicDecisionMutationStep(sessionId, "debate", detail.session.version, namespace, requestPrefix + "-debate");
+        detail = await readTopicDecisionDetail(sessionId, namespace);
+        if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
+      }
       renderTopicDecisionProgress("Generating proposals");
       await topicDecisionMutationStep(sessionId, "proposals", detail.session.version, namespace, requestPrefix + "-proposals");
       return readTopicDecisionDetail(sessionId, namespace);
     }
-    async function openTopicDecision(topicId) {
+    async function openTopicDecision(topicId, initiatingButton) {
       if (state.topicDecisionInFlight) return;
       state.topicDecisionInFlight = true;
+      if (initiatingButton) initiatingButton.disabled = true;
       const namespace = selectedTopicNamespace();
       const requestPrefix = "web-analysis-" + Date.now();
       let sessionId = "";
@@ -1478,12 +1488,19 @@ export function memoryPanelHtml(): string {
         renderTopicDecision(await runTopicDecisionPipeline(started.session.id, namespace, requestPrefix));
       } catch (error) {
         if (error.status === 409 && sessionId) {
-          renderTopicDecision(await readTopicDecisionDetail(sessionId, namespace));
-          return;
+          try {
+            renderTopicDecision(await readTopicDecisionDetail(sessionId, namespace));
+            return;
+          } catch (recoveryError) {
+            renderTopicDecisionFailure(recoveryError);
+            throw recoveryError;
+          }
         }
+        renderTopicDecisionFailure(error);
         throw error;
       } finally {
         state.topicDecisionInFlight = false;
+        if (initiatingButton) initiatingButton.disabled = false;
       }
     }
     async function handleTopicDecisionAction(button) {
@@ -1539,7 +1556,7 @@ export function memoryPanelHtml(): string {
       const topic = findTopic(topicId); if (!topic) return; const evidenceIds = prompt("输入要拆出的 Memory ID，多个用逗号分隔"); if (!evidenceIds) return; const title = prompt("新主题标题"); if (!title) return; const summary = prompt("新主题摘要", "") || "";
       await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
     }
-    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "") : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
+    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "", button) : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
 
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }
     function renderConnectionStatus(status) {
