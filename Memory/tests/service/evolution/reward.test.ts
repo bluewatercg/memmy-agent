@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
+  Repositories,
   type LlmClient
 } from "../../../src/index.js";
 import {
@@ -473,6 +474,93 @@ describe("MemoryService / evolution / reward", () => {
       query: "verify the focused workflow",
       answer: "The focused workflow passed."
     });
+    const repos = new Repositories(db.db);
+    const namespaceId = "local:unscoped";
+    const seededAt = "2026-08-13T16:00:00.000Z";
+    repos.assets.create({
+      id: "asset-reward-integration",
+      namespaceId,
+      assetType: "skill",
+      stableKey: "skill/reward-integration",
+      version: 1,
+      status: "active",
+      title: "Focused workflow",
+      summary: "Verify the focused workflow",
+      contentRef: `memory://${complete.l1MemoryId}`,
+      ownerId: "agent-curator",
+      visibility: "team",
+      allowedAgentIds: [],
+      sourceMemoryIds: [complete.l1MemoryId],
+      sourceEpisodeIds: ["episode-source-reward"],
+      sourceTraceIds: [],
+      sourceTopicIds: [],
+      applicability: {
+        scope: "global",
+        taskTypes: [],
+        projectIds: [],
+        planIds: [],
+        workItemIds: [],
+        requiredSignals: [],
+        excludedSignals: [],
+        invocationHints: [],
+        retireWhen: "never"
+      },
+      validation: {
+        attempts: 0,
+        successes: 0,
+        failures: 0,
+        unknowns: 0,
+        transferRewardSum: 0,
+        riskPenaltySum: 0
+      },
+      provenance: {},
+      createdAt: seededAt,
+      updatedAt: seededAt
+    });
+    repos.experienceSequences.create({
+      id: "sequence-reward-integration",
+      namespaceId,
+      title: "Focused workflow transfer",
+      metadata: { source: "test" },
+      createdAt: seededAt
+    });
+    repos.experienceSequences.appendMember({
+      id: "member-source-reward",
+      namespaceId,
+      sequenceId: "sequence-reward-integration",
+      episodeId: "episode-source-reward",
+      position: 0,
+      role: "solve",
+      provenance: {},
+      createdAt: seededAt
+    });
+    repos.experienceSequences.appendMember({
+      id: "member-target-reward",
+      namespaceId,
+      sequenceId: "sequence-reward-integration",
+      episodeId: complete.episodeId,
+      position: 1,
+      role: "verify",
+      provenance: {},
+      createdAt: seededAt
+    });
+    repos.assetRecallEvents.append({
+      id: "recall-reward-integration",
+      namespaceId,
+      assetId: "asset-reward-integration",
+      assetVersion: 1,
+      agentId: "codex",
+      episodeId: complete.episodeId,
+      mode: "recall",
+      eventKey: "focused-workflow-used",
+      outcome: "used",
+      temporalValidityVersion: 1,
+      freshnessAtRecall: "current",
+      eligibilityEvaluatedAt: seededAt,
+      scoreInputs: {},
+      evidenceIds: [complete.l1MemoryId],
+      createdAt: seededAt
+    });
     await service.feedback({
       sessionId: session.sessionId,
       episodeId: complete.episodeId,
@@ -507,6 +595,24 @@ describe("MemoryService / evolution / reward", () => {
     };
     expect(episode.r_task).toBe(1);
     expect(rewardDetail).toMatchObject({ source: "explicit", rHuman: 1 });
+    expect(repos.assetRewardEvidence.listForEpisode(namespaceId, complete.episodeId)).toEqual([
+      expect.objectContaining({
+        sequenceId: "sequence-reward-integration",
+        sourceEpisodeId: "episode-source-reward",
+        targetEpisodeId: complete.episodeId,
+        assetId: "asset-reward-integration",
+        recallEventId: "recall-reward-integration",
+        targetTaskReward: 1,
+        transferReward: 1,
+        outcome: "success"
+      })
+    ]);
+    expect(repos.assets.get(namespaceId, "asset-reward-integration", 1)?.validation).toMatchObject({
+      attempts: 1,
+      successes: 1,
+      transferRewardSum: 1,
+      riskPenaltySum: 0
+    });
     db.close();
   });
 

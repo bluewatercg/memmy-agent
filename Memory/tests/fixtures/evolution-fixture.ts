@@ -54,12 +54,14 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
   agentId: string;
   appId: string;
   profileId: string;
+  projectId?: string;
   sourceTraceId: string;
   sourceEpisodeId: string;
   decisionGuidance?: {
     preference?: string[];
     anti_pattern?: string[];
   };
+  boundary?: string;
 }): void {
   const at = new Date().toISOString();
   const policy = {
@@ -67,7 +69,7 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
     trigger: "python pytest failure requires inspection and retry",
     procedure: "Run pytest, inspect the failure, retry after fixing issue, then verify the result.",
     verification: "The pytest result passes after the retry.",
-    boundary: "Use only for python pytest retry workflows.",
+    boundary: input.boundary ?? "Use only for python pytest retry workflows.",
     support: 2,
     gain: 0.8,
     raw_gain: 0.8,
@@ -108,6 +110,7 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
     tagsJson: JSON.stringify(["policy", "python", "pytest"]),
     infoJson: JSON.stringify({
       profile_id: input.profileId,
+      ...(input.projectId ? { project_id: input.projectId } : {}),
       signature: policy.signature,
       support: policy.support,
       gain: policy.gain,
@@ -119,7 +122,10 @@ export function insertActivePolicyMemory(db: MemoryDb, input: {
       memory_type: "LongTermMemory",
       status: "activated",
       tags: ["policy", "python", "pytest"],
-      info: { profile_id: input.profileId },
+      info: {
+        profile_id: input.profileId,
+        ...(input.projectId ? { project_id: input.projectId } : {})
+      },
       internal_info: {
         memory_layer: "L2",
         memory_kind: "policy",

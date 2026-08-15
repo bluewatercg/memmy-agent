@@ -294,6 +294,21 @@ describe("MemoryService / evolution / orchestration", () => {
       op: "created",
       entity_id: trial.trialId
     });
+    const candidateAssetRow = db.db.prepare(
+      `SELECT id, namespace_id, version, status, provenance_json
+       FROM memory_assets
+       WHERE content_ref = ?`
+    ).get(`memory://${skillId}/v1`) as {
+      id: string;
+      namespace_id: string;
+      version: number;
+      status: string;
+      provenance_json: string;
+    };
+    expect(candidateAssetRow.status).toBe("candidate");
+    const candidateAssetProvenance: unknown = JSON.parse(candidateAssetRow.provenance_json);
+    expect(candidateAssetProvenance).toMatchObject({ trialProvenance: [] });
+
     const skillFeedback = await service.feedback({
       sessionId: session.sessionId,
       episodeId: completes[0]!.episodeId,
@@ -414,6 +429,26 @@ describe("MemoryService / evolution / orchestration", () => {
         reward: expect.any(Number)
       }
     ]));
+    const activeAssetRow = db.db.prepare(
+      `SELECT status, provenance_json
+       FROM memory_assets
+       WHERE namespace_id = ? AND id = ? AND version = ?`
+    ).get(candidateAssetRow.namespace_id, candidateAssetRow.id, candidateAssetRow.version) as {
+      status: string;
+      provenance_json: string;
+    };
+    expect(activeAssetRow.status).toBe("active");
+    const activeAssetProvenance: unknown = JSON.parse(activeAssetRow.provenance_json);
+    expect(activeAssetProvenance).toMatchObject({
+      trialProvenance: [
+        expect.objectContaining({
+          trialId: trial.trialId,
+          episodeId: completes[0]!.episodeId,
+          traceId: completes[0]!.l1MemoryId,
+          outcome: "success"
+        })
+      ]
+    });
     const episodeIndexes = db.db.prepare(
       `SELECT l2_policy_ids_json, l3_world_model_ids_json, skill_memory_ids_json
        FROM episodes

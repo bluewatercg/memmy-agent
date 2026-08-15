@@ -777,6 +777,7 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       namespace: {
         source: "codex",
         profileId: "jiang",
+        projectId: "project-skill-assets",
         userId
       }
     });
@@ -823,6 +824,8 @@ describe("MemoryService / evolution / skill lifecycle", () => {
       agentId: "codex",
       appId: "",
       profileId: "jiang",
+      projectId: "project-skill-assets",
+      boundary: "outside-policy-boundary",
       sourceTraceId: first.l1MemoryId,
       sourceEpisodeId: first.episodeId
     });
@@ -843,11 +846,69 @@ describe("MemoryService / evolution / skill lifecycle", () => {
 
     expect(calls.some((call) => call.options.operation === "skill.crystallize")).toBe(true);
     const skillRow = db.db.prepare(
-      `SELECT memory_key, properties_json
+      `SELECT id, memory_key, version, properties_json
        FROM memories
        WHERE user_id = ? AND memory_layer = 'Skill'
        LIMIT 1`
-    ).get(userId) as { memory_key: string; properties_json: string };
+    ).get(userId) as { id: string; memory_key: string; version: number; properties_json: string };
+    const assetRow = db.db.prepare(
+      `SELECT namespace_id, asset_type, stable_key, version, status, title, summary,
+              content_ref, owner_id, visibility, allowed_agent_ids_json,
+              source_memory_ids_json, source_episode_ids_json, source_trace_ids_json,
+              source_topic_ids_json, applicability_json, provenance_json
+       FROM memory_assets
+       WHERE namespace_id = ? AND stable_key = ? AND version = 1`
+    ).get("local:project-skill-assets", skillRow.memory_key) as {
+      namespace_id: string;
+      asset_type: string;
+      stable_key: string;
+      version: number;
+      status: string;
+      title: string;
+      summary: string;
+      content_ref: string;
+      owner_id: string;
+      visibility: string;
+      allowed_agent_ids_json: string;
+      source_memory_ids_json: string;
+      source_episode_ids_json: string;
+      source_trace_ids_json: string;
+      source_topic_ids_json: string;
+      applicability_json: string;
+      provenance_json: string;
+    };
+    expect(assetRow).toBeTruthy();
+    expect(assetRow).toMatchObject({
+      namespace_id: "local:project-skill-assets",
+      asset_type: "skill",
+      stable_key: skillRow.memory_key,
+      version: 1,
+      status: "candidate",
+      content_ref: `memory://${skillRow.id}/v${skillRow.version}`,
+      owner_id: userId,
+      visibility: "restricted"
+    });
+    expect(JSON.parse(assetRow.allowed_agent_ids_json)).toEqual(["codex"]);
+    expect(JSON.parse(assetRow.source_memory_ids_json)).toEqual([skillRow.memory_key.replace(/^skill:/, "")]);
+    expect(JSON.parse(assetRow.source_episode_ids_json)).toEqual([first.episodeId]);
+    expect(JSON.parse(assetRow.source_trace_ids_json)).toContain(first.l1MemoryId);
+    expect(JSON.parse(assetRow.source_topic_ids_json)).toEqual([]);
+    expect(JSON.parse(assetRow.applicability_json)).toEqual({
+      scope: "project",
+      taskTypes: ["skill"],
+      projectIds: ["project-skill-assets"],
+      planIds: [],
+      workItemIds: [],
+      requiredSignals: ["Use when pytest sqlite migration diagnostics are needed."],
+      excludedSignals: ["outside-policy-boundary"],
+      invocationHints: ["Use when pytest sqlite migration diagnostics are needed."],
+      retireWhen: "project_completed"
+    });
+    expect(JSON.parse(assetRow.provenance_json)).toMatchObject({
+      skillMemoryId: skillRow.id,
+      skillMemoryVersion: skillRow.version,
+      sourcePolicyIds: [skillRow.memory_key.replace(/^skill:/, "")]
+    });
     const sourcePolicyId = skillRow.memory_key.replace(/^skill:/, "");
     const policyRow = db.db.prepare(
       `SELECT id, properties_json

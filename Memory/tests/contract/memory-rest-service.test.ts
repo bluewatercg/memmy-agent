@@ -78,8 +78,8 @@ describe("MemoryService / REST contract", () => {
     expect(body.storage.backendId).toBe("sqlite-local");
     expect(body.storage.fullText).toBe("fts5");
     expect(body.storage.vector).toBe("native");
-    expect(body.storage.schemaVersion).toBe("8");
-    expect(body.storage.lastMigrationId).toBe("008_topic_decisions");
+    expect(body.storage.schemaVersion).toBe("11");
+    expect(body.storage.lastMigrationId).toBe("011_asset_recall_terminal_outcomes");
     const client = new MemoryRestClient({
       endpoint: `http://127.0.0.1:${address.port}`
     });
@@ -1509,6 +1509,188 @@ describe("MemoryService / REST contract", () => {
     const crossUserBody = await crossUserGet.json() as { error: { code: string } };
     expect(crossUserGet.status).toBe(404);
     expect(crossUserBody.error.code).toBe("not_found");
+    });
+    db.close();
+  });
+  it("exposes governed asset lifecycle, loadout, sequence, recall, and reward contracts", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "asset-reviewer", projectId: "project-a" };
+    const temporalMemory = service.addMemory({
+      namespace,
+      layer: "L2",
+      title: "Repository recovery policy",
+      content: "Inspect interrupted repository migrations before resuming them."
+    });
+    const server = createMemoryHttpServer({
+      service,
+      auth: {
+        scopedApiKeys: {
+          reader: { namespace, scopes: ["memory:read"] },
+          writer: { namespace, scopes: ["memory:write"] }
+        }
+      }
+    });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const base = `http://127.0.0.1:${address.port}/api/v1`;
+      const reader = { authorization: "Bearer reader" };
+      const writer = { authorization: "Bearer writer", "content-type": "application/json" };
+      const candidateInput = {
+        assetType: "skill",
+        stableKey: "skill/recover-repository",
+        title: "Recover repository",
+        summary: "Recover an interrupted repository migration",
+        contentRef: "memory://skills/recover-repository/v1",
+        ownerId: "codex",
+        visibility: "restricted",
+        allowedAgentIds: ["codex"],
+        sourceMemoryIds: ["policy-memory-1"],
+        sourceEpisodeIds: ["episode-solve"],
+        sourceTraceIds: ["trace-solve"],
+        sourceTopicIds: [],
+        applicability: {
+          scope: "work_item",
+          taskTypes: ["repository-migration"],
+          projectIds: ["project-a"],
+          planIds: ["plan-a"],
+          workItemIds: ["work-verify"],
+          requiredSignals: ["migration-interrupted"],
+          excludedSignals: ["migration-complete"],
+          invocationHints: ["Inspect the interrupted migration first"],
+          retireWhen: "work_item_completed"
+        },
+        provenance: {
+          invocationGuide: "Inspect the interrupted migration before resuming it.",
+          procedureJson: {
+            summary: "Inspect state, repair the migration, and rerun the focused check.",
+            steps: [
+              { title: "Inspect", body: "Read the migration state and exact failure." },
+              { title: "Repair", body: "Apply the narrow repair and rerun the failed check." }
+            ],
+            tools: ["shell"]
+          },
+          acceptanceRules: ["The focused migration check passes."],
+          rollbackRules: ["Restore the pre-migration database snapshot."],
+          sourcePolicyIds: ["policy-memory-1"],
+          evidenceAnchorIds: ["episode-solve", "trace-solve"],
+          support: 3,
+          gain: 0.4,
+          eta: 0.8,
+          trialProvenance: [
+            { trialId: "trial-1", episodeId: "episode-solve", traceId: "trace-solve", policyId: "policy-memory-1", reward: 0.8, outcome: "success" },
+            { trialId: "trial-2", episodeId: "episode-verify", traceId: "trace-verify", policyId: "policy-memory-1", reward: 0.7, outcome: "success" }
+          ],
+          skillMemoryId: temporalMemory.id
+        }
+      };
+
+      const forbiddenCreate = await fetch(`${base}/assets/candidates`, { method: "POST", headers: { ...reader, "content-type": "application/json" }, body: JSON.stringify(candidateInput) });
+      expect(forbiddenCreate.status).toBe(403);
+      const createdResponse = await fetch(`${base}/assets/candidates`, { method: "POST", headers: writer, body: JSON.stringify(candidateInput) });
+      const created = await createdResponse.json() as { id: string; version: number; status: string };
+      expect(createdResponse.status).toBe(200);
+      expect(created).toMatchObject({ version: 1, status: "candidate" });
+
+      const audit = { assetVersion: 1, reason: "Validated successful recovery trials", evidenceIds: ["trial-1", "trial-2"] };
+      const reviewingResponse = await fetch(`${base}/assets/${created.id}/review`, { method: "POST", headers: writer, body: JSON.stringify(audit) });
+      expect((await reviewingResponse.json() as { status: string }).status).toBe("reviewing");
+      const activeResponse = await fetch(`${base}/assets/${created.id}/activate`, { method: "POST", headers: writer, body: JSON.stringify({ ...audit, approved: true, unresolvedHighRiskConflicts: [] }) });
+      expect((await activeResponse.json() as { status: string }).status).toBe("active");
+
+      const versionResponse = await fetch(`${base}/assets/${created.id}/versions/1`, { headers: reader });
+      const version = await versionResponse.json() as { sourceEpisodeIds: string[]; validation: { attempts: number } };
+      expect(versionResponse.status).toBe(200);
+      expect(version.sourceEpisodeIds).toEqual(["episode-solve"]);
+      expect(version.validation.attempts).toBe(0);
+      const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}`, token: "writer" });
+      await expect(client.recallAssets({
+        mode: "recall",
+        eventKey: "rest-recall-empty",
+        risk: "low",
+        projectId: "project-a",
+        taskType: "repository-migration",
+        signals: ["migration-interrupted"]
+      })).resolves.toEqual({ items: [] });
+
+
+      const wrongAgent = await fetch(`${base}/agent-loadouts`, { method: "POST", headers: writer, body: JSON.stringify({ agentId: "claude", assetId: created.id, assetVersion: 1, mode: "recall", priority: 10, projectId: "project-a", planId: "plan-a", workItemId: "work-verify", taskTypes: ["repository-migration"], retireWhen: "work_item_completed" }) });
+      expect(wrongAgent.status).toBe(403);
+      const loadoutResponse = await fetch(`${base}/agent-loadouts`, { method: "POST", headers: writer, body: JSON.stringify({ agentId: "codex", assetId: created.id, assetVersion: 1, mode: "recall", priority: 10, projectId: "project-a", planId: "plan-a", workItemId: "work-verify", taskTypes: ["repository-migration"], retireWhen: "work_item_completed" }) });
+      expect(loadoutResponse.status).toBe(200);
+      const loadouts = await fetch(`${base}/agent-loadouts?agentId=codex`, { headers: reader });
+      const initialized = await client.mutateMemoryTemporalValidity(temporalMemory.id, {
+        action: "initialize",
+        expectedVersion: 0,
+        observedAt: "2026-08-13T05:00:00.000Z",
+        reviewAfter: "2026-09-13T05:00:00.000Z",
+        invalidationKeys: ["migration-complete"],
+        reason: "Register the validated policy",
+        evidenceIds: ["trial-1", "trial-2"],
+        projectStateRef: { projectId: "project-a", workItemId: "work-verify" }
+      }) as { version: number; freshness: string };
+      expect(initialized).toMatchObject({ version: 1, freshness: "current" });
+      const temporal = await client.getMemoryTemporalValidity(temporalMemory.id, { at: "2026-08-13T05:30:00.000Z", scopeActive: true }) as {
+        projection: { view: string; eligible: boolean };
+        events: Array<{ type: string; actor: Record<string, unknown> }>;
+      };
+      expect(temporal.projection).toEqual({ view: "current_truth", freshness: "current", eligible: true });
+      expect(temporal.events[0]).toMatchObject({ type: "initialized", actor: { actorId: "asset-reviewer", agentId: "codex" } });
+      const reviewed = await client.mutateMemoryTemporalValidity(temporalMemory.id, {
+        action: "review",
+        expectedVersion: 1,
+        at: "2026-08-13T06:00:00.000Z",
+        reason: "Confirm the policy remains current",
+        evidenceIds: ["review-1"],
+        projectStateRef: { projectId: "project-a", workItemId: "work-verify" }
+      }) as { version: number; lastReviewedAt: string };
+      expect(reviewed).toMatchObject({ version: 2, lastReviewedAt: "2026-08-13T06:00:00.000Z" });
+      const recalled = await client.recallAssets({
+        mode: "recall",
+        eventKey: "rest-recall-governed",
+        risk: "low",
+        projectId: "project-a",
+        planId: "plan-a",
+        workItemId: "work-verify",
+        taskType: "repository-migration",
+        signals: ["migration-interrupted"]
+      });
+      expect(recalled.items).toHaveLength(1);
+      expect((await loadouts.json() as { items: unknown[] }).items).toHaveLength(1);
+
+      const sequenceResponse = await fetch(`${base}/experience-sequences`, { method: "POST", headers: writer, body: JSON.stringify({ id: "sequence-recovery", title: "Recovery sequence", metadata: { source: "explicit" } }) });
+      expect(sequenceResponse.status).toBe(200);
+      for (const member of [
+        { episodeId: "episode-solve", position: 0, role: "solve", taskId: "repository-migration", planId: "plan-a", workItemId: "work-solve" },
+        { episodeId: "episode-verify", position: 1, role: "verify", taskId: "repository-migration", planId: "plan-a", workItemId: "work-verify" }
+      ]) {
+        const response = await fetch(`${base}/experience-sequences/sequence-recovery/members`, { method: "POST", headers: writer, body: JSON.stringify({ ...member, provenance: { source: "rest-contract" } }) });
+        expect(response.status).toBe(200);
+      }
+      const sequence = await fetch(`${base}/experience-sequences/sequence-recovery`, { headers: reader });
+      expect((await sequence.json() as { members: Array<{ position: number }> }).members.map((member) => member.position)).toEqual([0, 1]);
+
+      const recalls = await fetch(`${base}/assets/${created.id}/versions/1/recalls`, { headers: reader });
+      expect((await recalls.json() as { items: Array<{ outcome: string; eventKey: string }> }).items).toEqual([
+        expect.objectContaining({ outcome: "offered", eventKey: "rest-recall-governed" })
+      ]);
+      const rewardResponse = await fetch(`${base}/asset-rewards/episodes/episode-verify`, { method: "POST", headers: writer, body: JSON.stringify({ targetTaskReward: 0.8 }) });
+      expect(await rewardResponse.json()).toEqual({ items: [] });
+      const validation = await fetch(`${base}/assets/${created.id}/versions/1/validation`, { headers: reader });
+      expect((await validation.json() as { attempts: number }).attempts).toBe(0);
+      const missingTemporal = await fetch(`${base}/memory/missing-memory/temporal-validity`, {
+        method: "POST",
+        headers: writer,
+        body: JSON.stringify({
+          expectedVersion: 0,
+          observedAt: "2026-08-13T00:00:00.000Z",
+          reason: "REST contract probe",
+          evidenceIds: ["evidence-1"],
+          projectStateRef: { projectId: "project-a" }
+        })
+      });
+      expect(missingTemporal.status).toBe(400);
     });
     db.close();
   });
