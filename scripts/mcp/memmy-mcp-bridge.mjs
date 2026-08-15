@@ -18,6 +18,7 @@ const BASE_URL = (process.env.MEMMY_URL ?? "http://127.0.0.1:18960").replace(/\/
 const TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
 const USER_ID = process.env.MEMMY_USER_ID ?? "mcp-bridge";
 const PROJECT_ID = process.env.MEMMY_PROJECT_ID ?? undefined;
+const SOURCE = process.env.MEMMY_SOURCE ?? "deepseek-harness";
 
 if (!TOKEN) {
   console.error("memmy-mcp-bridge: MEMMY_TOKEN/MEMMY_MEMORY_TOKEN is required");
@@ -35,7 +36,8 @@ async function call(path, { method = "GET", body } = {}) {
     headers["content-type"] = "application/json";
     payload = JSON.stringify(body);
   }
-  const res = await fetch(`${BASE_URL}${path}`, { method, headers, body: payload });
+  const separator = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${BASE_URL}${path}${separator}source=${encodeURIComponent(SOURCE)}`, { method, headers, body: payload });
   const text = await res.text();
   let json;
   try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
@@ -118,6 +120,7 @@ server.tool(
       method: "POST",
       body: {
         content,
+        source: SOURCE,
         ...(title ? { title } : {}),
         ...(layer ? { layer } : {}),
         ...(tags ? { tags } : {}),
