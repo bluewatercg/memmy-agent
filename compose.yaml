@@ -1,3 +1,5 @@
+name: memmy-memory
+
 services:
   memory:
     build:
