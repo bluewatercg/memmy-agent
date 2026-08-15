@@ -6,7 +6,7 @@
 // Env:
 //   MEMMY_URL    memmy memory service base URL (default http://127.0.0.1:18960)
 //   MEMMY_TOKEN  memmy memory service token (default from MEMMY_MEMORY_TOKEN)
-//   MEMMY_USER_ID   x-memmy-user-id header (default "mcp-bridge")
+//   MEMMY_USER_ID   x-memmy-user-id header (default "deepseek-harness")
 //   MEMMY_PROJECT_ID x-memmy-project-id header (default undefined)
 //
 // Run: node scripts/mcp/memmy-mcp-bridge.mjs
@@ -16,7 +16,7 @@ import { z } from "zod";
 
 const BASE_URL = (process.env.MEMMY_URL ?? "http://127.0.0.1:18960").replace(/\/$/, "");
 const TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
-const USER_ID = process.env.MEMMY_USER_ID ?? "mcp-bridge";
+const USER_ID = process.env.MEMMY_USER_ID ?? "deepseek-harness";
 const PROJECT_ID = process.env.MEMMY_PROJECT_ID ?? undefined;
 const SOURCE = process.env.MEMMY_SOURCE ?? "deepseek-harness";
 
