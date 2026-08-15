@@ -19,6 +19,7 @@ const TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
 const USER_ID = process.env.MEMMY_USER_ID ?? "deepseek-harness";
 const PROJECT_ID = process.env.MEMMY_PROJECT_ID ?? undefined;
 const SOURCE = process.env.MEMMY_SOURCE ?? "deepseek-harness";
+const WORKSPACE_PATH = process.env.MEMMY_WORKSPACE_PATH ?? process.cwd();
 
 if (!TOKEN) {
   console.error("memmy-mcp-bridge: MEMMY_TOKEN/MEMMY_MEMORY_TOKEN is required");
@@ -28,6 +29,7 @@ if (!TOKEN) {
 async function call(path, { method = "GET", body } = {}) {
   const headers = {
     "x-memmy-user-id": USER_ID,
+    "x-memmy-workspace-path": WORKSPACE_PATH,
     ...(PROJECT_ID ? { "x-memmy-project-id": PROJECT_ID } : {}),
   };
   if (TOKEN) headers.authorization = `Bearer ${TOKEN}`;
@@ -45,6 +47,22 @@ async function call(path, { method = "GET", body } = {}) {
     throw new Error(`memmy ${method} ${path} -> ${res.status}: ${json?.error?.message ?? text}`);
   }
   return json;
+}
+
+// A shared session carries the workspace scope (x-memmy-workspace-path)
+// into stored memories: memory rows inherit app_id (workspace id) and
+// session_id from the session they are written under. Opened lazily and
+// reused across calls; closed on exit.
+let sharedSessionId;
+
+async function ensureSession() {
+  if (sharedSessionId) return sharedSessionId;
+  const opened = await call("/api/v1/sessions/open", {
+    method: "POST",
+    body: { source: SOURCE },
+  });
+  sharedSessionId = opened.sessionId;
+  return sharedSessionId;
 }
 
 const server = new McpServer({
@@ -116,15 +134,16 @@ server.tool(
     deferProcessing: z.boolean().optional().describe("Skip async evolution processing"),
   },
   async ({ content, title, layer, tags, sessionId, deferProcessing }) => {
+    const effectiveSessionId = sessionId ?? (await ensureSession());
     const result = await call("/api/v1/memory/add", {
       method: "POST",
       body: {
         content,
         source: SOURCE,
+        sessionId: effectiveSessionId,
         ...(title ? { title } : {}),
         ...(layer ? { layer } : {}),
         ...(tags ? { tags } : {}),
-        ...(sessionId ? { sessionId } : {}),
         ...(deferProcessing !== undefined ? { deferProcessing } : {}),
       },
     });
