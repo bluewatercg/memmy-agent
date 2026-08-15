@@ -8,8 +8,11 @@
 //   MEMMY_TOKEN  memmy memory service token (default from MEMMY_MEMORY_TOKEN)
 //   MEMMY_USER_ID   x-memmy-user-id header (default "deepseek-harness")
 //   MEMMY_PROJECT_ID x-memmy-project-id header (default undefined)
+//   MEMMY_SOURCE  source attribution (default "deepseek_harness")
+//   MEMMY_WORKSPACE_PATH workspace path header (default process.cwd())
 //
-// Run: node scripts/mcp/memmy-mcp-bridge.mjs
+// Design: docs/superpowers/plans/2026-08-15-dsh-realtime-memory-integration-design.md
+// Phase 2a: session/turn lifecycle tools + unified identity + signal close.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -18,7 +21,8 @@ const BASE_URL = (process.env.MEMMY_URL ?? "http://127.0.0.1:18960").replace(/\/
 const TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
 const USER_ID = process.env.MEMMY_USER_ID ?? "deepseek-harness";
 const PROJECT_ID = process.env.MEMMY_PROJECT_ID ?? undefined;
-const SOURCE = process.env.MEMMY_SOURCE ?? "deepseek-harness";
+const SOURCE = process.env.MEMMY_SOURCE ?? "deepseek_harness";
+const ADAPTER_ID = process.env.MEMMY_ADAPTER_ID ?? "agent-source:deepseek_harness";
 const WORKSPACE_PATH = process.env.MEMMY_WORKSPACE_PATH ?? process.cwd();
 
 if (!TOKEN) {
@@ -49,27 +53,167 @@ async function call(path, { method = "GET", body } = {}) {
   return json;
 }
 
-// A shared session carries the workspace scope (x-memmy-workspace-path)
-// into stored memories: memory rows inherit app_id (workspace id) and
-// session_id from the session they are written under. Opened lazily and
-// reused across calls; closed on exit.
+// ── lifecycle state ──────────────────────────────────────────────────────────
 let sharedSessionId;
+let activeTurnId;
+const closeRetryQueue = [];
 
-async function ensureSession() {
+// Idempotency keys (design §6.1): envelope mutations carry eventKey as requestId.
+function sessionKeyOf(externalSessionId) {
+  return `${SOURCE}:${externalSessionId}`;
+}
+function turnKeyOf(externalSessionId, externalTurnId) {
+  return `${sessionKeyOf(externalSessionId)}:turn:${externalTurnId}`;
+}
+function eventKeyOf(externalSessionId, externalEventId) {
+  return `${sessionKeyOf(externalSessionId)}:event:${externalEventId}`;
+}
+
+async function ensureSession(externalSessionId) {
   if (sharedSessionId) return sharedSessionId;
+  const requestId = sessionKeyOf(externalSessionId);
   const opened = await call("/api/v1/sessions/open", {
     method: "POST",
-    body: { source: SOURCE },
+    body: {
+      source: SOURCE,
+      adapterId: ADAPTER_ID,
+      requestId,
+      ...(externalSessionId ? { sessionKey: externalSessionId } : {}),
+    },
   });
   sharedSessionId = opened.sessionId;
   return sharedSessionId;
 }
 
+async function closeSession() {
+  if (!sharedSessionId) return;
+  const sid = sharedSessionId;
+  sharedSessionId = undefined;
+  activeTurnId = undefined;
+  try {
+    await call(`/api/v1/sessions/${sid}/close`, {
+      method: "POST",
+      body: { source: SOURCE, adapterId: ADAPTER_ID, requestId: sessionKeyOf(sid) },
+    });
+  } catch (error) {
+    closeRetryQueue.push({ sid, error: String(error) });
+  }
+}
+
+// Retry queue drain: attempt once, drop on failure (process is exiting anyway).
+function drainCloseRetryQueue() {
+  while (closeRetryQueue.length > 0) {
+    const item = closeRetryQueue.shift();
+    if (!item) continue;
+    void call(`/api/v1/sessions/${item.sid}/close`, {
+      method: "POST",
+      body: { source: SOURCE, adapterId: ADAPTER_ID },
+    }).catch(() => {});
+  }
+}
+
 const server = new McpServer({
   name: "memmy-memory",
-  version: "1.0.0",
+  version: "1.1.0",
 });
 
+// ── lifecycle tools ──────────────────────────────────────────────────────────
+server.tool(
+  "memmy_session_open",
+  "Open a memmy session (idempotent by externalSessionId). Returns the memmy sessionId.",
+  {
+    externalSessionId: z.string().describe("DSH session id (header.id)"),
+    externalTurnId: z.string().optional().describe("DSH turn number as string"),
+  },
+  async ({ externalSessionId, externalTurnId }) => {
+    const sid = await ensureSession(externalSessionId);
+    return { content: [{ type: "text", text: `sessionId=${sid}` }] };
+  },
+);
+
+server.tool(
+  "memmy_turn_start",
+  "Start a turn. Triggers memory recall; returns injected context.",
+  {
+    externalSessionId: z.string().describe("DSH session id"),
+    externalTurnId: z.string().describe("DSH turn number as string"),
+    query: z.string().describe("The user query entering the turn"),
+    contextHints: z.record(z.unknown()).optional(),
+    limit: z.number().int().min(1).max(50).optional(),
+  },
+  async ({ externalSessionId, externalTurnId, query, contextHints, limit }) => {
+    const sid = await ensureSession(externalSessionId);
+    const turnId = turnKeyOf(externalSessionId, externalTurnId);
+    const result = await call("/api/v1/turns/start", {
+      method: "POST",
+      body: {
+        sessionId: sid,
+        query,
+        turnId,
+        requestId: turnId,
+        adapterId: ADAPTER_ID,
+        ...(contextHints ? { contextHints } : {}),
+        ...(limit ? { contextBudget: limit } : {}),
+      },
+    });
+    activeTurnId = result.turnId ?? turnId;
+    const injected = result.injectedContext ?? result.context ?? "";
+    const injectedText = typeof injected === "string" ? injected : JSON.stringify(injected, null, 2);
+    return {
+      content: [{ type: "text", text: `turnId=${activeTurnId}\ninjectedContext=${injectedText}` }],
+    };
+  },
+);
+
+server.tool(
+  "memmy_turn_complete",
+  "Complete a turn, writing back the answer and tool activity.",
+  {
+    externalSessionId: z.string().describe("DSH session id"),
+    externalTurnId: z.string().describe("DSH turn number as string"),
+    query: z.string().describe("The user query"),
+    answer: z.string().describe("The assistant answer"),
+    reasoningSummary: z.string().optional(),
+    tags: z.array(z.string()).optional(),
+    toolCalls: z.array(z.unknown()).optional(),
+    toolResults: z.array(z.unknown()).optional(),
+  },
+  async ({ externalSessionId, externalTurnId, query, answer, reasoningSummary, tags, toolCalls, toolResults }) => {
+    const sid = await ensureSession(externalSessionId);
+    const turnId = turnKeyOf(externalSessionId, externalTurnId);
+    const requestId = `${turnId}:complete`;
+    const result = await call(`/api/v1/turns/${encodeURIComponent(turnId)}/complete`, {
+      method: "POST",
+      body: {
+        sessionId: sid,
+        query,
+        answer,
+        requestId,
+        adapterId: ADAPTER_ID,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
+        ...(tags ? { tags } : {}),
+        ...(toolCalls ? { toolCalls } : {}),
+        ...(toolResults ? { toolResults } : {}),
+      },
+    });
+    activeTurnId = undefined;
+    return { content: [{ type: "text", text: JSON.stringify(result).slice(0, 300) }] };
+  },
+);
+
+server.tool(
+  "memmy_session_close",
+  "Close the current memmy session.",
+  {
+    externalSessionId: z.string().optional().describe("DSH session id (optional)"),
+  },
+  async () => {
+    await closeSession();
+    return { content: [{ type: "text", text: "session closed" }] };
+  },
+);
+
+// ── existing tools ───────────────────────────────────────────────────────────
 server.tool(
   "memmy_health",
   "Check memmy memory service health and schema version",
@@ -134,7 +278,7 @@ server.tool(
     deferProcessing: z.boolean().optional().describe("Skip async evolution processing"),
   },
   async ({ content, title, layer, tags, sessionId, deferProcessing }) => {
-    const effectiveSessionId = sessionId ?? (await ensureSession());
+    const effectiveSessionId = sessionId ?? (await ensureSession("mcp"));
     const result = await call("/api/v1/memory/add", {
       method: "POST",
       body: {
@@ -163,6 +307,24 @@ server.tool(
     return { content: [{ type: "text", text: JSON.stringify(s, null, 2) }] };
   },
 );
+
+// ── signal handling (design §8 Phase 3) ──────────────────────────────────────
+let closing = false;
+async function gracefulShutdown() {
+  if (closing) return;
+  closing = true;
+  try {
+    await closeSession();
+    drainCloseRetryQueue();
+  } finally {
+    process.exit(0);
+  }
+}
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
+process.on("beforeExit", () => {
+  drainCloseRetryQueue();
+});
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

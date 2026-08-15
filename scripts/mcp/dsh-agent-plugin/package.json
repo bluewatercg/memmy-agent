@@ -1,0 +1,8 @@
+{
+  "name": "@memmy/dsh-agent-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Memmy memory agent-plane plugin for DeepSeek Harness: auto recall on agent/pre-step, write-back on agent/turn-stopping"
+}
