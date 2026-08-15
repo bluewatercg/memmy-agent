@@ -1,0 +1,74 @@
+// zstd frame decoder for DSH session logs.
+// DSH writes session.jsonl.zstd as a concatenation of standard Zstandard
+// frames: one header frame + one frame per append batch, each checksummed.
+// Node's built-in zlib.zstdDecompressSync decompresses a single frame, so we
+// locate frame boundaries by the zstd magic number and decompress each frame.
+import { zstdDecompressSync } from "node:zlib";
+
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+const MAX_FRAME_BYTES = 256 * 1024 * 1024; // safety cap per frame
+
+export interface ZstdFrameRange {
+  start: number;
+  end: number; // exclusive; == buffer.length for the final frame
+}
+
+export function findZstdFrameRanges(buffer: Buffer): ZstdFrameRange[] {
+  const frames: ZstdFrameRange[] = [];
+  let pos = 0;
+  while (true) {
+    const idx = buffer.indexOf(ZSTD_MAGIC, pos);
+    if (idx < 0) break;
+    frames.push({ start: idx, end: 0 }); // end filled below
+    pos = idx + ZSTD_MAGIC.length;
+  }
+  for (let i = 0; i < frames.length; i += 1) {
+    const current = frames[i];
+    if (!current) continue;
+    const next = i + 1 < frames.length ? frames[i + 1] : undefined;
+    frames[i] = {
+      start: current.start,
+      end: next ? next.start : buffer.length,
+    };
+  }
+  return frames;
+}
+
+/** Decompress every complete frame; a trailing incomplete frame is skipped. */
+export function decompressZstdFrames(
+  buffer: Buffer,
+  options: { maxBytes?: number } = {},
+): { lines: string[]; completeFrames: number; skippedTail: boolean } {
+  const maxBytes = options.maxBytes ?? MAX_FRAME_BYTES;
+  const ranges = findZstdFrameRanges(buffer);
+  const all: string[] = [];
+  let complete = 0;
+  let skippedTail = false;
+
+  for (let i = 0; i < ranges.length; i += 1) {
+    const range = ranges[i];
+    if (!range) continue;
+    const { start, end } = range;
+    const frame = buffer.subarray(start, end);
+    if (frame.length === 0) continue;
+    try {
+      if (frame.length > maxBytes) {
+        throw new Error("zstd frame exceeds maxBytes");
+      }
+      const out = zstdDecompressSync(frame);
+      all.push(out.toString("utf8"));
+      complete += 1;
+    } catch {
+      // Incomplete/corrupt tail frame: stop reading further frames.
+      skippedTail = i < ranges.length - 1 ? true : skippedTail;
+      break;
+    }
+  }
+
+  const lines = all.join("").split("\n").filter((line) => line.trim().length > 0);
+  return { lines, completeFrames: complete, skippedTail };
+}
+
+export function isZstdBuffer(buffer: Buffer): boolean {
+  return buffer.length >= 4 && buffer.subarray(0, 4).equals(ZSTD_MAGIC);
+}

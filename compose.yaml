@@ -38,6 +38,7 @@ services:
       - ${HOME}/.codex/sessions:/home/node/.codex/sessions:ro
       - ${HOME}/.claude/transcripts:/home/node/.claude/transcripts:ro
       - ${HOME}/.config/manicode:/home/node/.config/manicode:ro
+      - ${HOME}/.dsh:/home/node/.dsh:ro
     healthcheck:
       test:
         - CMD

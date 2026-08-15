@@ -41,6 +41,9 @@ export type {
 } from "./storage/backend.js";
 export { SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "./storage/schema.js";
 export { MemoryService } from "./service/memory-service.js";
+export { DshImportService, DSH_SOURCE, DSH_ADAPTER_ID } from "./service/import/dsh/dsh-import-service.js";
+export { DshImportState, CLAIM_TTL_MS } from "./service/import/dsh/import-state.js";
+export { discoverDshSessions, dshSessionsRoot } from "./service/import/dsh/session-discovery.js";
 export { ProjectContextService } from "./service/project-context/project-context-service.js";
 export { AssetRecallService } from "./service/assets/asset-recall-service.js";
 export type * from "./service/assets/asset-recall-service.js";

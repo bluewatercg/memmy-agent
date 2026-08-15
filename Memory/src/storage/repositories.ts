@@ -1406,6 +1406,25 @@ export class RuntimeRepository {
       .run(key, toJson(value), at);
   }
 
+  /** Insert a KV entry only if the key is absent; returns true when inserted. */
+  setKvIfAbsent(key: string, value: unknown, at = nowIso()): boolean {
+    const result = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO runtime_kv (key, value_json, updated_at)
+         VALUES (?, ?, ?)`
+      )
+      .run(key, toJson(value), at);
+    return result.changes > 0;
+  }
+
+  /** List all runtime_kv keys (for reaping scoped prefixes). */
+  listKvKeys(prefix?: string): string[] {
+    const rows = prefix
+      ? this.db.prepare(`SELECT key FROM runtime_kv WHERE key LIKE ?`).all(prefix + "%")
+      : this.db.prepare(`SELECT key FROM runtime_kv`).all();
+    return (rows as Array<{ key: string }>).map((row) => row.key);
+  }
+
   createSession(session: SessionRecord): SessionRecord {
     this.db
       .prepare(
