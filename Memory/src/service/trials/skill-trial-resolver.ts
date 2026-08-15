@@ -48,6 +48,12 @@ export interface SkillTrialResolverDeps {
   assertMemoryInScope(memory: MemoryRow, namespace?: RuntimeNamespace): void;
   traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null;
   feedbackTargetFromRawTurn(rawTurn: RawTurnRecord): MemoryRow | undefined;
+  onSkillTrialResolved?(input: {
+    trial: SkillTrialRecord;
+    skillMemory: MemoryRow;
+    eta: number;
+    at: string;
+  }): void;
 }
 
 export class SkillTrialResolver {
@@ -208,6 +214,7 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
       true,
       at
     );
+    this.deps.onSkillTrialResolved?.({ trial, skillMemory: saved, eta, at });
   }
 
 resolvePendingSkillTrialsForReward(input: {

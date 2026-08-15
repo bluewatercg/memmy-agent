@@ -16,6 +16,7 @@ import {
 import type { MemmyConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
 import { kindFromMemory,type EpisodeRecord,type EvolutionJobRecord,type Repositories } from "../../storage/repositories.js";
+import type { AssetCandidateInput } from "../assets/asset-types.js";
 import type { MemoryRow } from "../../types.js";
 import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
@@ -50,6 +51,7 @@ export interface SkillPipelineDeps {
  traceMeta(memory:MemoryRow|undefined|null):TraceMeta|null;
  buildMemory(input:Record<string,unknown>):MemoryRow;
  upsertEvolutionMemory(memory:MemoryRow):{memory:MemoryRow;created:boolean;previous?:MemoryRow};
+ upsertSkillAssetCandidate(input:AssetCandidateInput,version:number):void;
  isArchivedEvolutionMemory(memory:MemoryRow):boolean;
  enqueueJob(input:EnqueueJobInput):EvolutionJobRecord;
  namespaceIdFromMemory(memory:MemoryRow):string;
@@ -230,7 +232,52 @@ export class SkillPipeline {
         },
         createdAt: at
       });
-      const upsert = this.deps.upsertEvolutionMemory(skill);
+      const upsert = this.deps.repos.transaction(() => {
+        const persisted = this.deps.upsertEvolutionMemory(skill);
+        const projectId = projectIdFromMemory(persisted.memory);
+        const skillSignals = skillApplicabilitySignals(verifiedDraft.procedureJson, policy.trigger);
+        this.deps.upsertSkillAssetCandidate({
+          namespaceId: this.deps.namespaceIdFromMemory(persisted.memory),
+          assetType: "skill",
+          stableKey: persisted.memory.memoryKey ?? verifiedDraft.key,
+          title: verifiedDraft.name,
+          summary: firstString(verifiedDraft.procedureJson.summary) ?? verifiedDraft.invocationGuide,
+          contentRef: `memory://${persisted.memory.id}/v${persisted.memory.version}`,
+          ownerId: persisted.memory.userId,
+          visibility: "restricted",
+          allowedAgentIds: persisted.memory.agentId ? [persisted.memory.agentId] : [],
+          sourceMemoryIds: verifiedDraft.sourcePolicyIds,
+          sourceEpisodeIds: uniq(policy.sourceEpisodeIds),
+          sourceTraceIds: uniq(verifiedDraft.evidenceAnchorIds),
+          sourceTopicIds: [],
+          applicability: {
+            scope: projectId ? "project" : "namespace",
+            taskTypes: ["skill"],
+            projectIds: projectId ? [projectId] : [],
+            planIds: [],
+            workItemIds: [],
+            requiredSignals: skillSignals,
+            excludedSignals: [policy.boundary],
+            invocationHints: skillSignals,
+            retireWhen: projectId ? "project_completed" : "explicit"
+          },
+          provenance: {
+            skillMemoryId: persisted.memory.id,
+            skillMemoryVersion: persisted.memory.version,
+            invocationGuide: verifiedDraft.invocationGuide,
+            procedureJson: verifiedDraft.procedureJson,
+            acceptanceRules: [policy.verification],
+            rollbackRules: [policy.boundary],
+            sourcePolicyIds: verifiedDraft.sourcePolicyIds,
+            evidenceAnchorIds: verifiedDraft.evidenceAnchorIds,
+            support: verifiedDraft.support,
+            gain: verifiedDraft.gain,
+            eta: verifiedDraft.eta,
+            trialProvenance: []
+          }
+        }, persisted.memory.version);
+        return persisted;
+      });
       for (const episodeId of uniq(evidenceTraces.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id)))) {
         this.deps.repos.runtime.appendEpisodeDerivedMemory(episodeId, "Skill", upsert.memory.id, at);
       }
@@ -1178,6 +1225,13 @@ function dedupeCaseInsensitiveStrings(values: string[]): string[] {
     out.push(trimmed);
   }
   return out;
+}
+
+function skillApplicabilitySignals(procedure: Record<string, unknown>, fallback: string): string[] {
+  const triggerContext = firstString(procedure.triggerContext, procedure.trigger_context);
+  if (triggerContext) return [triggerContext];
+  const preconditions = stringArray(procedure.preconditions);
+  return preconditions.length > 0 ? preconditions : [fallback];
 }
 
 function firstString(...values: unknown[]): string | undefined {

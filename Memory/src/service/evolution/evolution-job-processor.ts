@@ -8,12 +8,15 @@ import type { LlmClient } from "../../model/types.js";
 import type {
   EpisodeRecord,
   EvolutionJobRecord,
-  Repositories
+  Repositories,
+  SkillTrialRecord
 } from "../../storage/repositories.js";
-import type { MemoryRow,ToolCallPayload } from "../../types.js";
+import type { AssetRewardEvidenceRecord, MemoryAssetRecord, MemoryRow, ToolCallPayload } from "../../types.js";
 import { newId } from "../../utils/id.js";
 import { nowIso } from "../../utils/time.js";
 import type { ScheduleEmbeddingAfterTextUpdateInput } from "../embedding/embedding-job-processor.js";
+import { AssetLifecycleService } from "../assets/asset-lifecycle-service.js";
+import type { AssetCandidateInput, SkillActivationInput, SkillLifecycleAuditInput } from "../assets/asset-types.js";
 import type {
   DecisionRepairTraceSource,
   SynthesizeDecisionRepairDraft
@@ -24,6 +27,7 @@ import {
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
+import { AssetRewardService } from "./asset-reward-service.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
 import { PolicyInductionEngine } from "./policy-induction.js";
 import {
@@ -77,9 +81,25 @@ export class EvolutionJobProcessor {
   private readonly span: SpanPipeline;
   private readonly bigTurnSpan: BigTurnSpanPipeline;
   private readonly worldModel: WorldModelPipeline;
+  private readonly assets: AssetLifecycleService;
+  private readonly assetRewards: AssetRewardService;
 
   constructor(private readonly deps: EvolutionJobProcessorDeps) {
     const owner = this;
+    this.assets = new AssetLifecycleService({
+      repositories: deps.repos,
+      now: nowIso,
+      id: newId,
+      skillActivation: {
+        minimumTrials: deps.config.algorithm.skill.candidateTrials,
+        minimumEta: deps.config.algorithm.skill.minEtaForRetrieval
+      }
+    });
+    this.assetRewards = new AssetRewardService({
+      repositories: deps.repos,
+      now: nowIso,
+      id: newId
+    });
     this.skill = new SkillPipeline({
       repos: deps.repos,
       get config() { return owner.deps.config; },
@@ -87,6 +107,9 @@ export class EvolutionJobProcessor {
       traceMeta: deps.traceMeta,
       buildMemory: deps.buildMemory,
       upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
+      upsertSkillAssetCandidate: (input, version) => {
+        this.assets.upsertCandidateVersion(input, version);
+      },
       isArchivedEvolutionMemory: this.isArchivedEvolutionMemory.bind(this),
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory
@@ -146,6 +169,13 @@ export class EvolutionJobProcessor {
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       enqueueJob: deps.enqueueJob,
       finalizeClosedEpisode: deps.finalizeClosedEpisode,
+      recordAssetRewardForEpisode: (episode, source) => {
+        this.assetRewards.recordForEpisode({
+          namespaceId: deps.namespaceIdFromMemory(source),
+          targetEpisodeId: episode.id,
+          targetTaskReward: episode.rTask ?? 0
+        });
+      },
       resolvePendingSkillTrialsForReward: deps.resolvePendingSkillTrialsForReward,
       decisionRepairTraceSources: deps.decisionRepairTraceSources,
       synthesizeDecisionRepairDraft: deps.synthesizeDecisionRepairDraft,
@@ -178,6 +208,62 @@ export class EvolutionJobProcessor {
   crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
     return this.skill.crystallizeSkill(job);
   }
+  recordResolvedSkillTrial(input: {
+    trial: SkillTrialRecord;
+    skillMemory: MemoryRow;
+    eta: number;
+    at: string;
+  }): void {
+    const asset = this.assets.recordResolvedSkillTrial({
+      namespaceId: this.deps.namespaceIdFromMemory(input.skillMemory),
+      stableKey: input.skillMemory.memoryKey ?? input.skillMemory.id,
+      trialId: input.trial.id,
+      episodeId: input.trial.episodeId,
+      traceId: input.trial.l1MemoryId,
+      reward: input.trial.outcome === "success" ? 1 : 0,
+      outcome: input.trial.outcome === "cancelled" ? "unknown" : input.trial.outcome,
+      eta: input.eta,
+      actorId: "worker.skill-trial-resolver",
+      reason: `Resolved Skill trial ${input.trial.id}`
+    });
+    if (asset?.status !== "reviewing" || skillMetaFromMemory(input.skillMemory)?.status !== "active") return;
+    this.assets.activateSkill({
+      namespaceId: asset.namespaceId,
+      assetId: asset.id,
+      assetVersion: asset.version,
+      actorId: "worker.skill-trial-resolver",
+      reason: `Skill ${input.skillMemory.id} passed configured automatic activation thresholds`,
+      evidenceIds: [input.trial.id, input.trial.episodeId, input.trial.l1MemoryId]
+        .filter((id): id is string => Boolean(id)),
+      approved: true,
+      unresolvedHighRiskConflicts: []
+    });
+  }
+
+  createAssetCandidate(input: AssetCandidateInput): MemoryAssetRecord {
+    return this.assets.createCandidate(input);
+  }
+
+  reviewSkill(input: SkillLifecycleAuditInput): MemoryAssetRecord {
+    return this.assets.submitForReview(input);
+  }
+
+  activateSkill(input: SkillActivationInput): MemoryAssetRecord {
+    return this.assets.activateSkill(input);
+  }
+
+  deprecateSkill(input: SkillLifecycleAuditInput): MemoryAssetRecord {
+    return this.assets.deprecateSkill(input);
+  }
+
+  recordAssetReward(input: {
+    namespaceId: string;
+    targetEpisodeId: string;
+    targetTaskReward: number;
+  }): AssetRewardEvidenceRecord[] {
+    return this.assetRewards.recordForEpisode(input);
+  }
+
 
   reflectTrace(job: EvolutionJobRecord): Promise<void> {
     return this.span.reflectTrace(job);

@@ -35,6 +35,11 @@ import {
 import type { SerializedMemoryVector } from "../storage/sqlite-vec-store.js";
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import type {
+  AgentLoadoutEntry,
+  AssetRewardEvidenceRecord,
+  ExperienceSequenceMemberRecord,
+  ExperienceSequenceRecord,
+  MemoryAssetRecord,
   FeedbackRequest,
   HealthResponse,
   InjectedContext,
@@ -82,6 +87,23 @@ import { nowIso } from "../utils/time.js";
 import {
   EmbeddingJobProcessor
 } from "./embedding/embedding-job-processor.js";
+import {
+  AssetRecallService,
+  type AssetRecallRequest,
+  type RecalledAsset,
+  type RecordAssetRecallOutcomeInput
+} from "./assets/asset-recall-service.js";
+import { AgentLoadoutService, type BindAgentLoadoutInput } from "./assets/agent-loadout-service.js";
+import type { AssetCandidateInput, SkillActivationInput, SkillLifecycleAuditInput } from "./assets/asset-types.js";
+import { TemporalValidityService } from "./assets/temporal-validity-service.js";
+import type {
+  TemporalInitializeInput,
+  TemporalInvalidateInput,
+  TemporalProjection,
+  TemporalProjectionOptions,
+  TemporalReviewInput,
+  TemporalSupersedeInput
+} from "./assets/asset-types.js";
 import { EvolutionJobProcessor } from "./evolution/evolution-job-processor.js";
 import { traceReflectionWasScored,traceSortKey } from "./evolution/span-pipeline.js";
 import {
@@ -272,6 +294,9 @@ export class MemoryService {
   private readonly panelReadModel: PanelReadModel;
   private readonly projectContext: ProjectContextService;
   private readonly retrieval: RetrievalService;
+  private readonly assetRecall: AssetRecallService;
+  private readonly agentLoadouts: AgentLoadoutService;
+  private readonly temporalValidity: TemporalValidityService;
   private readonly sessionTurns: SessionTurnService;
   private readonly skillReadModel: SkillReadModel;
   private readonly topicInbox: ProjectTopicInboxService;
@@ -297,6 +322,8 @@ export class MemoryService {
         ? options.llm
         : createConfiguredMemoryLlm(this.config, "memory_evolution"));
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
+    this.agentLoadouts = new AgentLoadoutService({ repositories: this.repos, now: nowIso, id: newId });
+    this.temporalValidity = new TemporalValidityService({ repositories: this.repos, now: nowIso, id: newId });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -381,6 +408,7 @@ export class MemoryService {
     ));
 
     this.projectContext = new ProjectContextService({ repositories: this.repos });
+    this.assetRecall = new AssetRecallService({ repositories: this.repos, now: nowIso, id: newId });
     this.topicDecisions = new TopicDecisionService({
       repos: this.repos,
       enabled: this.config.algorithm.topicDecisions.enabled,
@@ -397,7 +425,8 @@ export class MemoryService {
       requireExistingMemory: this.requireExistingMemory.bind(this),
       assertMemoryInScope: this.assertMemoryInScope.bind(this),
       traceMeta: this.traceMeta.bind(this),
-      feedbackTargetFromRawTurn: (rawTurn) => this.feedbackExperience.feedbackTargetFromRawTurn(rawTurn)
+      feedbackTargetFromRawTurn: (rawTurn) => this.feedbackExperience.feedbackTargetFromRawTurn(rawTurn),
+      onSkillTrialResolved: (input) => this.evolutionJobs.recordResolvedSkillTrial(input)
     });
     const feedbackOwner = this;
     this.feedbackExperience = new FeedbackExperienceService({
@@ -1004,6 +1033,98 @@ export class MemoryService {
     return this.retrieval.search(request);
   }
 
+  recallAvailableAssets(request: AssetRecallRequest): RecalledAsset[] {
+    return this.assetRecall.recall(request);
+  }
+
+  recordAssetRecallOutcome(request: RecordAssetRecallOutcomeInput): import("../types.js").AssetRecallEventRecord {
+    return this.assetRecall.recordOutcome(request);
+  }
+  initializeMemoryTemporalValidity(input: TemporalInitializeInput): import("../types.js").MemoryTemporalValidity {
+    return this.temporalValidity.initialize(input);
+  }
+
+  reviewMemoryTemporalValidity(input: TemporalReviewInput): import("../types.js").MemoryTemporalValidity {
+    return this.temporalValidity.review(input);
+  }
+
+  invalidateMemoryTemporalValidity(input: TemporalInvalidateInput): import("../types.js").MemoryTemporalValidity {
+    return this.temporalValidity.invalidate(input);
+  }
+
+  supersedeMemoryTemporalValidity(input: TemporalSupersedeInput): import("../types.js").MemoryTemporalValidity {
+    return this.temporalValidity.supersede(input);
+  }
+
+  getMemoryTemporalValidity(namespaceId: string, memoryId: string, options: TemporalProjectionOptions): {
+    validity: import("../types.js").MemoryTemporalValidity;
+    projection: TemporalProjection;
+    events: import("../types.js").MemoryTemporalValidityEvent[];
+  } | undefined {
+    const validity = this.repos.temporalValidity.get(namespaceId, memoryId);
+    const projection = this.temporalValidity.project(namespaceId, memoryId, options);
+    return validity && projection
+      ? { validity, projection, events: this.repos.temporalValidity.listEvents(namespaceId, memoryId) }
+      : undefined;
+  }
+
+
+
+  createAssetCandidate(input: AssetCandidateInput): MemoryAssetRecord {
+    return this.evolutionJobs.createAssetCandidate(input);
+  }
+
+  reviewSkill(input: SkillLifecycleAuditInput): MemoryAssetRecord {
+    return this.evolutionJobs.reviewSkill(input);
+  }
+
+  activateSkill(input: SkillActivationInput): MemoryAssetRecord {
+    return this.evolutionJobs.activateSkill(input);
+  }
+
+  deprecateSkill(input: SkillLifecycleAuditInput): MemoryAssetRecord {
+    return this.evolutionJobs.deprecateSkill(input);
+  }
+
+  getAssetVersion(namespaceId: string, assetId: string, assetVersion: number): MemoryAssetRecord | undefined {
+    return this.repos.assets.get(namespaceId, assetId, assetVersion);
+  }
+
+  bindAgentLoadout(input: BindAgentLoadoutInput): AgentLoadoutEntry {
+    return this.agentLoadouts.bind(input);
+  }
+
+  listAgentLoadouts(namespaceId: string, agentId: string): AgentLoadoutEntry[] {
+    return this.repos.agentLoadouts.list(namespaceId, agentId);
+  }
+
+  createExperienceSequence(input: ExperienceSequenceRecord): ExperienceSequenceRecord {
+    return this.repos.experienceSequences.create(input);
+  }
+
+  appendExperienceSequenceMember(input: ExperienceSequenceMemberRecord): ExperienceSequenceMemberRecord {
+    return this.repos.experienceSequences.appendMember(input);
+  }
+
+  getExperienceSequence(namespaceId: string, sequenceId: string): {
+    sequence: ExperienceSequenceRecord;
+    members: ExperienceSequenceMemberRecord[];
+  } | undefined {
+    const sequence = this.repos.experienceSequences.get(namespaceId, sequenceId);
+    return sequence ? { sequence, members: this.repos.experienceSequences.listMembers(namespaceId, sequenceId) } : undefined;
+  }
+
+  listAssetRecalls(namespaceId: string, assetId: string, assetVersion: number): import("../types.js").AssetRecallEventRecord[] {
+    return this.repos.assetRecallEvents.listForAsset(namespaceId, assetId, assetVersion);
+  }
+
+  recordAssetReward(input: {
+    namespaceId: string;
+    targetEpisodeId: string;
+    targetTaskReward: number;
+  }): AssetRewardEvidenceRecord[] {
+    return this.evolutionJobs.recordAssetReward(input);
+  }
 
   private isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
     return this.retrieval.isMemoryReadyForRetrieval(memory);

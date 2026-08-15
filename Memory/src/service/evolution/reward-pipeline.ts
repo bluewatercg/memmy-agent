@@ -53,6 +53,7 @@ export interface RewardPipelineDeps {
   namespaceIdFromMemory(memory: MemoryRow): string;
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   finalizeClosedEpisode(episode: EpisodeRecord, at: string, trigger: "episode_rewarded"): EvolutionJobRecord[];
+  recordAssetRewardForEpisode(episode: EpisodeRecord, source: MemoryRow): void;
   resolvePendingSkillTrialsForReward(input: {
     userId: string;
     episodeId: string;
@@ -170,6 +171,7 @@ export class RewardPipeline {
         metaPatch: { reward: rewardDetail }
       });
       rewardedEpisode = savedEpisode;
+      if (savedEpisode) this.deps.recordAssetRewardForEpisode(savedEpisode, source);
       if (savedEpisode) {
         this.deps.repos.runtime.appendChange({
           memoryId: savedEpisode.id,
