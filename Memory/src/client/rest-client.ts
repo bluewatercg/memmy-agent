@@ -23,6 +23,72 @@ export interface MemoryRestClientOptions {
   token?: string;
   headers?: Record<string, string>;
 }
+export interface AssetRecallRequestBody {
+  mode: "bootstrap" | "recall" | "tool";
+  eventKey: string;
+  risk: "low" | "high";
+  projectId?: string;
+  planId?: string;
+  workItemId?: string;
+  taskType?: string;
+  signals: string[];
+  at?: string;
+  episodeId?: string;
+  taskId?: string;
+  invalidationSignals?: string[];
+  semanticScores?: Record<string, number>;
+  evidenceIds?: string[];
+}
+
+export interface AssetRecallOutcomeBody {
+  eventKey: string;
+  outcome: "used" | "ignored" | "failed";
+  failureReason?: string;
+  evidenceIds?: string[];
+}
+
+export type TemporalValidityMutationBody = {
+  action: "initialize";
+  expectedVersion: 0;
+  observedAt: string;
+  effectiveFrom?: string;
+  effectiveUntil?: string;
+  reviewAfter?: string;
+  invalidationKeys?: string[];
+  reason: string;
+  evidenceIds: string[];
+  projectStateRef: Record<string, unknown>;
+} | {
+  action: "review";
+  expectedVersion: number;
+  at: string;
+  reviewAfter?: string;
+  reason: string;
+  evidenceIds: string[];
+  projectStateRef: Record<string, unknown>;
+} | {
+  action: "invalidate";
+  expectedVersion: number;
+  at: string;
+  invalidationKeys: string[];
+  reason: string;
+  evidenceIds: string[];
+  projectStateRef: Record<string, unknown>;
+} | {
+  action: "supersede";
+  expectedVersion: number;
+  at: string;
+  supersededByMemoryId: string;
+  reason: string;
+  evidenceIds: string[];
+  projectStateRef: Record<string, unknown>;
+};
+
+export interface TemporalValidityQuery {
+  at?: string;
+  scopeActive?: boolean;
+  invalidationSignals?: string[];
+}
 
 export class MemoryRestClient {
   private readonly endpoint: string;
@@ -167,6 +233,22 @@ export class MemoryRestClient {
   cancelTopicDecision(sessionId: string, input: { namespace: RuntimeNamespace; expectedVersion: number; adapterId: string; requestId: string }): Promise<{ session: unknown; snapshots: unknown[] }> {
     return this.request("POST", `/api/v1/topic-inbox/decisions/${encodeURIComponent(sessionId)}/cancel`, input) as Promise<{ session: unknown; snapshots: unknown[] }>;
   }
+  recallAssets(request: AssetRecallRequestBody): Promise<{ items: unknown[] }> {
+    return this.request("POST", "/api/v1/asset-recalls", request) as Promise<{ items: unknown[] }>;
+  }
+
+  recordAssetRecallOutcome(offeredEventId: string, request: AssetRecallOutcomeBody): Promise<unknown> {
+    return this.request("POST", `/api/v1/asset-recalls/${encodeURIComponent(offeredEventId)}/outcome`, request);
+  }
+
+  mutateMemoryTemporalValidity(memoryId: string, request: TemporalValidityMutationBody): Promise<unknown> {
+    return this.request("POST", `/api/v1/memory/${encodeURIComponent(memoryId)}/temporal-validity`, request);
+  }
+
+  getMemoryTemporalValidity(memoryId: string, query: TemporalValidityQuery = {}): Promise<unknown> {
+    return this.request("GET", `/api/v1/memory/${encodeURIComponent(memoryId)}/temporal-validity${queryString({ ...query })}`);
+  }
+
 
   private async request(method: "GET" | "POST" | "DELETE" | "PATCH", path: string, body?: unknown): Promise<unknown> {
     const response = await fetch(`${this.endpoint}${path}`, {

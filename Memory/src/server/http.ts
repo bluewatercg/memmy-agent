@@ -34,7 +34,7 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../types.js";
 import { MemoryService } from "../service/memory-service.js";
 import { createAgentTokenStatsService } from "../service/agent-token-stats-service.js";
-import { normalizeNamespace } from "../service/namespace/namespace-scope.js";
+import { namespaceIdFromContext, normalizeNamespace } from "../service/namespace/namespace-scope.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { TopicVersionConflictError } from "../service/topic-inbox/project-topic-inbox.js";
 import {
@@ -124,7 +124,24 @@ export const API_ROUTES = [
   "GET /api/v1/panel/items",
   "GET /api/v1/panel/tasks",
   "DELETE /api/v1/panel/tasks/:id",
-  "GET /api/v1/agent-token-stats"
+  "GET /api/v1/agent-token-stats",
+  "POST /api/v1/assets/candidates",
+  "POST /api/v1/assets/:assetId/review",
+  "POST /api/v1/assets/:assetId/activate",
+  "POST /api/v1/assets/:assetId/deprecate",
+  "GET /api/v1/assets/:assetId/versions/:version",
+  "GET /api/v1/assets/:assetId/versions/:version/recalls",
+  "GET /api/v1/assets/:assetId/versions/:version/validation",
+  "POST /api/v1/agent-loadouts",
+  "GET /api/v1/agent-loadouts",
+  "POST /api/v1/experience-sequences",
+  "POST /api/v1/experience-sequences/:sequenceId/members",
+  "GET /api/v1/experience-sequences/:sequenceId",
+  "POST /api/v1/asset-rewards/episodes/:episodeId",
+  "POST /api/v1/asset-recalls",
+  "POST /api/v1/asset-recalls/:offeredEventId/outcome",
+  "POST /api/v1/memory/:memoryId/temporal-validity",
+  "GET /api/v1/memory/:memoryId/temporal-validity",
 ] as const;
 
 function advertisedApiRoutes(service: MemoryService): string[] {
@@ -437,6 +454,7 @@ function nextWorkerRunAfterDelayMs(service: MemoryService): number | undefined {
   return runAt === undefined ? undefined : Math.max(1, runAt - now);
 }
 
+
 async function routeRequest(
   service: MemoryService,
   autoWorker: AutoWorkerDrain,
@@ -448,6 +466,238 @@ async function routeRequest(
   pluginRuntimeAnalytics: PluginRuntimeAnalytics
 ): Promise<unknown> {
   const path = url.pathname;
+  const assetNamespace = (): { namespaceId: string; actorId: string; agentId: string } => {
+    if (!principal.namespace) throw new MemoryServiceError("invalid_argument", "governed asset routes require a scoped namespace");
+    const normalized = normalizeNamespace(principal.namespace);
+    return { namespaceId: namespaceIdFromContext(normalized), actorId: normalized.userId, agentId: normalized.source };
+  };
+
+  if (method === "POST" && path === "/api/v1/assets/candidates") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "assets.candidates.create");
+    const { namespaceId } = assetNamespace();
+    return callAssetService(() => service.createAssetCandidate({
+      namespaceId,
+      assetType: assetType(request.assetType),
+      stableKey: requiredBodyString(request, "stableKey", "assets.candidates.create"),
+      title: requiredBodyString(request, "title", "assets.candidates.create"),
+      summary: requiredBodyString(request, "summary", "assets.candidates.create"),
+      contentRef: requiredBodyString(request, "contentRef", "assets.candidates.create"),
+      ownerId: requiredBodyString(request, "ownerId", "assets.candidates.create"),
+      visibility: assetVisibility(request.visibility),
+      allowedAgentIds: requiredStringArray(request.allowedAgentIds, "allowedAgentIds"),
+      sourceMemoryIds: requiredStringArray(request.sourceMemoryIds, "sourceMemoryIds"),
+      sourceEpisodeIds: requiredStringArray(request.sourceEpisodeIds, "sourceEpisodeIds"),
+      sourceTraceIds: requiredStringArray(request.sourceTraceIds, "sourceTraceIds"),
+      sourceTopicIds: requiredStringArray(request.sourceTopicIds, "sourceTopicIds"),
+      applicability: assetApplicability(request.applicability),
+      provenance: requiredRecord(request.provenance, "provenance")
+    }));
+  }
+  const assetLifecycle = match(path, /^\/api\/v1\/assets\/([^/]+)\/(review|activate|deprecate)$/);
+  if (method === "POST" && assetLifecycle) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, `assets.${assetLifecycle[2]}`);
+    const { namespaceId, actorId } = assetNamespace();
+    const audit = {
+      namespaceId,
+      assetId: decodeMatchSegment(assetLifecycle, 1),
+      assetVersion: positiveInteger(request.assetVersion, "assetVersion"),
+      actorId,
+      reason: requiredBodyString(request, "reason", `assets.${assetLifecycle[2]}`),
+      evidenceIds: requiredNonEmptyStringArray(request.evidenceIds, "evidenceIds")
+    };
+    return callAssetService(() => assetLifecycle[2] === "review"
+      ? service.reviewSkill(audit)
+      : assetLifecycle[2] === "activate"
+      ? service.activateSkill({
+          ...audit,
+          approved: request.approved === true,
+          unresolvedHighRiskConflicts: requiredStringArray(request.unresolvedHighRiskConflicts, "unresolvedHighRiskConflicts")
+        })
+      : service.deprecateSkill(audit));
+  }
+  const assetVersion = match(path, /^\/api\/v1\/assets\/([^/]+)\/versions\/(\d+)$/);
+  if (method === "GET" && assetVersion) {
+    requireMemoryRead(principal);
+    const { namespaceId } = assetNamespace();
+    const asset = service.getAssetVersion(namespaceId, decodeMatchSegment(assetVersion, 1), Number(assetVersion[2]));
+    if (!asset) throw new MemoryServiceError("not_found", "asset version not found");
+    return asset;
+  }
+  const assetRecalls = match(path, /^\/api\/v1\/assets\/([^/]+)\/versions\/(\d+)\/recalls$/);
+  if (method === "GET" && assetRecalls) {
+    requireMemoryRead(principal);
+    const { namespaceId } = assetNamespace();
+    return { items: service.listAssetRecalls(namespaceId, decodeMatchSegment(assetRecalls, 1), Number(assetRecalls[2])) };
+  }
+  const assetValidation = match(path, /^\/api\/v1\/assets\/([^/]+)\/versions\/(\d+)\/validation$/);
+  if (method === "GET" && assetValidation) {
+    requireMemoryRead(principal);
+    const { namespaceId } = assetNamespace();
+    const asset = service.getAssetVersion(namespaceId, decodeMatchSegment(assetValidation, 1), Number(assetValidation[2]));
+    if (!asset) throw new MemoryServiceError("not_found", "asset version not found");
+    return asset.validation;
+  }
+  if (method === "POST" && path === "/api/v1/agent-loadouts") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "agent-loadouts.bind");
+    const { namespaceId, agentId: authenticatedAgentId } = assetNamespace();
+    const agentId = requiredBodyString(request, "agentId", "agent-loadouts.bind");
+    if (agentId !== authenticatedAgentId) throw new MemoryServiceError("forbidden", "agent loadout may only target the authenticated agent");
+    return callAssetService(() => service.bindAgentLoadout({
+      namespaceId,
+      agentId,
+      assetId: requiredBodyString(request, "assetId", "agent-loadouts.bind"),
+      assetVersion: positiveInteger(request.assetVersion, "assetVersion"),
+      mode: agentLoadoutMode(request.mode),
+      priority: finiteNumber(request.priority, "priority"),
+      projectId: optionalString(request.projectId),
+      planId: optionalString(request.planId),
+      workItemId: optionalString(request.workItemId),
+      taskTypes: requiredStringArray(request.taskTypes, "taskTypes"),
+      retireWhen: retireWhen(request.retireWhen)
+    }));
+  }
+  if (method === "GET" && path === "/api/v1/agent-loadouts") {
+    requireMemoryRead(principal);
+    const { namespaceId, agentId: authenticatedAgentId } = assetNamespace();
+    const agentId = url.searchParams.get("agentId")?.trim() || authenticatedAgentId;
+    if (agentId !== authenticatedAgentId) throw new MemoryServiceError("forbidden", "agent loadouts may only be read for the authenticated agent");
+    return { items: service.listAgentLoadouts(namespaceId, agentId) };
+  }
+  if (method === "POST" && path === "/api/v1/asset-recalls") {
+    requireMemoryRead(principal);
+    const request = asObject(body, "asset-recalls.offer");
+    const { namespaceId, agentId } = assetNamespace();
+    return callAssetService(() => ({ items: service.recallAvailableAssets({
+      namespaceId,
+      agentId,
+      mode: agentLoadoutMode(request.mode),
+      eventKey: requiredBodyString(request, "eventKey", "asset-recalls.offer"),
+      risk: assetRecallRisk(request.risk),
+      projectId: optionalString(request.projectId),
+      planId: optionalString(request.planId),
+      workItemId: optionalString(request.workItemId),
+      taskType: optionalString(request.taskType),
+      signals: requiredStringArray(request.signals, "signals"),
+      at: optionalString(request.at),
+      episodeId: optionalString(request.episodeId),
+      taskId: optionalString(request.taskId),
+      invalidationSignals: optionalStringArray(request.invalidationSignals, "invalidationSignals"),
+      semanticScores: optionalNumberRecord(request.semanticScores, "semanticScores"),
+      evidenceIds: optionalStringArray(request.evidenceIds, "evidenceIds")
+    }) }));
+  }
+  const recallOutcome = match(path, /^\/api\/v1\/asset-recalls\/([^/]+)\/outcome$/);
+  if (method === "POST" && recallOutcome) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "asset-recalls.outcome");
+    const { namespaceId, agentId } = assetNamespace();
+    return callAssetService(() => service.recordAssetRecallOutcome({
+      namespaceId,
+      agentId,
+      offeredEventId: decodeMatchSegment(recallOutcome, 1),
+      eventKey: requiredBodyString(request, "eventKey", "asset-recalls.outcome"),
+      outcome: assetRecallOutcome(request.outcome),
+      failureReason: optionalString(request.failureReason),
+      evidenceIds: optionalStringArray(request.evidenceIds, "evidenceIds")
+    }));
+  }
+  const temporalValidity = match(path, /^\/api\/v1\/memory\/([^/]+)\/temporal-validity$/);
+  if (method === "POST" && temporalValidity) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "memory.temporal-validity.mutate");
+    const { namespaceId, actorId, agentId } = assetNamespace();
+    const memoryId = decodeMatchSegment(temporalValidity, 1);
+    const action = temporalAction(request.action);
+    const audit = {
+      namespaceId,
+      memoryId,
+      actor: { actorId, agentId },
+      reason: requiredBodyString(request, "reason", "memory.temporal-validity.mutate"),
+      evidenceIds: requiredStringArray(request.evidenceIds, "evidenceIds"),
+      projectStateRef: requiredRecord(request.projectStateRef, "projectStateRef")
+    };
+    return callAssetService(() => action === "initialize"
+      ? service.initializeMemoryTemporalValidity({
+          ...audit,
+          expectedVersion: zeroInteger(request.expectedVersion, "expectedVersion"),
+          observedAt: requiredBodyString(request, "observedAt", "memory.temporal-validity.initialize"),
+          effectiveFrom: optionalString(request.effectiveFrom),
+          effectiveUntil: optionalString(request.effectiveUntil),
+          reviewAfter: optionalString(request.reviewAfter),
+          invalidationKeys: optionalStringArray(request.invalidationKeys, "invalidationKeys")
+        })
+      : action === "review"
+      ? service.reviewMemoryTemporalValidity({ ...audit, expectedVersion: positiveInteger(request.expectedVersion, "expectedVersion"), at: requiredBodyString(request, "at", "memory.temporal-validity.review"), reviewAfter: optionalString(request.reviewAfter) })
+      : action === "invalidate"
+      ? service.invalidateMemoryTemporalValidity({ ...audit, expectedVersion: positiveInteger(request.expectedVersion, "expectedVersion"), at: requiredBodyString(request, "at", "memory.temporal-validity.invalidate"), invalidationKeys: requiredNonEmptyStringArray(request.invalidationKeys, "invalidationKeys") })
+      : service.supersedeMemoryTemporalValidity({ ...audit, expectedVersion: positiveInteger(request.expectedVersion, "expectedVersion"), at: requiredBodyString(request, "at", "memory.temporal-validity.supersede"), supersededByMemoryId: requiredBodyString(request, "supersededByMemoryId", "memory.temporal-validity.supersede") }));
+  }
+  if (method === "GET" && temporalValidity) {
+    requireMemoryRead(principal);
+    const { namespaceId } = assetNamespace();
+    const at = url.searchParams.get("at")?.trim() || new Date().toISOString();
+    const scopeActive = url.searchParams.get("scopeActive") !== "false";
+    const invalidationSignals = url.searchParams.get("invalidationSignals")?.split(",").map((value) => value.trim()).filter(Boolean);
+    const result = service.getMemoryTemporalValidity(namespaceId, decodeMatchSegment(temporalValidity, 1), { at, scopeActive, invalidationSignals });
+    if (!result) throw new MemoryServiceError("not_found", "temporal validity not found");
+    return result;
+  }
+  if (method === "POST" && path === "/api/v1/experience-sequences") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "experience-sequences.create");
+    const { namespaceId } = assetNamespace();
+    const createdAt = new Date().toISOString();
+    return callAssetService(() => service.createExperienceSequence({
+      id: requiredBodyString(request, "id", "experience-sequences.create"),
+      namespaceId,
+      title: requiredBodyString(request, "title", "experience-sequences.create"),
+      metadata: requiredRecord(request.metadata, "metadata"),
+      createdAt
+    }));
+  }
+  const sequenceMembers = match(path, /^\/api\/v1\/experience-sequences\/([^/]+)\/members$/);
+  if (method === "POST" && sequenceMembers) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "experience-sequences.members.append");
+    const { namespaceId } = assetNamespace();
+    const sequenceId = decodeMatchSegment(sequenceMembers, 1);
+    return callAssetService(() => service.appendExperienceSequenceMember({
+      id: `sequence-member-${randomUUID()}`,
+      namespaceId,
+      sequenceId,
+      episodeId: requiredBodyString(request, "episodeId", "experience-sequences.members.append"),
+      position: nonNegativeInteger(request.position, "position"),
+      role: sequenceRole(request.role),
+      taskId: optionalString(request.taskId),
+      planId: optionalString(request.planId),
+      workItemId: optionalString(request.workItemId),
+      topicId: optionalString(request.topicId),
+      provenance: requiredRecord(request.provenance, "provenance"),
+      createdAt: new Date().toISOString()
+    }));
+  }
+  const sequenceGet = match(path, /^\/api\/v1\/experience-sequences\/([^/]+)$/);
+  if (method === "GET" && sequenceGet) {
+    requireMemoryRead(principal);
+    const { namespaceId } = assetNamespace();
+    const result = service.getExperienceSequence(namespaceId, decodeMatchSegment(sequenceGet, 1));
+    if (!result) throw new MemoryServiceError("not_found", "experience sequence not found");
+    return { ...result.sequence, members: result.members };
+  }
+  const episodeReward = match(path, /^\/api\/v1\/asset-rewards\/episodes\/([^/]+)$/);
+  if (method === "POST" && episodeReward) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "asset-rewards.record");
+    const { namespaceId } = assetNamespace();
+    return { items: callAssetService(() => service.recordAssetReward({
+      namespaceId,
+      targetEpisodeId: decodeMatchSegment(episodeReward, 1),
+      targetTaskReward: finiteNumber(request.targetTaskReward, "targetTaskReward")
+    })) };
+  }
 
   if (method === "GET" && path === "/api/v1/health") {
     return service.health(advertisedApiRoutes(service));
@@ -1760,6 +2010,124 @@ function projectContextNamespace(url: URL, principal: AuthPrincipal): RuntimeNam
   assertNamespaceScope(requested, principal.namespace);
   if (!namespace) throw new MemoryServiceError("invalid_argument", "project-context namespace is required");
   return namespace;
+}
+
+function requiredBodyString(record: Record<string, unknown>, field: string, routeName: string): string {
+  requireStringField(record, field, routeName);
+  return record[field] as string;
+}
+
+function requiredRecord(value: unknown, field: string): Record<string, unknown> {
+  if (!isRecord(value)) throw new MemoryServiceError("invalid_argument", `${field} must be an object`);
+  return value;
+}
+
+function requiredStringArray(value: unknown, field: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new MemoryServiceError("invalid_argument", `${field} must be an array of non-empty strings`);
+  }
+  return [...new Set(value as string[])];
+}
+function optionalStringArray(value: unknown, field: string): string[] | undefined {
+  return value === undefined ? undefined : requiredStringArray(value, field);
+}
+
+function optionalNumberRecord(value: unknown, field: string): Record<string, number> | undefined {
+  if (value === undefined) return undefined;
+  const record = requiredRecord(value, field);
+  for (const [key, item] of Object.entries(record)) finiteNumber(item, `${field}.${key}`);
+  return record as Record<string, number>;
+}
+
+function requiredNonEmptyStringArray(value: unknown, field: string): string[] {
+  const items = requiredStringArray(value, field);
+  if (items.length === 0) throw new MemoryServiceError("invalid_argument", `${field} must not be empty`);
+  return items;
+}
+
+function finiteNumber(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new MemoryServiceError("invalid_argument", `${field} must be finite`);
+  return value;
+}
+
+function positiveInteger(value: unknown, field: string): number {
+  const number = finiteNumber(value, field);
+  if (!Number.isInteger(number) || number < 1) throw new MemoryServiceError("invalid_argument", `${field} must be a positive integer`);
+  return number;
+}
+
+function nonNegativeInteger(value: unknown, field: string): number {
+  const number = finiteNumber(value, field);
+  if (!Number.isInteger(number) || number < 0) throw new MemoryServiceError("invalid_argument", `${field} must be a non-negative integer`);
+  return number;
+}
+function zeroInteger(value: unknown, field: string): 0 {
+  if (value !== 0) throw new MemoryServiceError("invalid_argument", `${field} must be 0`);
+  return 0;
+}
+
+function enumValue<const T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new MemoryServiceError("invalid_argument", `${field} must be one of ${allowed.join(", ")}`);
+  }
+  return value as T;
+}
+
+function assetType(value: unknown): "skill" | "wiki" | "code_graph" {
+  return enumValue(value, ["skill", "wiki", "code_graph"] as const, "assetType");
+}
+
+function assetVisibility(value: unknown): "private" | "team" | "restricted" | "agent" {
+  return enumValue(value, ["private", "team", "restricted", "agent"] as const, "visibility");
+}
+
+function agentLoadoutMode(value: unknown): "bootstrap" | "recall" | "tool" {
+  return enumValue(value, ["bootstrap", "recall", "tool"] as const, "mode");
+}
+function assetRecallRisk(value: unknown): "low" | "high" {
+  return enumValue(value, ["low", "high"] as const, "risk");
+}
+
+function assetRecallOutcome(value: unknown): "used" | "ignored" | "failed" {
+  return enumValue(value, ["used", "ignored", "failed"] as const, "outcome");
+}
+
+function temporalAction(value: unknown): "initialize" | "review" | "invalidate" | "supersede" {
+  return enumValue(value, ["initialize", "review", "invalidate", "supersede"] as const, "action");
+}
+
+function sequenceRole(value: unknown): "solve" | "curate" | "verify" {
+  return enumValue(value, ["solve", "curate", "verify"] as const, "role");
+}
+
+function retireWhen(value: unknown): "work_item_completed" | "plan_completed" | "project_completed" | "explicit" | "never" {
+  return enumValue(value, ["work_item_completed", "plan_completed", "project_completed", "explicit", "never"] as const, "retireWhen");
+}
+
+function assetApplicability(value: unknown): import("../types.js").AssetApplicability {
+  const record = requiredRecord(value, "applicability");
+  return {
+    scope: enumValue(record.scope, ["work_item", "plan", "project", "namespace", "global"] as const, "applicability.scope"),
+    taskTypes: requiredStringArray(record.taskTypes, "applicability.taskTypes"),
+    projectIds: requiredStringArray(record.projectIds, "applicability.projectIds"),
+    planIds: requiredStringArray(record.planIds, "applicability.planIds"),
+    workItemIds: requiredStringArray(record.workItemIds, "applicability.workItemIds"),
+    requiredSignals: requiredStringArray(record.requiredSignals, "applicability.requiredSignals"),
+    excludedSignals: requiredStringArray(record.excludedSignals, "applicability.excludedSignals"),
+    invocationHints: requiredStringArray(record.invocationHints, "applicability.invocationHints"),
+    retireWhen: retireWhen(record.retireWhen)
+  };
+}
+
+function callAssetService<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof MemoryServiceError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    const code = message.includes("not found") ? "not_found" : message.includes("conflict") || message.includes("transition") ? "conflict" : "invalid_argument";
+    throw new MemoryServiceError(code, message);
+  }
 }
 
 function projectContextMutation(body: unknown, routeName: string, principal: AuthPrincipal): RequestEnvelope & Record<string, unknown> & { namespace: RuntimeNamespace; provenance: Record<string, unknown> } {
