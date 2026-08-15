@@ -42,6 +42,8 @@ export type {
 export { SCHEMA_VERSION, SCHEMA_MIGRATION_ID } from "./storage/schema.js";
 export { MemoryService } from "./service/memory-service.js";
 export { ProjectContextService } from "./service/project-context/project-context-service.js";
+export { AssetRecallService } from "./service/assets/asset-recall-service.js";
+export type * from "./service/assets/asset-recall-service.js";
 export { Repositories } from "./storage/repositories.js";
 export type * from "./service/project-context/project-context-service.js";
 export { API_ROUTES, createMemoryHttpServer, listenMemoryHttpServer } from "./server/http.js";

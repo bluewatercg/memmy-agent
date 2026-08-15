@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 
-export const SCHEMA_VERSION = 8;
-export const SCHEMA_MIGRATION_ID = "008_topic_decisions";
+export const SCHEMA_VERSION = 11;
+export const SCHEMA_MIGRATION_ID = "011_asset_recall_terminal_outcomes";
 const API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION = 2;
 const PROCESSING_TAGS = new Set([
   "摘要排队中",
@@ -702,8 +702,179 @@ const statements = [
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   )`,
-  `CREATE INDEX IF NOT EXISTS idx_topic_execution_runs_session ON project_topic_execution_runs(namespace_id, session_id, proposal_id)`
- ];
+  `CREATE INDEX IF NOT EXISTS idx_topic_execution_runs_session ON project_topic_execution_runs(namespace_id, session_id, proposal_id)`,
+  `CREATE TABLE IF NOT EXISTS memory_assets (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    asset_type TEXT NOT NULL CHECK (asset_type IN ('chat_memory', 'skill', 'wiki', 'code_graph')),
+    stable_key TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version > 0),
+    status TEXT NOT NULL CHECK (status IN ('candidate', 'reviewing', 'active', 'deprecated', 'rejected')),
+    title TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content_ref TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    visibility TEXT NOT NULL CHECK (visibility IN ('private', 'team', 'restricted', 'agent')),
+    allowed_agent_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(allowed_agent_ids_json)),
+    source_memory_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_memory_ids_json)),
+    source_episode_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_episode_ids_json)),
+    source_trace_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_trace_ids_json)),
+    source_topic_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(source_topic_ids_json)),
+    applicability_json TEXT NOT NULL CHECK (json_valid(applicability_json)),
+    validation_json TEXT NOT NULL CHECK (json_valid(validation_json)),
+    provenance_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(provenance_json)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id, version),
+    UNIQUE (namespace_id, stable_key, version)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_assets_namespace_status
+    ON memory_assets (namespace_id, status, asset_type, stable_key, version DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_assets_namespace_id_version
+    ON memory_assets (namespace_id, id, version DESC)`,
+
+  `CREATE TABLE IF NOT EXISTS memory_temporal_validity (
+    namespace_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    effective_from TEXT,
+    effective_until TEXT,
+    review_after TEXT,
+    freshness TEXT NOT NULL CHECK (freshness IN ('current', 'review_due', 'stale', 'superseded', 'historical')),
+    invalidation_keys_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(invalidation_keys_json)),
+    invalidated_at TEXT,
+    invalidation_reason TEXT,
+    superseded_by_memory_id TEXT,
+    last_reviewed_at TEXT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    PRIMARY KEY (namespace_id, memory_id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_temporal_validity_freshness
+    ON memory_temporal_validity (namespace_id, freshness, review_after, memory_id)`,
+
+  `CREATE TABLE IF NOT EXISTS memory_temporal_events (
+    id TEXT PRIMARY KEY,
+    namespace_id TEXT NOT NULL,
+    memory_id TEXT NOT NULL,
+    validity_version INTEGER NOT NULL CHECK (validity_version > 0),
+    event_type TEXT NOT NULL CHECK (event_type IN ('initialized', 'review_due', 'reviewed', 'invalidated', 'superseded', 'historical')),
+    actor_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(actor_json)),
+    reason TEXT NOT NULL,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_ids_json)),
+    project_state_ref_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(project_state_ref_json)),
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_memory_temporal_events_memory_created
+    ON memory_temporal_events (namespace_id, memory_id, created_at ASC, id ASC)`,
+  `CREATE TABLE IF NOT EXISTS agent_loadout_entries (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    asset_version INTEGER NOT NULL CHECK (asset_version > 0),
+    mode TEXT NOT NULL CHECK (mode IN ('bootstrap', 'recall', 'tool')),
+    priority INTEGER NOT NULL,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    project_id TEXT,
+    plan_id TEXT,
+    work_item_id TEXT,
+    task_types_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(task_types_json)),
+    retire_when TEXT NOT NULL CHECK (retire_when IN ('work_item_completed', 'plan_completed', 'project_completed', 'explicit', 'never')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_agent_loadout_entries_agent_enabled
+    ON agent_loadout_entries (namespace_id, agent_id, enabled, priority DESC, id ASC)`,
+
+  `CREATE TABLE IF NOT EXISTS asset_recall_events (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    asset_version INTEGER NOT NULL CHECK (asset_version > 0),
+    agent_id TEXT NOT NULL,
+    episode_id TEXT,
+    task_id TEXT,
+    loadout_entry_id TEXT,
+    offered_event_id TEXT,
+    mode TEXT NOT NULL CHECK (mode IN ('bootstrap', 'recall', 'tool')),
+    event_key TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN ('offered', 'used', 'ignored', 'failed')),
+    temporal_validity_version INTEGER NOT NULL CHECK (temporal_validity_version > 0),
+    freshness_at_recall TEXT NOT NULL CHECK (freshness_at_recall IN ('current', 'review_due', 'stale', 'superseded', 'historical')),
+    eligibility_evaluated_at TEXT NOT NULL,
+    score_inputs_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(score_inputs_json)),
+    failure_reason TEXT,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_ids_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id)
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_asset_recall_events_idempotency
+    ON asset_recall_events (namespace_id, COALESCE(episode_id, ''), asset_id, asset_version, mode, event_key)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_recall_events_episode
+    ON asset_recall_events (namespace_id, episode_id, created_at ASC, id ASC)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS uq_asset_recall_events_terminal_offer
+    ON asset_recall_events (namespace_id, offered_event_id)
+    WHERE offered_event_id IS NOT NULL`,
+
+  `CREATE TABLE IF NOT EXISTS experience_sequences (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(metadata_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS experience_sequence_members (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    sequence_id TEXT NOT NULL,
+    episode_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    role TEXT NOT NULL CHECK (role IN ('solve', 'curate', 'verify')),
+    task_id TEXT,
+    plan_id TEXT,
+    work_item_id TEXT,
+    topic_id TEXT,
+    provenance_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(provenance_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id),
+    UNIQUE (namespace_id, sequence_id, position),
+    UNIQUE (namespace_id, episode_id),
+    FOREIGN KEY (namespace_id, sequence_id) REFERENCES experience_sequences(namespace_id, id)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_experience_sequence_members_order
+    ON experience_sequence_members (namespace_id, sequence_id, position ASC, id ASC)`,
+
+  `CREATE TABLE IF NOT EXISTS asset_reward_evidence (
+    id TEXT NOT NULL,
+    namespace_id TEXT NOT NULL,
+    event_key TEXT NOT NULL,
+    sequence_id TEXT NOT NULL,
+    source_episode_id TEXT NOT NULL,
+    target_episode_id TEXT NOT NULL,
+    asset_id TEXT NOT NULL,
+    asset_version INTEGER NOT NULL CHECK (asset_version > 0),
+    recall_event_id TEXT NOT NULL,
+    relation TEXT NOT NULL CHECK (relation IN ('explicit_sequence', 'asset_usage', 'plan_work_item', 'none')),
+    target_task_reward REAL NOT NULL,
+    usage_factor REAL NOT NULL,
+    relation_confidence REAL NOT NULL,
+    applicability_factor REAL NOT NULL,
+    transfer_reward REAL NOT NULL,
+    risk_penalty REAL NOT NULL CHECK (risk_penalty >= 0),
+    outcome TEXT NOT NULL CHECK (outcome IN ('success', 'failure', 'unknown')),
+    reason TEXT NOT NULL,
+    evidence_ids_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(evidence_ids_json)),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (namespace_id, id),
+    UNIQUE (namespace_id, event_key)
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_reward_evidence_asset
+    ON asset_reward_evidence (namespace_id, asset_id, asset_version, created_at ASC, id ASC)`,
+  `CREATE INDEX IF NOT EXISTS idx_asset_reward_evidence_target_episode
+    ON asset_reward_evidence (namespace_id, target_episode_id, created_at ASC, id ASC)`,
+];
 
 export function migrate(db: Database.Database): void {
   const now = new Date().toISOString();
@@ -712,7 +883,7 @@ export function migrate(db: Database.Database): void {
   const hasMemories = tableExists(db, "memories");
   const version = currentSchemaVersion(db);
 
-  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7) {
+  if (hasMemories && version !== SCHEMA_VERSION && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6 && version !== 7 && version !== 8 && version !== 9 && version !== 10) {
     throw new Error(
       `Unsupported memory database schema version ${version}; the database was left unchanged`
     );
@@ -729,6 +900,10 @@ export function migrate(db: Database.Database): void {
       if (version === API_LOG_SOURCE_AGENT_MIGRATION_FROM_VERSION &&
           !columnExists(db, "api_logs", "source_agent")) {
         db.prepare(`ALTER TABLE api_logs ADD COLUMN source_agent TEXT`).run();
+      }
+      if (tableExists(db, "asset_recall_events") &&
+          !columnExists(db, "asset_recall_events", "offered_event_id")) {
+        db.prepare(`ALTER TABLE asset_recall_events ADD COLUMN offered_event_id TEXT`).run();
       }
       for (const statement of statements) {
         db.prepare(statement).run();

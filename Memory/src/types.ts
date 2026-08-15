@@ -94,6 +94,178 @@ export interface RequestEnvelope {
   namespace?: RuntimeNamespace;
 }
 
+export type MemoryAssetType = "chat_memory" | "skill" | "wiki" | "code_graph";
+export type MemoryAssetStatus = "candidate" | "reviewing" | "active" | "deprecated" | "rejected";
+export type MemoryAssetVisibility = "private" | "team" | "restricted" | "agent";
+
+export interface AssetApplicability {
+  scope: "work_item" | "plan" | "project" | "namespace" | "global";
+  taskTypes: string[];
+  projectIds: string[];
+  planIds: string[];
+  workItemIds: string[];
+  requiredSignals: string[];
+  excludedSignals: string[];
+  invocationHints: string[];
+  validFrom?: IsoTime;
+  validUntil?: IsoTime;
+  retireWhen: "work_item_completed" | "plan_completed" | "project_completed" | "explicit" | "never";
+}
+
+export interface AssetValidationStats {
+  attempts: number;
+  successes: number;
+  failures: number;
+  unknowns: number;
+  transferRewardSum: number;
+  riskPenaltySum: number;
+  lastUsedAt?: IsoTime;
+  lastValidatedAt?: IsoTime;
+}
+
+export interface MemoryAssetRecord {
+  id: string;
+  namespaceId: string;
+  assetType: MemoryAssetType;
+  stableKey: string;
+  version: number;
+  status: MemoryAssetStatus;
+  title: string;
+  summary: string;
+  contentRef: string;
+  ownerId: string;
+  visibility: MemoryAssetVisibility;
+  allowedAgentIds: string[];
+  sourceMemoryIds: string[];
+  sourceEpisodeIds: string[];
+  sourceTraceIds: string[];
+  sourceTopicIds: string[];
+  applicability: AssetApplicability;
+  validation: AssetValidationStats;
+  provenance: Record<string, unknown>;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export type AgentLoadoutMode = "bootstrap" | "recall" | "tool";
+
+export interface AgentLoadoutEntry {
+  id: string;
+  namespaceId: string;
+  agentId: string;
+  assetId: string;
+  assetVersion: number;
+  mode: AgentLoadoutMode;
+  priority: number;
+  enabled: boolean;
+  projectId?: string;
+  planId?: string;
+  workItemId?: string;
+  taskTypes: string[];
+  retireWhen: AssetApplicability["retireWhen"];
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+}
+
+export interface AssetRecallEventRecord {
+  id: string;
+  namespaceId: string;
+  assetId: string;
+  assetVersion: number;
+  agentId: string;
+  episodeId?: string;
+  taskId?: string;
+  loadoutEntryId?: string;
+  offeredEventId?: string;
+  mode: AgentLoadoutMode;
+  eventKey: string;
+  outcome: "offered" | "used" | "ignored" | "failed";
+  temporalValidityVersion: number;
+  freshnessAtRecall: MemoryFreshness;
+  eligibilityEvaluatedAt: IsoTime;
+  scoreInputs: Record<string, unknown>;
+  failureReason?: string;
+  evidenceIds: string[];
+  createdAt: IsoTime;
+}
+
+export interface ExperienceSequenceRecord {
+  id: string;
+  namespaceId: string;
+  title: string;
+  metadata: Record<string, unknown>;
+  createdAt: IsoTime;
+}
+
+export interface ExperienceSequenceMemberRecord {
+  id: string;
+  namespaceId: string;
+  sequenceId: string;
+  episodeId: string;
+  position: number;
+  role: "solve" | "curate" | "verify";
+  taskId?: string;
+  planId?: string;
+  workItemId?: string;
+  topicId?: string;
+  provenance: Record<string, unknown>;
+  createdAt: IsoTime;
+}
+
+export interface AssetRewardEvidenceRecord {
+  id: string;
+  namespaceId: string;
+  eventKey: string;
+  sequenceId: string;
+  sourceEpisodeId: string;
+  targetEpisodeId: string;
+  assetId: string;
+  assetVersion: number;
+  recallEventId: string;
+  relation: "explicit_sequence" | "asset_usage" | "plan_work_item" | "none";
+  targetTaskReward: number;
+  usageFactor: number;
+  relationConfidence: number;
+  applicabilityFactor: number;
+  transferReward: number;
+  riskPenalty: number;
+  outcome: "success" | "failure" | "unknown";
+  reason: string;
+  evidenceIds: string[];
+  createdAt: IsoTime;
+}
+
+export type MemoryFreshness = "current" | "review_due" | "stale" | "superseded" | "historical";
+
+export interface MemoryTemporalValidity {
+  namespaceId: string;
+  memoryId: string;
+  observedAt: IsoTime;
+  effectiveFrom?: IsoTime;
+  effectiveUntil?: IsoTime;
+  reviewAfter?: IsoTime;
+  freshness: MemoryFreshness;
+  invalidationKeys: string[];
+  invalidatedAt?: IsoTime;
+  invalidationReason?: string;
+  supersededByMemoryId?: string;
+  lastReviewedAt?: IsoTime;
+  version: number;
+}
+
+export interface MemoryTemporalValidityEvent {
+  id: string;
+  namespaceId: string;
+  memoryId: string;
+  validityVersion: number;
+  type: "initialized" | "review_due" | "reviewed" | "invalidated" | "superseded" | "historical";
+  actor: Record<string, unknown>;
+  reason: string;
+  evidenceIds: string[];
+  projectStateRef: Record<string, unknown>;
+  createdAt: IsoTime;
+}
+
 export type {
   ProjectContextProposeGoalRequest,
   ProjectContextReadState,

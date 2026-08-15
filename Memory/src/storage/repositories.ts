@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ProjectFactRecord, ProjectGoalRecord, ProjectWorkItemRecord } from "../service/project-context/project-context-types.js";
 import { namespaceForMemory, namespaceIdFromContext } from "../service/namespace/namespace-scope.js";
-import type { ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus, TopicActionProposalRecord, TopicAgentPositionRecord, TopicDebateRoundRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotPayload, TopicDecisionSnapshotRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../types.js";
+import type { AgentLoadoutEntry, AssetRecallEventRecord, AssetRewardEvidenceRecord, ExperienceSequenceMemberRecord, ExperienceSequenceRecord, MemoryAssetRecord, MemoryTemporalValidity, MemoryTemporalValidityEvent, ProjectTopicAnalysisRunRecord, ProjectTopicCandidateRecord, ProjectTopicEvidenceRecord, ProjectTopicRecord, ProjectTopicStatus, TopicActionProposalRecord, TopicAgentPositionRecord, TopicDebateRoundRecord, TopicDecisionSessionRecord, TopicDecisionSnapshotPayload, TopicDecisionSnapshotRecord, TopicEvidenceRequestRecord, TopicExecutionRunRecord } from "../types.js";
 import type Database from "better-sqlite3";
 import type {
   FeedbackRequest,
@@ -410,6 +410,53 @@ export class TopicDecisionImmutablePositionError extends Error {
   constructor(readonly sessionId: string, readonly snapshotId: string, readonly round: number, readonly agentId: string) {
     super(`immutable first-round position already exists for agent ${agentId} in session ${sessionId} snapshot ${snapshotId} round ${round}`);
     this.name = "TopicDecisionImmutablePositionError";
+  }
+}
+
+export class MemoryAssetVersionConflictError extends Error {
+  readonly code = "memory_asset_version_conflict";
+  constructor(readonly namespaceId: string, readonly stableKey: string, readonly version: number) {
+    super(`memory asset version conflict for ${stableKey} v${version} in namespace ${namespaceId}`);
+    this.name = "MemoryAssetVersionConflictError";
+  }
+}
+
+export class MemoryTemporalVersionConflictError extends Error {
+  readonly code = "memory_temporal_version_conflict";
+  constructor(readonly namespaceId: string, readonly memoryId: string, readonly expectedVersion: number, readonly actualVersion: number) {
+    super(`memory temporal version conflict for ${memoryId} in namespace ${namespaceId}: expected ${expectedVersion}, actual ${actualVersion}`);
+    this.name = "MemoryTemporalVersionConflictError";
+  }
+}
+
+export class AssetRecallEventIdempotencyConflictError extends Error {
+  readonly code = "asset_recall_event_idempotency_conflict";
+  constructor(
+    readonly namespaceId: string,
+    readonly episodeId: string | undefined,
+    readonly assetId: string,
+    readonly assetVersion: number,
+    readonly mode: AssetRecallEventRecord["mode"],
+    readonly eventKey: string
+  ) {
+    super(`asset recall idempotency conflict for ${namespaceId}/${episodeId ?? "none"}/${assetId}/v${assetVersion}/${mode}/${eventKey}`);
+    this.name = "AssetRecallEventIdempotencyConflictError";
+  }
+}
+
+export class ExperienceSequenceMembershipConflictError extends Error {
+  readonly code = "experience_sequence_membership_conflict";
+  constructor(readonly namespaceId: string, readonly sequenceId: string, readonly episodeId: string, readonly position: number) {
+    super(`experience sequence membership conflict for ${namespaceId}/${sequenceId} episode ${episodeId} at position ${position}`);
+    this.name = "ExperienceSequenceMembershipConflictError";
+  }
+}
+
+export class AssetRewardEvidenceIdempotencyConflictError extends Error {
+  readonly code = "asset_reward_evidence_idempotency_conflict";
+  constructor(readonly namespaceId: string, readonly eventKey: string) {
+    super(`asset reward evidence idempotency conflict for ${namespaceId}/${eventKey}`);
+    this.name = "AssetRewardEvidenceIdempotencyConflictError";
   }
 }
 
@@ -3910,6 +3957,11 @@ export class ProjectTopicRepository {
     return (this.db.prepare(`SELECT * FROM project_topic_candidates WHERE topic_id = ? AND namespace_id = ? ORDER BY updated_at DESC`).all(topicId, namespaceId) as CandidateSqlRow[]).map(candidateFromSql);
   }
 
+  getCandidate(id: string, namespaceId: string): ProjectTopicCandidateRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM project_topic_candidates WHERE id = ? AND namespace_id = ?`).get(id, namespaceId) as CandidateSqlRow | undefined;
+    return row ? candidateFromSql(row) : undefined;
+  }
+
   updateCandidate(candidate: ProjectTopicCandidateRecord, expectedVersion: number): ProjectTopicCandidateRecord {
     if (candidate.version !== expectedVersion + 1) throw new Error(`project topic candidate version must advance by one: ${candidate.id}`);
     const result = this.db.prepare(`UPDATE project_topic_candidates SET title = ?, conclusion = ?, proposed_layer = ?, status = ?, version = ?, supersedes_id = ?, source_memory_ids_json = ?, metadata_json = ?, updated_at = ? WHERE id = ? AND topic_id = ? AND namespace_id = ? AND version = ?`)
@@ -4313,6 +4365,548 @@ function topicEvidenceRequestFromSql(row: TopicEvidenceRequestSqlRow): TopicEvid
 function topicActionProposalFromSql(row: TopicActionProposalSqlRow): TopicActionProposalRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, round: row.round, rank: row.rank, effect: row.effect, title: row.title, payload: parseJson(row.payload_json, {}), status: row.status, version: row.version, metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at, updatedAt: row.updated_at }; }
 function topicExecutionRunFromSql(row: TopicExecutionRunSqlRow): TopicExecutionRunRecord { return { id: row.id, namespaceId: row.namespace_id, sessionId: row.session_id, proposalId: row.proposal_id, status: row.status, result: parseJson(row.result_json, {}), version: row.version, createdAt: row.created_at, updatedAt: row.updated_at }; }
 
+interface MemoryAssetSqlRow {
+  id: string; namespace_id: string; asset_type: MemoryAssetRecord["assetType"]; stable_key: string; version: number;
+  status: MemoryAssetRecord["status"]; title: string; summary: string; content_ref: string; owner_id: string;
+  visibility: MemoryAssetRecord["visibility"]; allowed_agent_ids_json: string; source_memory_ids_json: string;
+  source_episode_ids_json: string; source_trace_ids_json: string; source_topic_ids_json: string;
+  applicability_json: string; validation_json: string; provenance_json: string; created_at: string; updated_at: string;
+}
+
+interface MemoryTemporalValiditySqlRow {
+  namespace_id: string; memory_id: string; observed_at: string; effective_from: string | null; effective_until: string | null;
+  review_after: string | null; freshness: MemoryTemporalValidity["freshness"]; invalidation_keys_json: string;
+  invalidated_at: string | null; invalidation_reason: string | null; superseded_by_memory_id: string | null;
+  last_reviewed_at: string | null; version: number;
+}
+
+interface MemoryTemporalEventSqlRow {
+  id: string; namespace_id: string; memory_id: string; validity_version: number;
+  event_type: MemoryTemporalValidityEvent["type"]; actor_json: string; reason: string; evidence_ids_json: string;
+  project_state_ref_json: string; created_at: string;
+}
+
+interface AgentLoadoutSqlRow {
+  id: string; namespace_id: string; agent_id: string; asset_id: string; asset_version: number;
+  mode: AgentLoadoutEntry["mode"]; priority: number; enabled: number; project_id: string | null;
+  plan_id: string | null; work_item_id: string | null; task_types_json: string;
+  retire_when: AgentLoadoutEntry["retireWhen"]; created_at: string; updated_at: string;
+}
+
+interface AssetRecallEventSqlRow {
+  id: string; namespace_id: string; asset_id: string; asset_version: number; agent_id: string;
+  episode_id: string | null; task_id: string | null; loadout_entry_id: string | null;
+  offered_event_id: string | null; mode: AssetRecallEventRecord["mode"];
+  event_key: string; outcome: AssetRecallEventRecord["outcome"];
+  temporal_validity_version: number; freshness_at_recall: AssetRecallEventRecord["freshnessAtRecall"];
+  eligibility_evaluated_at: string; score_inputs_json: string; failure_reason: string | null;
+  evidence_ids_json: string; created_at: string;
+}
+
+interface ExperienceSequenceSqlRow {
+  id: string; namespace_id: string; title: string; metadata_json: string; created_at: string;
+}
+
+interface ExperienceSequenceMemberSqlRow {
+  id: string; namespace_id: string; sequence_id: string; episode_id: string; position: number;
+  role: ExperienceSequenceMemberRecord["role"]; task_id: string | null; plan_id: string | null;
+  work_item_id: string | null; topic_id: string | null; provenance_json: string; created_at: string;
+}
+
+interface AssetRewardEvidenceSqlRow {
+  id: string; namespace_id: string; event_key: string; sequence_id: string; source_episode_id: string;
+  target_episode_id: string; asset_id: string; asset_version: number; recall_event_id: string;
+  relation: AssetRewardEvidenceRecord["relation"]; target_task_reward: number; usage_factor: number;
+  relation_confidence: number; applicability_factor: number; transfer_reward: number; risk_penalty: number;
+  outcome: AssetRewardEvidenceRecord["outcome"]; reason: string; evidence_ids_json: string; created_at: string;
+}
+
+export class MemoryAssetRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  create(record: MemoryAssetRecord): MemoryAssetRecord {
+    const existing = this.getByStableKey(record.namespaceId, record.stableKey, record.version);
+    if (existing) {
+      if (stableHash(existing) === stableHash(record)) return existing;
+      throw new MemoryAssetVersionConflictError(record.namespaceId, record.stableKey, record.version);
+    }
+    this.db.prepare(`INSERT INTO memory_assets (
+      id, namespace_id, asset_type, stable_key, version, status, title, summary, content_ref, owner_id, visibility,
+      allowed_agent_ids_json, source_memory_ids_json, source_episode_ids_json, source_trace_ids_json, source_topic_ids_json,
+      applicability_json, validation_json, provenance_json, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.id, record.namespaceId, record.assetType, record.stableKey, record.version, record.status, record.title,
+      record.summary, record.contentRef, record.ownerId, record.visibility, toJson(record.allowedAgentIds),
+      toJson(record.sourceMemoryIds), toJson(record.sourceEpisodeIds), toJson(record.sourceTraceIds),
+      toJson(record.sourceTopicIds), toJson(record.applicability), toJson(record.validation), toJson(record.provenance),
+      record.createdAt, record.updatedAt
+    );
+    return record;
+  }
+
+  get(namespaceId: string, id: string, version?: number): MemoryAssetRecord | undefined {
+    const row = version === undefined
+      ? this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND id = ? ORDER BY version DESC LIMIT 1`).get(namespaceId, id)
+      : this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND id = ? AND version = ?`).get(namespaceId, id, version);
+    return memoryAssetFromSql(row as MemoryAssetSqlRow | undefined);
+  }
+
+  getByStableKey(namespaceId: string, stableKey: string, version?: number): MemoryAssetRecord | undefined {
+    const row = version === undefined
+      ? this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND stable_key = ? ORDER BY version DESC LIMIT 1`).get(namespaceId, stableKey)
+      : this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND stable_key = ? AND version = ?`).get(namespaceId, stableKey, version);
+    return memoryAssetFromSql(row as MemoryAssetSqlRow | undefined);
+  }
+  getByContentRef(namespaceId: string, contentRef: string): MemoryAssetRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND content_ref = ? ORDER BY version DESC LIMIT 1`)
+      .get(namespaceId, contentRef);
+    return memoryAssetFromSql(row as MemoryAssetSqlRow | undefined);
+  }
+
+
+  list(namespaceId: string, filter: { stableKey?: string } = {}): MemoryAssetRecord[] {
+    const rows = filter.stableKey === undefined
+      ? this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? ORDER BY stable_key ASC, version ASC, id ASC`).all(namespaceId)
+      : this.db.prepare(`SELECT * FROM memory_assets WHERE namespace_id = ? AND stable_key = ? ORDER BY version ASC, id ASC`).all(namespaceId, filter.stableKey);
+    return (rows as MemoryAssetSqlRow[]).map((row) => memoryAssetFromSql(row)!);
+  }
+
+  updateValidation(
+    namespaceId: string,
+    id: string,
+    version: number,
+    validation: MemoryAssetRecord["validation"],
+    updatedAt: string
+  ): MemoryAssetRecord {
+    const result = this.db.prepare(`UPDATE memory_assets SET validation_json = ?, updated_at = ?
+      WHERE namespace_id = ? AND id = ? AND version = ?`).run(
+      toJson(validation), updatedAt, namespaceId, id, version
+    );
+    if (!result.changes) throw new Error(`asset not found: ${namespaceId}/${id}/v${version}`);
+    return this.get(namespaceId, id, version)!;
+  }
+  updateEvidence(
+    namespaceId: string,
+    id: string,
+    version: number,
+    validation: MemoryAssetRecord["validation"],
+    provenance: MemoryAssetRecord["provenance"],
+    updatedAt: string
+  ): MemoryAssetRecord {
+    const result = this.db.prepare(`UPDATE memory_assets SET validation_json = ?, provenance_json = ?, updated_at = ?
+      WHERE namespace_id = ? AND id = ? AND version = ?`).run(
+      toJson(validation), toJson(provenance), updatedAt, namespaceId, id, version
+    );
+    if (!result.changes) throw new Error(`asset not found: ${namespaceId}/${id}/v${version}`);
+    return this.get(namespaceId, id, version)!;
+  }
+
+
+  updateStatus(
+    namespaceId: string,
+    id: string,
+    version: number,
+    expectedStatus: MemoryAssetRecord["status"],
+    status: MemoryAssetRecord["status"],
+    updatedAt: string
+  ): MemoryAssetRecord {
+    const result = this.db.prepare(`UPDATE memory_assets SET status = ?, updated_at = ?
+      WHERE namespace_id = ? AND id = ? AND version = ? AND status = ?`).run(
+      status, updatedAt, namespaceId, id, version, expectedStatus
+    );
+    if (!result.changes) {
+      const actual = this.get(namespaceId, id, version)?.status ?? "missing";
+      throw new Error(`asset status conflict for ${namespaceId}/${id}/v${version}: expected ${expectedStatus}, got ${actual}`);
+    }
+    return this.get(namespaceId, id, version)!;
+  }
+
+  activateVersion(
+    namespaceId: string,
+    id: string,
+    version: number,
+    expectedStatus: "reviewing" | "deprecated",
+    updatedAt: string
+  ): { active: MemoryAssetRecord; deprecated: MemoryAssetRecord[] } {
+    return this.db.transaction(() => {
+      const target = this.get(namespaceId, id, version);
+      if (!target || target.status !== expectedStatus) {
+        throw new Error(`asset status conflict for ${namespaceId}/${id}/v${version}: expected ${expectedStatus}, got ${target?.status ?? "missing"}`);
+      }
+      const priorActive = this.list(namespaceId, { stableKey: target.stableKey })
+        .filter((asset) => asset.status === "active" && asset.version !== version);
+      for (const asset of priorActive) {
+        this.updateStatus(namespaceId, asset.id, asset.version, "active", "deprecated", updatedAt);
+      }
+      const active = this.updateStatus(namespaceId, id, version, expectedStatus, "active", updatedAt);
+      return {
+        active,
+        deprecated: priorActive.map((asset) => this.get(namespaceId, asset.id, asset.version)!)
+      };
+    })();
+  }
+}
+
+export class MemoryTemporalValidityRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  create(record: MemoryTemporalValidity): MemoryTemporalValidity {
+    this.db.prepare(`INSERT INTO memory_temporal_validity (
+      namespace_id, memory_id, observed_at, effective_from, effective_until, review_after, freshness,
+      invalidation_keys_json, invalidated_at, invalidation_reason, superseded_by_memory_id, last_reviewed_at, version
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.namespaceId, record.memoryId, record.observedAt, record.effectiveFrom ?? null, record.effectiveUntil ?? null,
+      record.reviewAfter ?? null, record.freshness, toJson(record.invalidationKeys), record.invalidatedAt ?? null,
+      record.invalidationReason ?? null, record.supersededByMemoryId ?? null, record.lastReviewedAt ?? null, record.version
+    );
+    return record;
+  }
+
+  get(namespaceId: string, memoryId: string): MemoryTemporalValidity | undefined {
+    return memoryTemporalValidityFromSql(this.db.prepare(`SELECT * FROM memory_temporal_validity WHERE namespace_id = ? AND memory_id = ?`).get(namespaceId, memoryId) as MemoryTemporalValiditySqlRow | undefined);
+  }
+
+  update(namespaceId: string, memoryId: string, expectedVersion: number, proposed: MemoryTemporalValidity): MemoryTemporalValidity {
+    const stored = this.get(namespaceId, memoryId);
+    const actualVersion = stored?.version ?? 0;
+    if (!stored || actualVersion !== expectedVersion) {
+      throw new MemoryTemporalVersionConflictError(namespaceId, memoryId, expectedVersion, actualVersion);
+    }
+    const next: MemoryTemporalValidity = {
+      ...proposed,
+      namespaceId,
+      memoryId,
+      observedAt: stored.observedAt,
+      version: expectedVersion + 1
+    };
+    const result = this.db.prepare(`UPDATE memory_temporal_validity SET
+      effective_from = ?, effective_until = ?, review_after = ?, freshness = ?, invalidation_keys_json = ?,
+      invalidated_at = ?, invalidation_reason = ?, superseded_by_memory_id = ?, last_reviewed_at = ?, version = ?
+      WHERE namespace_id = ? AND memory_id = ? AND version = ?`).run(
+      next.effectiveFrom ?? null, next.effectiveUntil ?? null, next.reviewAfter ?? null, next.freshness,
+      toJson(next.invalidationKeys), next.invalidatedAt ?? null, next.invalidationReason ?? null,
+      next.supersededByMemoryId ?? null, next.lastReviewedAt ?? null, next.version, namespaceId, memoryId, expectedVersion
+    );
+    if (!result.changes) {
+      throw new MemoryTemporalVersionConflictError(namespaceId, memoryId, expectedVersion, this.get(namespaceId, memoryId)?.version ?? 0);
+    }
+    return next;
+  }
+
+  appendEvent(event: MemoryTemporalValidityEvent): MemoryTemporalValidityEvent {
+    this.db.prepare(`INSERT INTO memory_temporal_events (
+      id, namespace_id, memory_id, validity_version, event_type, actor_json, reason, evidence_ids_json,
+      project_state_ref_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      event.id, event.namespaceId, event.memoryId, event.validityVersion, event.type, toJson(event.actor), event.reason,
+      toJson(event.evidenceIds), toJson(event.projectStateRef), event.createdAt
+    );
+    return event;
+  }
+
+  listEvents(namespaceId: string, memoryId: string): MemoryTemporalValidityEvent[] {
+    return (this.db.prepare(`SELECT * FROM memory_temporal_events WHERE namespace_id = ? AND memory_id = ? ORDER BY created_at ASC, id ASC`).all(namespaceId, memoryId) as MemoryTemporalEventSqlRow[])
+      .map(memoryTemporalEventFromSql);
+  }
+}
+
+function memoryAssetFromSql(row: MemoryAssetSqlRow | undefined): MemoryAssetRecord | undefined {
+  if (!row) return undefined;
+  return {
+    id: row.id, namespaceId: row.namespace_id, assetType: row.asset_type, stableKey: row.stable_key, version: row.version,
+    status: row.status, title: row.title, summary: row.summary, contentRef: row.content_ref, ownerId: row.owner_id,
+    visibility: row.visibility, allowedAgentIds: asStringArray(parseJson(row.allowed_agent_ids_json, [])),
+    sourceMemoryIds: asStringArray(parseJson(row.source_memory_ids_json, [])),
+    sourceEpisodeIds: asStringArray(parseJson(row.source_episode_ids_json, [])),
+    sourceTraceIds: asStringArray(parseJson(row.source_trace_ids_json, [])),
+    sourceTopicIds: asStringArray(parseJson(row.source_topic_ids_json, [])),
+    applicability: parseJson(row.applicability_json, {}) as MemoryAssetRecord["applicability"],
+    validation: parseJson(row.validation_json, {}) as MemoryAssetRecord["validation"],
+    provenance: parseJson(row.provenance_json, {}), createdAt: row.created_at, updatedAt: row.updated_at
+  };
+}
+
+function memoryTemporalValidityFromSql(row: MemoryTemporalValiditySqlRow | undefined): MemoryTemporalValidity | undefined {
+  return row ? {
+    namespaceId: row.namespace_id, memoryId: row.memory_id, observedAt: row.observed_at,
+    effectiveFrom: row.effective_from ?? undefined, effectiveUntil: row.effective_until ?? undefined,
+    reviewAfter: row.review_after ?? undefined, freshness: row.freshness,
+    invalidationKeys: asStringArray(parseJson(row.invalidation_keys_json, [])), invalidatedAt: row.invalidated_at ?? undefined,
+    invalidationReason: row.invalidation_reason ?? undefined, supersededByMemoryId: row.superseded_by_memory_id ?? undefined,
+    lastReviewedAt: row.last_reviewed_at ?? undefined, version: row.version
+  } : undefined;
+}
+
+function memoryTemporalEventFromSql(row: MemoryTemporalEventSqlRow): MemoryTemporalValidityEvent {
+  return {
+    id: row.id, namespaceId: row.namespace_id, memoryId: row.memory_id, validityVersion: row.validity_version,
+    type: row.event_type, actor: parseJson(row.actor_json, {}), reason: row.reason,
+    evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])),
+    projectStateRef: parseJson(row.project_state_ref_json, {}), createdAt: row.created_at
+  };
+}
+
+export class AgentLoadoutRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  create(record: AgentLoadoutEntry): AgentLoadoutEntry {
+    this.db.prepare(`INSERT INTO agent_loadout_entries (
+      id, namespace_id, agent_id, asset_id, asset_version, mode, priority, enabled, project_id, plan_id,
+      work_item_id, task_types_json, retire_when, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.id, record.namespaceId, record.agentId, record.assetId, record.assetVersion, record.mode,
+      record.priority, record.enabled ? 1 : 0, record.projectId ?? null, record.planId ?? null,
+      record.workItemId ?? null, toJson(record.taskTypes), record.retireWhen, record.createdAt, record.updatedAt
+    );
+    return record;
+  }
+
+  get(namespaceId: string, id: string): AgentLoadoutEntry | undefined {
+    return agentLoadoutFromSql(this.db.prepare(
+      `SELECT * FROM agent_loadout_entries WHERE namespace_id = ? AND id = ?`
+    ).get(namespaceId, id) as AgentLoadoutSqlRow | undefined);
+  }
+
+  list(namespaceId: string, agentId: string, filter: { enabled?: boolean } = {}): AgentLoadoutEntry[] {
+    const rows = filter.enabled === undefined
+      ? this.db.prepare(`SELECT * FROM agent_loadout_entries
+          WHERE namespace_id = ? AND agent_id = ? ORDER BY priority DESC, id ASC`).all(namespaceId, agentId)
+      : this.db.prepare(`SELECT * FROM agent_loadout_entries
+          WHERE namespace_id = ? AND agent_id = ? AND enabled = ? ORDER BY priority DESC, id ASC`)
+        .all(namespaceId, agentId, filter.enabled ? 1 : 0);
+    return (rows as AgentLoadoutSqlRow[]).map((row) => agentLoadoutFromSql(row)!);
+  }
+
+  setEnabled(namespaceId: string, id: string, enabled: boolean, updatedAt: string): AgentLoadoutEntry {
+    const result = this.db.prepare(`UPDATE agent_loadout_entries SET enabled = ?, updated_at = ?
+      WHERE namespace_id = ? AND id = ?`).run(enabled ? 1 : 0, updatedAt, namespaceId, id);
+    if (!result.changes) throw new Error(`agent loadout entry not found: ${namespaceId}/${id}`);
+    return this.get(namespaceId, id)!;
+  }
+}
+
+export class AssetRecallEventRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  append(event: AssetRecallEventRecord): AssetRecallEventRecord {
+    const existing = this.getByIdempotencyKey(event);
+    if (existing) {
+      if (stableHash({ ...existing, id: event.id }) === stableHash(event)) return existing;
+      throw new AssetRecallEventIdempotencyConflictError(
+        event.namespaceId, event.episodeId, event.assetId, event.assetVersion, event.mode, event.eventKey
+      );
+    }
+    try {
+      this.db.prepare(`INSERT INTO asset_recall_events (
+        id, namespace_id, asset_id, asset_version, agent_id, episode_id, task_id, loadout_entry_id, offered_event_id, mode,
+        event_key, outcome, temporal_validity_version, freshness_at_recall, eligibility_evaluated_at,
+        score_inputs_json, failure_reason, evidence_ids_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        event.id, event.namespaceId, event.assetId, event.assetVersion, event.agentId, event.episodeId ?? null,
+        event.taskId ?? null, event.loadoutEntryId ?? null, event.offeredEventId ?? null, event.mode, event.eventKey,
+        event.outcome, event.temporalValidityVersion, event.freshnessAtRecall, event.eligibilityEvaluatedAt,
+        toJson(event.scoreInputs), event.failureReason ?? null, toJson(event.evidenceIds), event.createdAt
+      );
+    } catch (error) {
+      if (event.offeredEventId && error instanceof Error && /UNIQUE constraint failed: asset_recall_events\.namespace_id, asset_recall_events\.offered_event_id/i.test(error.message)) {
+        const terminal = this.getByOfferedEventId(event.namespaceId, event.offeredEventId);
+        if (terminal && stableHash({ ...terminal, id: event.id }) === stableHash(event)) return terminal;
+        throw new Error("asset recall offer already has a terminal outcome");
+      }
+      throw error;
+    }
+    return event;
+  }
+
+  get(namespaceId: string, id: string): AssetRecallEventRecord | undefined {
+    return assetRecallEventFromSql(this.db.prepare(
+      `SELECT * FROM asset_recall_events WHERE namespace_id = ? AND id = ?`
+    ).get(namespaceId, id) as AssetRecallEventSqlRow | undefined);
+  }
+
+  listForEpisode(namespaceId: string, episodeId: string): AssetRecallEventRecord[] {
+    return (this.db.prepare(`SELECT * FROM asset_recall_events
+      WHERE namespace_id = ? AND episode_id = ? ORDER BY created_at ASC, id ASC`)
+      .all(namespaceId, episodeId) as AssetRecallEventSqlRow[]).map((row) => assetRecallEventFromSql(row)!);
+  }
+
+  listForAsset(namespaceId: string, assetId: string, assetVersion: number): AssetRecallEventRecord[] {
+    return (this.db.prepare(`SELECT * FROM asset_recall_events
+      WHERE namespace_id = ? AND asset_id = ? AND asset_version = ? ORDER BY created_at ASC, id ASC`)
+      .all(namespaceId, assetId, assetVersion) as AssetRecallEventSqlRow[]).map((row) => assetRecallEventFromSql(row)!);
+  }
+
+  private getByOfferedEventId(namespaceId: string, offeredEventId: string): AssetRecallEventRecord | undefined {
+    return assetRecallEventFromSql(this.db.prepare(`SELECT * FROM asset_recall_events
+      WHERE namespace_id = ? AND offered_event_id = ?`).get(namespaceId, offeredEventId) as AssetRecallEventSqlRow | undefined);
+  }
+
+  private getByIdempotencyKey(event: AssetRecallEventRecord): AssetRecallEventRecord | undefined {
+    return assetRecallEventFromSql(this.db.prepare(`SELECT * FROM asset_recall_events
+      WHERE namespace_id = ? AND episode_id IS ? AND asset_id = ? AND asset_version = ? AND mode = ? AND event_key = ?`)
+      .get(event.namespaceId, event.episodeId ?? null, event.assetId, event.assetVersion, event.mode, event.eventKey) as AssetRecallEventSqlRow | undefined);
+  }
+}
+
+export class ExperienceSequenceRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  create(record: ExperienceSequenceRecord): ExperienceSequenceRecord {
+    const existing = this.get(record.namespaceId, record.id);
+    if (existing) {
+      if (stableHash(existing) === stableHash(record)) return existing;
+      throw new ExperienceSequenceMembershipConflictError(record.namespaceId, record.id, "metadata", -1);
+    }
+    this.db.prepare(`INSERT INTO experience_sequences (id, namespace_id, title, metadata_json, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(record.id, record.namespaceId, record.title, toJson(record.metadata), record.createdAt);
+    return record;
+  }
+
+  get(namespaceId: string, id: string): ExperienceSequenceRecord | undefined {
+    return experienceSequenceFromSql(this.db.prepare(`SELECT * FROM experience_sequences
+      WHERE namespace_id = ? AND id = ?`).get(namespaceId, id) as ExperienceSequenceSqlRow | undefined);
+  }
+
+  appendMember(member: ExperienceSequenceMemberRecord): ExperienceSequenceMemberRecord {
+    if (!Number.isInteger(member.position) || member.position < 0) {
+      throw new Error(`experience sequence position must be a non-negative integer: ${member.position}`);
+    }
+    const existing = this.getMemberByEpisode(member.namespaceId, member.episodeId)
+      ?? this.getMemberByPosition(member.namespaceId, member.sequenceId, member.position);
+    if (existing) {
+      if (stableHash({ ...existing, id: member.id }) === stableHash(member)) return existing;
+      throw new ExperienceSequenceMembershipConflictError(member.namespaceId, member.sequenceId, member.episodeId, member.position);
+    }
+    try {
+      this.db.prepare(`INSERT INTO experience_sequence_members (
+        id, namespace_id, sequence_id, episode_id, position, role, task_id, plan_id, work_item_id, topic_id,
+        provenance_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        member.id, member.namespaceId, member.sequenceId, member.episodeId, member.position, member.role,
+        member.taskId ?? null, member.planId ?? null, member.workItemId ?? null, member.topicId ?? null,
+        toJson(member.provenance), member.createdAt
+      );
+    } catch {
+      throw new ExperienceSequenceMembershipConflictError(member.namespaceId, member.sequenceId, member.episodeId, member.position);
+    }
+    return member;
+  }
+
+  listMembers(namespaceId: string, sequenceId: string): ExperienceSequenceMemberRecord[] {
+    return (this.db.prepare(`SELECT * FROM experience_sequence_members
+      WHERE namespace_id = ? AND sequence_id = ? ORDER BY position ASC, id ASC`)
+      .all(namespaceId, sequenceId) as ExperienceSequenceMemberSqlRow[])
+      .map(experienceSequenceMemberFromSql)
+      .filter((member): member is ExperienceSequenceMemberRecord => member !== undefined);
+  }
+
+  getMemberByEpisode(namespaceId: string, episodeId: string): ExperienceSequenceMemberRecord | undefined {
+    return experienceSequenceMemberFromSql(this.db.prepare(`SELECT * FROM experience_sequence_members
+      WHERE namespace_id = ? AND episode_id = ?`).get(namespaceId, episodeId) as ExperienceSequenceMemberSqlRow | undefined);
+  }
+
+  private getMemberByPosition(namespaceId: string, sequenceId: string, position: number): ExperienceSequenceMemberRecord | undefined {
+    return experienceSequenceMemberFromSql(this.db.prepare(`SELECT * FROM experience_sequence_members
+      WHERE namespace_id = ? AND sequence_id = ? AND position = ?`).get(namespaceId, sequenceId, position) as ExperienceSequenceMemberSqlRow | undefined);
+  }
+}
+
+export class AssetRewardEvidenceRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  append(record: AssetRewardEvidenceRecord): AssetRewardEvidenceRecord {
+    const existing = this.getByEventKey(record.namespaceId, record.eventKey);
+    if (existing) {
+      if (stableHash({ ...existing, id: record.id }) === stableHash(record)) return existing;
+      throw new AssetRewardEvidenceIdempotencyConflictError(record.namespaceId, record.eventKey);
+    }
+    this.db.prepare(`INSERT INTO asset_reward_evidence (
+      id, namespace_id, event_key, sequence_id, source_episode_id, target_episode_id, asset_id, asset_version,
+      recall_event_id, relation, target_task_reward, usage_factor, relation_confidence, applicability_factor,
+      transfer_reward, risk_penalty, outcome, reason, evidence_ids_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      record.id, record.namespaceId, record.eventKey, record.sequenceId, record.sourceEpisodeId,
+      record.targetEpisodeId, record.assetId, record.assetVersion, record.recallEventId, record.relation,
+      record.targetTaskReward, record.usageFactor, record.relationConfidence, record.applicabilityFactor,
+      record.transferReward, record.riskPenalty, record.outcome, record.reason, toJson(record.evidenceIds), record.createdAt
+    );
+    return record;
+  }
+
+  get(namespaceId: string, id: string): AssetRewardEvidenceRecord | undefined {
+    return assetRewardEvidenceFromSql(this.db.prepare(`SELECT * FROM asset_reward_evidence
+      WHERE namespace_id = ? AND id = ?`).get(namespaceId, id) as AssetRewardEvidenceSqlRow | undefined);
+  }
+
+  listForAsset(namespaceId: string, assetId: string, assetVersion: number): AssetRewardEvidenceRecord[] {
+    return (this.db.prepare(`SELECT * FROM asset_reward_evidence
+      WHERE namespace_id = ? AND asset_id = ? AND asset_version = ? ORDER BY created_at ASC, id ASC`)
+      .all(namespaceId, assetId, assetVersion) as AssetRewardEvidenceSqlRow[]).map((row) => assetRewardEvidenceFromSql(row)!);
+  }
+
+  listForEpisode(namespaceId: string, episodeId: string): AssetRewardEvidenceRecord[] {
+    return (this.db.prepare(`SELECT * FROM asset_reward_evidence
+      WHERE namespace_id = ? AND target_episode_id = ? ORDER BY created_at ASC, id ASC`)
+      .all(namespaceId, episodeId) as AssetRewardEvidenceSqlRow[]).map((row) => assetRewardEvidenceFromSql(row)!);
+  }
+
+  private getByEventKey(namespaceId: string, eventKey: string): AssetRewardEvidenceRecord | undefined {
+    return assetRewardEvidenceFromSql(this.db.prepare(`SELECT * FROM asset_reward_evidence
+      WHERE namespace_id = ? AND event_key = ?`).get(namespaceId, eventKey) as AssetRewardEvidenceSqlRow | undefined);
+  }
+}
+
+function agentLoadoutFromSql(row: AgentLoadoutSqlRow | undefined): AgentLoadoutEntry | undefined {
+  return row ? {
+    id: row.id, namespaceId: row.namespace_id, agentId: row.agent_id, assetId: row.asset_id,
+    assetVersion: row.asset_version, mode: row.mode, priority: row.priority, enabled: Boolean(row.enabled),
+    projectId: row.project_id ?? undefined, planId: row.plan_id ?? undefined,
+    workItemId: row.work_item_id ?? undefined, taskTypes: asStringArray(parseJson(row.task_types_json, [])),
+    retireWhen: row.retire_when, createdAt: row.created_at, updatedAt: row.updated_at
+  } : undefined;
+}
+
+function assetRecallEventFromSql(row: AssetRecallEventSqlRow | undefined): AssetRecallEventRecord | undefined {
+  return row ? {
+    id: row.id, namespaceId: row.namespace_id, assetId: row.asset_id, assetVersion: row.asset_version,
+    agentId: row.agent_id, episodeId: row.episode_id ?? undefined, taskId: row.task_id ?? undefined,
+    loadoutEntryId: row.loadout_entry_id ?? undefined, offeredEventId: row.offered_event_id ?? undefined,
+    mode: row.mode, eventKey: row.event_key, outcome: row.outcome,
+    temporalValidityVersion: row.temporal_validity_version,
+    freshnessAtRecall: row.freshness_at_recall, eligibilityEvaluatedAt: row.eligibility_evaluated_at,
+    scoreInputs: parseJson(row.score_inputs_json, {}), failureReason: row.failure_reason ?? undefined,
+    evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), createdAt: row.created_at
+  } : undefined;
+}
+
+function experienceSequenceFromSql(row: ExperienceSequenceSqlRow | undefined): ExperienceSequenceRecord | undefined {
+  return row ? {
+    id: row.id, namespaceId: row.namespace_id, title: row.title,
+    metadata: parseJson(row.metadata_json, {}), createdAt: row.created_at
+  } : undefined;
+}
+
+function experienceSequenceMemberFromSql(row: ExperienceSequenceMemberSqlRow | undefined): ExperienceSequenceMemberRecord | undefined {
+  return row ? {
+    id: row.id, namespaceId: row.namespace_id, sequenceId: row.sequence_id, episodeId: row.episode_id,
+    position: row.position, role: row.role, taskId: row.task_id ?? undefined, planId: row.plan_id ?? undefined,
+    workItemId: row.work_item_id ?? undefined, topicId: row.topic_id ?? undefined,
+    provenance: parseJson(row.provenance_json, {}), createdAt: row.created_at
+  } : undefined;
+}
+
+function assetRewardEvidenceFromSql(row: AssetRewardEvidenceSqlRow | undefined): AssetRewardEvidenceRecord | undefined {
+  return row ? {
+    id: row.id, namespaceId: row.namespace_id, eventKey: row.event_key, sequenceId: row.sequence_id,
+    sourceEpisodeId: row.source_episode_id, targetEpisodeId: row.target_episode_id, assetId: row.asset_id,
+    assetVersion: row.asset_version, recallEventId: row.recall_event_id, relation: row.relation,
+    targetTaskReward: row.target_task_reward, usageFactor: row.usage_factor,
+    relationConfidence: row.relation_confidence, applicabilityFactor: row.applicability_factor,
+    transferReward: row.transfer_reward, riskPenalty: row.risk_penalty, outcome: row.outcome,
+    reason: row.reason, evidenceIds: asStringArray(parseJson(row.evidence_ids_json, [])), createdAt: row.created_at
+  } : undefined;
+}
+
 export class Repositories {
   readonly memories: MemoryRepository;
   readonly processing: MemoryProcessingRepository;
@@ -4320,6 +4914,12 @@ export class Repositories {
   readonly projectContext: ProjectContextRepository;
   readonly topics: ProjectTopicRepository;
   readonly topicDecisions: TopicDecisionRepository;
+  readonly assets: MemoryAssetRepository;
+  readonly temporalValidity: MemoryTemporalValidityRepository;
+  readonly agentLoadouts: AgentLoadoutRepository;
+  readonly assetRecallEvents: AssetRecallEventRepository;
+  readonly experienceSequences: ExperienceSequenceRepository;
+  readonly assetRewardEvidence: AssetRewardEvidenceRepository;
   readonly vectors: SqliteVecStore;
   constructor(readonly db: Database.Database) {
     this.vectors = new SqliteVecStore(db);
@@ -4328,6 +4928,12 @@ export class Repositories {
     this.projectContext = new ProjectContextRepository(db);
     this.topics = new ProjectTopicRepository(db);
     this.topicDecisions = new TopicDecisionRepository(db);
+    this.assets = new MemoryAssetRepository(db);
+    this.temporalValidity = new MemoryTemporalValidityRepository(db);
+    this.agentLoadouts = new AgentLoadoutRepository(db);
+    this.assetRecallEvents = new AssetRecallEventRepository(db);
+    this.experienceSequences = new ExperienceSequenceRepository(db);
+    this.assetRewardEvidence = new AssetRewardEvidenceRepository(db);
     this.runtime = new RuntimeRepository(db);
   }
   transaction<T>(fn: () => T): T { return this.db.transaction(fn)(); }
