@@ -269,8 +269,7 @@ export class ProjectTopicInboxService implements ProjectTopicInbox {
   }
 
   private findCandidate(namespaceId: string, candidateId: string): ProjectTopicCandidateRecord | undefined {
-    const row = this.deps.repos.db.prepare("SELECT topic_id FROM project_topic_candidates WHERE id = ? AND namespace_id = ?").get(candidateId, namespaceId) as { topic_id: string } | undefined;
-    return row ? this.deps.repos.topics.listCandidates(row.topic_id, namespaceId).find((candidate) => candidate.id === candidateId) : undefined;
+    return this.deps.repos.topics.getCandidate(candidateId, namespaceId);
   }
 
   private requireTopic(topicId: string, namespaceId: string): ProjectTopicRecord {
