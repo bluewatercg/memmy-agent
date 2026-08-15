@@ -20,6 +20,9 @@ output/
 !.github/release-notes/
 !.github/release-notes/*.md
 !.dockerignore
+!.husky/
+!.husky/pre-commit
+!.husky/pre-push
 .env
 .env.*
 !.env.example

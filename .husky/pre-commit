@@ -1,0 +1,1 @@
+npm run version:check && npx tsc -p Memory/tsconfig.json --noEmit
