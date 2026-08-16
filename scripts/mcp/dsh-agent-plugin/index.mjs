@@ -6,30 +6,47 @@
 //   - agent/created: open a memmy session + claim
 // Design: docs/superpowers/plans/2026-08-15-dsh-realtime-memory-integration-design.md §8 Phase 2
 //
-// Env:
-//   MEMMY_URL     memmy base URL (default http://127.0.0.1:18960)
-//   MEMMY_TOKEN   memmy token (required)
-//   MEMMY_WORKSPACE_PATH workspace path header (default process.cwd())
+// Config (agent.cordis.yml `config`) overrides env:
+//   token / url / workspacePath / userId
+// Env fallbacks:
+//   MEMMY_URL / MEMMY_TOKEN / MEMMY_MEMORY_TOKEN / MEMMY_WORKSPACE_PATH
 
-const MEMMY_URL = (process.env.MEMMY_URL ?? "http://127.0.0.1:18960").replace(/\/$/, "");
-const TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
-const WORKSPACE_PATH = process.env.MEMMY_WORKSPACE_PATH ?? process.cwd();
+const DEFAULT_URL = "http://127.0.0.1:18960";
+const DEFAULT_TOKEN = process.env.MEMMY_TOKEN ?? process.env.MEMMY_MEMORY_TOKEN ?? "";
+const DEFAULT_WORKSPACE = process.env.MEMMY_WORKSPACE_PATH ?? process.cwd();
 const SOURCE = "deepseek_harness";
 const ADAPTER_ID = "agent-source:deepseek_harness";
+
+// Runtime-resolved config (set in apply from env + preset config).
+let runtimeConfig = {
+  url: DEFAULT_URL,
+  token: DEFAULT_TOKEN,
+  workspacePath: DEFAULT_WORKSPACE,
+  userId: "deepseek-harness",
+};
+
+function resolveConfig(config) {
+  runtimeConfig = {
+    url: (config?.url ?? process.env.MEMMY_URL ?? DEFAULT_URL).replace(/\/$/, ""),
+    token: config?.token ?? DEFAULT_TOKEN,
+    workspacePath: config?.workspacePath ?? DEFAULT_WORKSPACE,
+    userId: config?.userId ?? "deepseek-harness",
+  };
+}
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 async function memmy(path, { method = "GET", body } = {}) {
   const headers = {
-    "x-memmy-user-id": "deepseek-harness",
-    "x-memmy-workspace-path": WORKSPACE_PATH,
-    "authorization": `Bearer ${TOKEN}`,
+    "x-memmy-user-id": runtimeConfig.userId,
+    "x-memmy-workspace-path": runtimeConfig.workspacePath,
+    "authorization": `Bearer ${runtimeConfig.token}`,
   };
   let payload;
   if (body !== undefined) {
     headers["content-type"] = "application/json";
     payload = JSON.stringify(body);
   }
-  const res = await fetch(`${MEMMY_URL}${path}?source=${SOURCE}`, { method, headers, body: payload });
+  const res = await fetch(`${runtimeConfig.url}${path}?source=${SOURCE}`, { method, headers, body: payload });
   const text = await res.text();
   let json;
   try { json = text ? JSON.parse(text) : null; } catch { json = { raw: text }; }
@@ -67,7 +84,12 @@ async function closeSession(sessionId) {
 }
 
 // ── plugin ───────────────────────────────────────────────────────────────────
-export function apply(ctx) {
+export function apply(ctx, config) {
+  resolveConfig(config ?? {});
+  if (!runtimeConfig.token) {
+    console.error("[memmy-agent-plugin] no token configured (set config.token or MEMMY_TOKEN); plugin disabled");
+    return () => {};
+  }
   // Hot-path safety: never throw into the loop; degrade on memmy failure.
   const safeRecall = async (fn) => {
     try { return await fn(); } catch (error) { return undefined; }
