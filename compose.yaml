@@ -58,6 +58,37 @@ services:
       - no-new-privileges:true
     stop_grace_period: 15s
 
+  web:
+    build:
+      context: .
+      dockerfile: Web/Dockerfile
+    image: memmy-web:local
+    restart: unless-stopped
+    init: true
+    depends_on:
+      memory:
+        condition: service_healthy
+    environment:
+      MEMMY_MEMORY_TOKEN: "${MEMMY_MEMORY_TOKEN:?Set a strong random MEMMY_MEMORY_TOKEN in .env}"
+      MEMMY_WEB_PORT: "80"
+    ports:
+      - "127.0.0.1:${MEMMY_WEB_HOST_PORT:-19000}:80"
+    read_only: true
+    tmpfs:
+      - /etc/nginx/conf.d:rw,noexec,nosuid,size=1m
+      - /var/run:rw,noexec,nosuid,size=8m
+      - /tmp:rw,noexec,nosuid,size=8m,uid=101,gid=101
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 10s
+
 volumes:
   memory-data:
   memory-model-cache:
+

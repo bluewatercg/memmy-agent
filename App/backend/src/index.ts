@@ -58,6 +58,10 @@ export interface CreateLocalBackendOptions {
   agentSourceAutoScanIntervalMs?: number;
   /** Agent source startup scan delay in ms. Defaults to five minutes. */
   agentSourceAutoScanInitialDelayMs?: number;
+  /** Local API bind address. Defaults to loopback for desktop. */
+  listenHost?: string;
+  /** Local API port. Defaults to an ephemeral port for desktop. */
+  listenPort?: number;
 }
 
 export interface LocalBackend {
@@ -124,16 +128,17 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     const localToken = await permissionManager.getRuntimeToken();
     const composioMcpToken = `mmt_${randomBytes(32).toString("base64url")}`;
-    server = createLocalApiServer({
+    const createdServer = createLocalApiServer({
       permissionManager,
       services,
       composioMcpToken,
       heartbeatIntervalMs: options.heartbeatIntervalMs,
       scanWorker
     });
-    await server.listen({ host: "127.0.0.1", port: 0 });
+    server = createdServer;
+    await createdServer.listen({ host: options.listenHost ?? "127.0.0.1", port: options.listenPort ?? 0 });
 
-    const address = server.server.address();
+    const address = createdServer.server.address();
     if (!address || typeof address === "string") {
       throw new Error("Local API did not bind to a TCP port");
     }
@@ -161,7 +166,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     });
     autoScan.start();
 
-    const boundServer = server;
+    const boundServer = createdServer;
     const boundAutoScan = autoScan;
     return {
       runtimeConfig,
@@ -179,7 +184,7 @@ export async function createLocalBackend(options: CreateLocalBackendOptions): Pr
     };
   } catch (error) {
     autoScan?.close();
-    await server?.close().catch(() => undefined);
+    if (server) await server.close().catch(() => undefined);
     appStateStore.close();
     throw error;
   }

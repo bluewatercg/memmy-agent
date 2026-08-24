@@ -9,7 +9,7 @@ COPY . .
 
 RUN npm ci \
     && npm run memory:build \
-    && npm ci --omit=dev --workspace @memmy/memory --include-workspace-root=false \
+    && npm prune --ignore-scripts --omit=dev --workspace @memmy/memory --include-workspace-root=false \
     && npm audit --omit=dev --workspace @memmy/memory --audit-level=high \
     && mkdir -p /runtime \
     && cp Memory/package.json /runtime/package.json \

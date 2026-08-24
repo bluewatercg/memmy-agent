@@ -184,7 +184,10 @@ export interface MemoryRuntimeClient {
   deletePanelTask(id: string): Promise<DeletePanelTaskOutput>;
 }
 
-export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRuntimeClient {
+export function createHttpMemoryRuntimeClient(inputConfig: RuntimeConfig): MemoryRuntimeClient {
+  const config: RuntimeConfig = inputConfig.memory
+    ? { ...inputConfig, baseUrl: inputConfig.memory.baseUrl, localToken: inputConfig.memory.token }
+    : inputConfig;
   return {
     async health() {
       return requestJson({ config, path: "/api/v1/health", schema: MemoryHealthSnapshotSchema });

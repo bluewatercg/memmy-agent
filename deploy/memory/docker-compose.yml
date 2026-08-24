@@ -1,8 +1,11 @@
-name: memmy-memory
+name: memmy-web
 
 services:
   memory:
     image: memmy-memory:local
+    build:
+      context: ../..
+      dockerfile: Memory/Dockerfile
     restart: unless-stopped
     init: true
     environment:
@@ -10,17 +13,17 @@ services:
       MEMMY_MEMORY_HOST: 0.0.0.0
       MEMMY_MEMORY_PORT: "18960"
       MEMMY_MEMORY_DB: /data/memory.sqlite
-      MEMMY_MEMORY_TOKEN: "${MEMMY_MEMORY_TOKEN:?Set a strong random MEMMY_MEMORY_TOKEN in .env}"
+      MEMMY_MEMORY_TOKEN: "${MEMMY_MEMORY_TOKEN:?Set MEMMY_MEMORY_TOKEN in .env}"
       MEMMY_SUMMARY_PROVIDER: "${MEMMY_SUMMARY_PROVIDER:-openai_compatible}"
       MEMMY_SUMMARY_ENDPOINT: "${MEMMY_SUMMARY_ENDPOINT:-https://coding.dashscope.aliyuncs.com/v1}"
-      MEMMY_SUMMARY_MODEL: "${MEMMY_SUMMARY_MODEL:-qwen3.7-plus}"
-      MEMMY_SUMMARY_API_KEY: "${MEMMY_SUMMARY_API_KEY:-}"
+      MEMMY_SUMMARY_MODEL: "${MEMMY_SUMMARY_MODEL:-qwen3.5-plus}"
+      MEMMY_SUMMARY_API_KEY: "${MEMMY_SUMMARY_API_KEY:?Set MEMMY_SUMMARY_API_KEY in .env}"
       MEMMY_SUMMARY_MAX_TOKENS: "${MEMMY_SUMMARY_MAX_TOKENS:-768}"
       MEMMY_SUMMARY_TIMEOUT_MS: "${MEMMY_SUMMARY_TIMEOUT_MS:-60000}"
       MEMMY_EVOLUTION_PROVIDER: "${MEMMY_EVOLUTION_PROVIDER:-openai_compatible}"
       MEMMY_EVOLUTION_ENDPOINT: "${MEMMY_EVOLUTION_ENDPOINT:-https://coding.dashscope.aliyuncs.com/v1}"
-      MEMMY_EVOLUTION_MODEL: "${MEMMY_EVOLUTION_MODEL:-qwen3.7-plus}"
-      MEMMY_EVOLUTION_API_KEY: "${MEMMY_EVOLUTION_API_KEY:-}"
+      MEMMY_EVOLUTION_MODEL: "${MEMMY_EVOLUTION_MODEL:-qwen3-max-2026-01-23}"
+      MEMMY_EVOLUTION_API_KEY: "${MEMMY_EVOLUTION_API_KEY:?Set MEMMY_EVOLUTION_API_KEY in .env}"
       MEMMY_EVOLUTION_ENABLE_THINKING: "${MEMMY_EVOLUTION_ENABLE_THINKING:-true}"
       MEMMY_EVOLUTION_MAX_TOKENS: "${MEMMY_EVOLUTION_MAX_TOKENS:-4096}"
       MEMMY_EVOLUTION_TIMEOUT_MS: "${MEMMY_EVOLUTION_TIMEOUT_MS:-180000}"
@@ -29,27 +32,135 @@ services:
     ports:
       - "127.0.0.1:${MEMMY_MEMORY_HOST_PORT:-18960}:18960"
     volumes:
-      - memory-data:/data
-      - memory-model-cache:/home/node/.memmy/memory-service/model-cache
+      - memmy-memory_memory-data:/data
+      - memmy-memory_memory-model-cache:/home/node/.memmy/memory-service/model-cache
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - fetch('http://127.0.0.1:18960/api/v1/health').then(r=>{if(!r.ok)throw new Error(String(r.status))})
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:18960/api/v1/health').then(r=>{if(!r.ok)throw new Error(String(r.status))})"]
       interval: 10s
       timeout: 3s
       retries: 5
       start_period: 30s
     read_only: true
     tmpfs:
-      - /tmp:rw,noexec,nosuid,size=128m
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    stop_grace_period: 15s
+      - "/tmp:rw,noexec,nosuid,size=512m"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  agent-api:
+    image: memmy-agent-api:local
+    build:
+      context: ../..
+      dockerfile: App/backend/Dockerfile
+    restart: unless-stopped
+    init: true
+    user: "0:0"
+    environment:
+      HOME: /root
+      MEMMY_BACKEND_HOST: 0.0.0.0
+      MEMMY_BACKEND_PORT: "18100"
+      MEMMY_BACKEND_TOKEN: "${MEMMY_BACKEND_TOKEN:?Set MEMMY_BACKEND_TOKEN in .env}"
+      MEMMY_BACKEND_DB: /data/app.sqlite
+      MEMMY_CONFIG: /root/.memmy/config.yaml
+      MEMMY_RUNTIME_CONFIG: /data/runtime.json
+      MEMMY_MEMORY_LAYER_URL: http://memory:18960
+      MEMMY_MEMORY_LAYER_TOKEN: "${MEMMY_MEMORY_TOKEN}"
+      MEMMY_CLOUD_SERVICE: "${MEMMY_CLOUD_SERVICE:-https://memmy-api.memtensor.cn}"
+    depends_on:
+      memory:
+        condition: service_healthy
+    volumes:
+      - agent-api-data:/data
+      - agent-api-config:/config
+      - type: bind
+        source: /root/.memmy
+        target: /root/.memmy
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.cursor
+        target: /root/.cursor
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.claude
+        target: /root/.claude
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.codex
+        target: /root/.codex
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.pi/agent
+        target: /root/.pi/agent
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.local/share/opencode
+        target: /root/.local/share/opencode
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.config/opencode
+        target: /root/.config/opencode
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.openclaw
+        target: /root/.openclaw
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.hermes
+        target: /root/.hermes
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.config/manicode
+        target: /root/.config/manicode
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /root/.agents
+        target: /root/.agents
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:18100/api/health').then(r=>{if(!r.ok)throw new Error(String(r.status))})"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+  web:
+    image: memmy-web:local
+    build:
+      context: ../..
+      dockerfile: Web/Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      MEMMY_WEB_PORT: "80"
+      MEMMY_MEMORY_TOKEN: "${MEMMY_MEMORY_TOKEN}"
+      MEMMY_BACKEND_TOKEN: "${MEMMY_BACKEND_TOKEN}"
+      MEMMY_WEB_PUBLIC_URL: "${MEMMY_WEB_PUBLIC_URL:-http://127.0.0.1:19000}"
+    depends_on:
+      memory:
+        condition: service_healthy
+      agent-api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MEMMY_WEB_HOST_PORT:-19000}:80"
 
 volumes:
-  memory-data:
-  memory-model-cache:
+  memmy-memory_memory-data:
+    external: true
+  memmy-memory_memory-model-cache:
+    external: true
+  agent-api-data:
+  agent-api-config:
