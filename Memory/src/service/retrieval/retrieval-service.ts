@@ -126,7 +126,7 @@ export function memoryLayersForIntent(kind: Parameters<typeof retrievalForIntent
   const plan = retrievalForIntent(kind);
   const layers: MemoryLayer[] = [];
   if (plan.tier1) layers.push("Skill");
-  if (plan.tier2) layers.push("L2", "L1");
+  if (plan.tier2) layers.push("L2");
   if (plan.tier3) layers.push("L3");
   return layers;
 }

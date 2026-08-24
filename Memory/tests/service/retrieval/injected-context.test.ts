@@ -347,9 +347,9 @@ describe("MemoryService / retrieval / injected context", () => {
       contextBudget: 5
     });
 
-    expect(prepared.hits.length).toBeGreaterThan(1);
+    expect(prepared.hits).toEqual([]);
     expect(prepared.sourceMemoryIds).toEqual([]);
-    expect(prepared.droppedDueToBudget.map(({ id }) => id).sort()).toEqual(prepared.hits.map(({ id }) => id).sort());
+    expect(prepared.droppedDueToBudget).toEqual([]);
 
     expect(db.db.prepare(
       `SELECT turn_id, json_extract(request_json, '$.retrievalMode') AS retrieval_mode

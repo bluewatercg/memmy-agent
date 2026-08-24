@@ -1,4 +1,5 @@
 import {
+  automaticTurnStartLayers,
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
@@ -2927,7 +2928,7 @@ export class MemoryService {
       sessionId: request.sessionId,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.config.domain),
-      layers: ["Skill", "L2", "L1", "L3"],
+      layers: automaticTurnStartLayers(),
       limit: this.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,

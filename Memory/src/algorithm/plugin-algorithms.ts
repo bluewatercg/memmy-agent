@@ -1591,6 +1591,10 @@ export function retrievalLayersForMode(mode: RetrievalMode = "search"): MemoryLa
   }
 }
 
+export function automaticTurnStartLayers(): MemoryLayer[] {
+  return retrievalLayersForMode("turn_start").filter((layer) => layer !== "L1");
+}
+
 export function isResearchDomain(domain: string | undefined | null): domain is "research" {
   return domain === "research";
 }

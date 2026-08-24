@@ -25,6 +25,7 @@ import {
   languageSteeringLine,
   packL2InductionTraces,
   renderRepositoryRepairProtocol,
+  automaticTurnStartLayers,
   retrievePluginMemories,
   retrievalLayersForMode,
   retrievalLayersForProfile,
@@ -289,6 +290,13 @@ describe("plugin algorithm parity helpers", () => {
     const toolDriven = retrievalLayersForMode("tool_driven");
     expect(toolDriven).not.toContain("Skill");
     expect(retrievalLayersForProfile(toolDriven, { domain: "research", readOnlyInjectionProfile: "skill" })).toEqual(["Skill"]);
+  });
+
+  it("keeps automatic turn-start service injection free of raw L1 traces", () => {
+    expect(automaticTurnStartLayers()).toEqual(["Skill", "L2", "L3"]);
+    expect(retrievalLayersForMode("turn_start")).toContain("L1");
+    expect(retrievalLayersForMode("search")).toContain("L1");
+    expect(retrievalLayersForMode("tool_driven")).toContain("L1");
   });
 
   it("extracts retrieval tags before plugin query truncation", () => {
