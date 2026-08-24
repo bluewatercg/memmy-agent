@@ -9,6 +9,7 @@ const configPath = resolve(process.env.MEMMY_CONFIG ?? "/config/config.yaml");
 const runtimeConfigPath = resolve(process.env.MEMMY_RUNTIME_CONFIG ?? "/data/runtime.json");
 const localToken = requireEnv("MEMMY_BACKEND_TOKEN");
 const memoryBaseUrl = requireEnv("MEMMY_MEMORY_LAYER_URL");
+const memoryToken = requireEnv("MEMMY_MEMORY_LAYER_TOKEN");
 
 await mkdir(dirname(databasePath), { recursive: true });
 await mkdir(dirname(configPath), { recursive: true });
@@ -20,6 +21,7 @@ const backend = await createLocalBackend({
   runtimeConfigPath,
   localToken,
   memoryBaseUrl,
+  memoryToken,
   listenHost: host,
   listenPort: port,
   agentSourceAutoScanInitialDelayMs: 0

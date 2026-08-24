@@ -78,6 +78,7 @@ describe("local api", () => {
       runtimeConfigPath: join(tempDir, "runtime.json"),
       localToken: "test-token",
       memoryBaseUrl: "http://127.0.0.1:18960",
+      memoryToken: "test-memory-token",
       memoryClient,
       cloudClient: createMockCloudClient(),
       memmyConfigPath: join(tempDir, "config.yaml")
@@ -86,6 +87,7 @@ describe("local api", () => {
     expect(reloadReasons).toEqual([{ reason: "desktop_startup" }]);
     expect(backend.runtimeConfig.memory).toEqual({
       baseUrl: "http://127.0.0.1:18960",
+      token: "test-memory-token",
       ownership: "managed"
     });
   });

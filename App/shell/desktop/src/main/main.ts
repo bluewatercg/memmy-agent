@@ -685,6 +685,7 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     desktopInstallFingerprint,
     memmyConfigPath: process.env.MEMMY_CONFIG,
     memoryBaseUrl: memoryControl.baseUrl,
+    memoryToken: memoryControl.token,
     runtimeConfigPath: process.env.MEMMY_HOME ? join(process.env.MEMMY_HOME, "runtime.json") : undefined
   });
   const agentGateway = services?.agentGateway ?? await resolveAgentGatewayRuntimeConfig();
@@ -699,6 +700,7 @@ async function startLocalApi(services: PackagedRuntimeServices | null): Promise<
     ...localBackend.runtimeConfig,
     memory: {
       baseUrl: memoryControl.baseUrl,
+      token: memoryControl.token,
       ownership: memoryControl.ownership
     },
     agentGateway: agentGatewayConfig
