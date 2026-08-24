@@ -65,11 +65,93 @@ describe("memoryPanelHtml", () => {
     expect(mutations).toBe(0);
   });
 
+  it("renders answer inputs from position missing information when blocked without evidence requests", () => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Context & {
+      renderTopicDecision: (detail: DecisionDetailFixture) => void;
+    };
+
+    context.renderTopicDecision({
+      session: { id: "session-1", topicId: "topic-1", state: "blocked_by_evidence", version: 2 },
+      evidenceRequests: [],
+      positions: [
+        { agentId: "agent-1", missingInformation: ["Which regulation applies?", "What failed?"] },
+        { agentId: "agent-2", missingInformation: ["What failed?"] }
+      ]
+    });
+
+    const html = harness.element("topicDecisionBody").innerHTML;
+    expect(html).toContain("Which regulation applies?");
+    expect(html.match(/<label class="decision-question">What failed\?/g)).toHaveLength(1);
+    expect(html).toContain('data-decision-answer="Which regulation applies?"');
+    expect(html).toContain("Submit answers");
+  });
+
+  it("submits fallback missing-information answers and resumes analysis", async () => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Record<string, unknown> & {
+      renderTopicDecision: (detail: DecisionDetailFixture) => void;
+      handleTopicDecisionAction: (button: FakeElement) => Promise<void>;
+      api: (path: string, options?: { body?: string }) => Promise<unknown>;
+      runTopicDecisionPipeline: (sessionId: string, namespace: object, requestPrefix: string) => Promise<DecisionDetailFixture>;
+      selectedTopicNamespace: () => object;
+    };
+    const namespace = { projectId: "demo" };
+    const requests: Array<{ path: string; body?: string }> = [];
+    const resumed: string[] = [];
+    const answeredDetail: DecisionDetailFixture = { session: { id: "session-1", state: "gathering_evidence", version: 3 }, positions: [] };
+    context.selectedTopicNamespace = () => namespace;
+    context.api = async (path, options) => {
+      requests.push({ path, body: options?.body });
+      if (path.endsWith("/answers")) return answeredDetail;
+      return answeredDetail;
+    };
+    context.runTopicDecisionPipeline = async (sessionId) => {
+      resumed.push(sessionId);
+      return { session: { id: sessionId, state: "ready_for_decision", version: 4 }, proposals: [{ id: "proposal-1" }] };
+    };
+    context.renderTopicDecision({
+      session: { id: "session-1", topicId: "topic-1", state: "blocked_by_evidence", version: 2 },
+      evidenceRequests: [],
+      positions: [{ agentId: "agent-1", missingInformation: ["Which regulation applies?"] }]
+    });
+    const body = harness.element("topicDecisionBody");
+    const input = body.querySelectorAll('input[data-decision-answer]')[0]!;
+    input.value = "EU AI Act";
+    const button = body.querySelectorAll('button[data-decision-action]')
+      .find((item) => item.dataset.decisionAction === "answers")!;
+
+    await context.handleTopicDecisionAction(button);
+
+    const submitted = JSON.parse(requests[0]!.body!) as { expectedVersion: number; answers: Array<{ questionKey: string; answer: string }> };
+    expect(submitted.expectedVersion).toBe(2);
+    expect(submitted.answers).toEqual([{ questionKey: "Which regulation applies?", answer: "EU AI Act", source: "user_supplied_unverified" }]);
+    expect(resumed).toEqual(["session-1"]);
+  });
+
+  it("labels a loaded blocked topic as Review missing evidence", () => {
+    const harness = createViewerHarness();
+    const context = runViewerScript(harness) as Context & {
+      renderTopicDecision: (detail: DecisionDetailFixture) => void;
+      renderTopicCard: (topic: Record<string, unknown>) => string;
+    };
+
+    context.renderTopicDecision({
+      session: { id: "session-1", topicId: "topic-1", state: "blocked_by_evidence", version: 2 },
+      positions: []
+    });
+
+    expect(context.renderTopicCard({ id: "topic-1", title: "Topic", status: "active", evidenceCount: 3, version: 1 }))
+      .toContain("Review missing evidence");
+  });
+
+
   it.each([
     { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [], proposals: [{ id: "proposal-1" }] }, expectedActions: [] },
     { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [{ id: "round-1" }], proposals: [] }, expectedActions: ["proposals"] },
     { detail: { session: { state: "ready_for_decision", version: 4 }, snapshots: [], positions: [], debateRounds: [], proposals: [] }, expectedActions: ["debate", "proposals"] },
     { detail: { session: { state: "draft", version: 4 }, snapshots: [{ id: "snapshot-1", payload: { roster: [{ id: "agent-1" }] } }], positions: [{ agentId: "agent-1", snapshotId: "snapshot-1" }], debateRounds: [], proposals: [] }, expectedActions: ["run", "debate", "proposals"] },
+    { detail: { session: { state: "gathering_evidence", version: 4 }, snapshots: [], positions: [], evidenceRequests: [{ id: "request-1", question: "Already answered", status: "answered" }], debateRounds: [], proposals: [] }, expectedActions: ["run", "debate", "proposals"] },
     { detail: { session: { state: "debating", version: 4 }, snapshots: [], positions: [], debateRounds: [{ id: "round-1" }], proposals: [] }, expectedActions: ["debate", "proposals"] }
   ])("resumes a reusable session from its authoritative state", async ({ detail, expectedActions }) => {
     const harness = createViewerHarness();
@@ -292,11 +374,12 @@ describe("memoryPanelHtml", () => {
   });
 });
 interface DecisionDetailFixture {
-  session: { state: string; version: number };
+  session: { id?: string; topicId?: string; state: string; version: number };
   snapshots?: Array<{ id: string; payload: { roster: Array<{ id: string }> } }>;
-  positions?: Array<{ agentId: string; snapshotId: string }>;
+  positions?: Array<{ agentId: string; snapshotId?: string; missingInformation?: string[] }>;
   debateRounds?: Array<{ id: string }>;
   proposals?: Array<{ id: string }>;
+  evidenceRequests?: Array<{ id: string; question: string; status: string; metadata?: { key?: string } }>;
 }
 
 type FakeRow = FakeElement & {
@@ -661,6 +744,7 @@ class FakeElement {
   onfocus: unknown;
   onchange: unknown;
   childRows: FakeRow[] = [];
+  private inputCache: { html: string; elements: FakeRow[] } | undefined;
   dataset: Record<string, string> = {};
   className = "";
   classList = {
@@ -671,8 +755,24 @@ class FakeElement {
 
   querySelectorAll(selector: string): FakeRow[] {
     if (selector === "tr") return this.childRows;
-    const matches = [...this.innerHTML.matchAll(/<button[^>]*data-(?:decision|topic)-action="([^"]+)"[^>]*>/g)];
-    return matches.map((match) => { const row = new FakeElement() as FakeRow; row.dataset = { id: match[1] || "" }; row.onclick = async () => undefined; return row; });
+    if (selector === "input[data-decision-answer]") {
+      if (this.inputCache?.html === this.innerHTML) return this.inputCache.elements;
+      const elements = [...this.innerHTML.matchAll(/<input data-decision-answer="([^"]+)">/g)].map((match) => {
+        const input = new FakeElement() as FakeRow;
+        input.dataset = { id: "", decisionAnswer: decodeHtml(match[1] || "") };
+        return input;
+      });
+      this.inputCache = { html: this.innerHTML, elements };
+      return elements;
+    }
+    const matches = [...this.innerHTML.matchAll(/<button[^>]*data-(decision|topic)-action="([^"]+)"[^>]*>/g)];
+    return matches.map((match) => {
+      const button = new FakeElement() as FakeRow;
+      const action = match[2] || "";
+      button.dataset = match[1] === "decision" ? { id: "", decisionAction: action } : { id: "", topicAction: action };
+      button.onclick = async () => undefined;
+      return button;
+    });
   }
   select(): void {
     return undefined;

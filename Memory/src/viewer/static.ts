@@ -150,6 +150,22 @@ export function memoryPanelHtml(): string {
     .nav-item:hover { background: var(--surface-hover); color: var(--ink); }
     .nav-item.active { background: var(--accent-soft); color: var(--accent); border-color: color-mix(in srgb, var(--accent) 22%, transparent); }
     .sidebar-status { margin-top: auto; padding: 10px; border-top: 1px solid var(--line); color: var(--muted); }
+    .project-nav { display: grid; gap: 6px; min-height: 0; }
+    .project-nav-head { display: flex; align-items: center; justify-content: space-between; padding: 0 6px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+    .project-tree { display: grid; gap: 3px; max-height: 42vh; overflow: auto; padding: 2px 0; }
+    .project-item { position: relative; min-height: 42px; padding: 7px 8px 7px 12px; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--ink-secondary); text-align: left; overflow: hidden; }
+    .project-item::before { content: ""; position: absolute; left: 4px; top: 12px; width: 4px; height: 4px; border-radius: 50%; background: var(--line-strong); }
+    .project-item:hover { background: var(--surface-hover); color: var(--ink); }
+    .project-item.active { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 24%, transparent); color: var(--accent); }
+    .project-item.active::before { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent); }
+    .project-item strong, .project-item span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .project-item strong { font-size: 12px; }
+    .project-item span { margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .project-item-count { float: right; margin: 0 0 0 6px; padding: 0 5px; border-radius: 999px; background: var(--surface-soft); color: var(--muted); font: 10px/17px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    .project-item.active .project-item-count { background: var(--surface); color: var(--accent); }
+    .technical-details { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 10px; }
+    .technical-details summary { cursor: pointer; color: var(--muted); font-size: 11px; font-weight: 650; }
+    .technical-details pre { margin-top: 8px; max-height: 300px; }
     .status-line { display: flex; align-items: center; gap: 8px; }
     .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 auto; }
     .status-dot.online { background: var(--success); box-shadow: 0 0 0 3px var(--accent-soft); }
@@ -219,16 +235,19 @@ export function memoryPanelHtml(): string {
     .pipeline { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
     .pipeline-stage { padding: 11px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
     .pipeline-stage strong, .pipeline-stage span { display: block; }
-    .pipeline-stage strong { font-size: 20px; margin: 6px 0; }
-    .pipeline-stage span, .pipeline-stage small { color: var(--muted); }
-    .audit-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; }
-    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) 120px 130px 140px auto auto; gap: 7px; align-items: center; margin-bottom: 10px; }
-    .workspace { display: grid; grid-template-columns: minmax(500px, 1.15fr) minmax(420px, .85fr); gap: 10px; height: calc(100vh - 150px); min-height: 500px; }
-    .panel { min-width: 0; height: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; display: flex; flex-direction: column; }
-    .panel-head { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
-    .panel-actions { display: flex; gap: 6px; }
-    .table-wrap { flex: 1; min-height: 0; overflow: auto; }
-    .detail-body { flex: 1; min-height: 0; padding: 12px; overflow: auto; }
+    .workspace { display: grid; grid-template-columns: minmax(460px, 1.08fr) minmax(420px, .92fr); gap: 12px; height: calc(100vh - 150px); min-height: 500px; }
+    .panel { min-width: 0; height: 100%; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 6px 18px rgba(20, 35, 30, .045); }
+    .workspace > .panel:last-child { border-left: 3px solid color-mix(in srgb, var(--accent) 62%, var(--line)); box-shadow: -8px 0 24px rgba(20, 35, 30, .06); }
+    .panel-head { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: var(--surface-soft); }
+    .panel-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .table-wrap { flex: 1; min-height: 0; overflow: auto; padding: 5px; }
+    .table-wrap table { border-collapse: separate; border-spacing: 0 5px; }
+    .table-wrap thead th { border-bottom: 0; background: transparent; padding: 4px 10px; }
+    .table-wrap tbody tr { background: var(--surface); box-shadow: 0 1px 0 var(--line); }
+    .table-wrap tbody tr:hover, .table-wrap tbody tr.selected { background: var(--surface-hover); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 38%, var(--line)); }
+    .table-wrap tbody td:first-child { border-radius: 6px 0 0 6px; }
+    .table-wrap tbody td:last-child { border-radius: 0 6px 6px 0; }
+    .detail-body { flex: 1; min-height: 0; padding: 16px; overflow: auto; background: color-mix(in srgb, var(--surface) 96%, var(--surface-soft)); }
     .detail-body pre { max-height: 360px; }
     .detail-section { margin-bottom: 16px; }
     .detail-section:last-child { margin-bottom: 0; }
@@ -411,10 +430,14 @@ export function memoryPanelHtml(): string {
         <div class="brand-mark">M</div>
         <div class="brand-copy"><h1>Memmy</h1><span>Memory Console</span></div>
       </div>
+      <div class="project-nav" aria-label="项目导航">
+        <div class="project-nav-head"><span>项目</span><span id="projectNavCount" class="mono"></span></div>
+        <div id="projectTree" class="project-tree"></div>
+      </div>
       <nav class="nav" role="tablist" aria-label="控制台视图">
         <button id="navDashboard" class="nav-item active" role="tab" aria-selected="true">概览</button>
         <button id="navTopicInbox" class="nav-item" role="tab" aria-selected="false">主题收件箱</button>
-        <button id="navMemories" class="nav-item" role="tab" aria-selected="false">记忆</button>
+        <button id="navMemories" class="nav-item" role="tab" aria-selected="false">记忆管理</button>
         <button id="navActivity" class="nav-item" role="tab" aria-selected="false">活动</button>
         <button id="navTasks" class="nav-item" role="tab" aria-selected="false">任务</button>
         <button id="navTokenStats" class="nav-item" role="tab" aria-selected="false">Token 用量</button>
@@ -626,7 +649,12 @@ export function memoryPanelHtml(): string {
       const fragmentToken = hash ? new URLSearchParams(hash).get("token") : "";
       if (fragmentToken && typeof sessionStorage !== "undefined") sessionStorage.setItem("memmyMemoryToken", fragmentToken);
       if (fragmentToken && typeof history !== "undefined") history.replaceState(null, "", window.location.pathname + window.location.search);
-      return fragmentToken || (typeof sessionStorage !== "undefined" ? sessionStorage.getItem("memmyMemoryToken") || "" : "");
+      if (fragmentToken) return fragmentToken;
+      if (typeof sessionStorage !== "undefined") {
+        const storedToken = sessionStorage.getItem("memmyMemoryToken") || "";
+        if (storedToken) return storedToken;
+      }
+      return typeof window !== "undefined" && window.location.pathname.startsWith("/memory") ? "proxy" : "";
     }
 
     let memoryToken = resolveMemoryToken();
@@ -837,6 +865,7 @@ export function memoryPanelHtml(): string {
       $("namespaceDistribution").innerHTML = namespaces.length ? namespaces.map((namespace) =>
         '<div class="namespace-row"><div><strong class="namespace-title" title="' + esc(namespaceMeta(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</strong><div class="namespace-meta mono">' + esc(namespaceMeta(namespace)) + '</div></div><span class="source-count mono">' + esc(namespace.count) + '</span></div>'
       ).join("") : '<div class="empty">暂无项目数据</div>';
+      renderProjectTree(allNamespaces);
       const currentProjectScope = $("projectScope").value;
       const options = ['<option value="">全部项目</option>'].concat(allNamespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>')).join("");
       $("projectScope").innerHTML = options;
@@ -848,6 +877,24 @@ export function memoryPanelHtml(): string {
       $("topicInboxProject").innerHTML = '<option value="">选择项目 / Workspace</option>' + allNamespaces.map((namespace) => '<option value="' + esc(namespaceOptionValue(namespace)) + '">' + esc(namespaceLabel(namespace)) + '</option>').join("");
       $("topicInboxProject").value = currentTopicScope;
       $("refreshTopicInbox").disabled = !currentTopicScope;
+    }
+    function renderProjectTree(namespaces) {
+      const currentScope = $("projectScope").value;
+      $("projectNavCount").textContent = formatNumber(namespaces.length);
+      const total = namespaces.reduce((sum, namespace) => sum + Number(namespace.count || 0), 0);
+      $("projectTree").innerHTML = ['<button type="button" class="project-item ' + (!currentScope ? 'active' : '') + '" data-project-scope=""><strong>全部项目<span class="project-item-count">' + esc(formatNumber(total)) + '</span></strong><span>查看所有记忆</span></button>'].concat(namespaces.map((namespace) => {
+        const scope = namespaceOptionValue(namespace);
+        return '<button type="button" class="project-item ' + (scope === currentScope ? "active" : "") + '" data-project-scope="' + esc(scope) + '"><strong>' + esc(namespaceLabel(namespace)) + '<span class="project-item-count">' + esc(formatNumber(namespace.count)) + '</span></strong><span title="' + esc(namespaceMeta(namespace)) + '">' + esc(namespaceMeta(namespace)) + '</span></button>';
+      })).join("");
+       for (const button of $("projectTree").querySelectorAll("[data-project-scope]")) {
+         button.onclick = () => {
+           const scope = button.dataset.projectScope || "";
+           $("projectScope").value = scope;
+           for (const item of $("projectTree").querySelectorAll("[data-project-scope]")) item.classList.toggle("active", item === button);
+           setView("memories");
+           loadMemories();
+         };
+       }
     }
 
     function renderLayerFilter(overview) {
@@ -1205,8 +1252,8 @@ export function memoryPanelHtml(): string {
 
     function renderListMeta(data) {
       const shown = Array.isArray(data.items) ? data.items.length : 0;
-      $("listMeta").textContent = formatNumber(data.total) + " matched · " + state.lastRequestMs + " ms";
-      $("memoryResultSummary").textContent = formatNumber(shown) + " shown";
+      $("listMeta").textContent = formatNumber(data.total) + " 条匹配 · " + state.lastRequestMs + " ms";
+      $("memoryResultSummary").textContent = formatNumber(shown) + " 条当前页";
       $("pageInput").value = String(state.page);
       $("totalPagesText").textContent = String(state.totalPages);
       $("prevPage").disabled = !data.hasPrev;
@@ -1239,7 +1286,7 @@ export function memoryPanelHtml(): string {
           '<div class="detail-field"><span>Updated</span><strong>' + esc(formatDate(item.updatedAt || item.createdAt, true)) + '</strong></div>' +
         '</div></section>' +
         '<section class="detail-section"><h3>Tags</h3><div class="tag-list">' + (tags.length ? tags.map((tag) => '<span class="pill">' + esc(tag) + '</span>').join("") : '<span class="muted">无</span>') + '</div></section>' +
-        '<section class="detail-section"><h3>Raw JSON</h3><pre>' + esc(jsonText(data)) + '</pre></section>';
+        '<details class="technical-details"><summary>技术详情 · Raw JSON</summary><pre>' + esc(jsonText(data)) + '</pre></details>';
       $("detailJson").textContent = jsonText(data);
       $("deleteMemory").disabled = false;
       $("markUseful").disabled = false; $("markNotUseful").disabled = false; $("mergeMemory").disabled = false; $("archiveMemory").disabled = false;
@@ -1422,23 +1469,28 @@ export function memoryPanelHtml(): string {
       const latest = snapshots[snapshots.length - 1] || {};
       const payload = latest.payload || {};
       const proposals = (detail && detail.proposals || []).slice(0, 3);
-      const questions = detail && detail.evidenceRequests || [];
+      const questions = (detail && detail.evidenceRequests || []).filter((item) => !topicEvidenceClosedStates.has(item.status));
       const runs = detail && detail.executionRuns || [];
-      const blocked = questions.some((item) => item.status !== "resolved") || session.state === "blocked" || session.state === "blocked_by_evidence";
+      const blocked = questions.length > 0 || session.state === "blocked" || session.state === "blocked_by_evidence";
       const stale = session.state === "stale";
       const positions = detail && detail.positions || [];
       const lowConfidencePositions = positions.filter((position) => position.confidence < 0.5);
-      const missingInfoPositions = positions.filter((position) => position.missingInformation && position.missingInformation.length > 0);
+      const missingInformation = [...new Set(positions.flatMap((position) => position.missingInformation || []).map((item) => String(item).trim()).filter(Boolean))];
       const risk = (detail && detail.risks || []).some((r) => r.severity === "high");
       const banner = stale ? '<div class="decision-banner stale">Stale result · 结果已过期，请重新加载</div>' : risk ? '<div class="decision-banner risk">Unresolved high-risk disagreement</div>' : blocked ? '<div class="decision-banner blocked">Missing information</div>' : lowConfidencePositions.length ? '<div class="decision-banner low-confidence">Low confidence</div>' : '<div class="decision-banner">状态：' + esc(session.state || "ready") + '</div>';
-      const proposalHtml = blocked ? '<div class="decision-section"><h4>Missing information</h4><div class="decision-questions">' + questions.slice(0, 3).map((item) => '<label class="decision-question">' + esc(item.question) + '<input data-decision-answer="' + esc(item.id) + '"></label>').join("") + '</div><button data-decision-action="answers" class="primary">Submit answers</button></div>' : '<div class="decision-section"><h4>At most three proposal cards</h4><div id="topicDecisionProposals" class="decision-proposals">' + proposals.map((proposal) => '<article class="decision-proposal ' + (proposal.rank === 1 ? 'recommended' : '') + '"><div class="decision-proposal-head"><strong>' + esc(proposal.title) + '</strong><span class="pill">' + esc(proposal.effect) + '</span></div><p>' + esc(JSON.stringify(proposal.payload || {})) + '</p><button data-decision-action="approve" data-proposal-id="' + esc(proposal.id) + '" data-proposal-version="' + esc(proposal.version) + '">Approve proposal</button></article>').join("") + '</div></div>';
+      const answerQuestions = questions.length ? questions.slice(0, 3).map((item) => ({ key: item.metadata?.key || item.question, question: item.question })) : missingInformation.slice(0, 3).map((question) => ({ key: question, question }));
+      const questionInputs = answerQuestions.map((item) => '<label class="decision-question">' + esc(item.question) + '<input data-decision-answer="' + esc(item.key) + '"></label>').join("");
+      const missingInformationHtml = answerQuestions.length ? '<div class="decision-questions">' + questionInputs + '</div><button data-decision-action="answers" class="primary">Submit answers</button>' : '<div class="muted">No evidence request details are available.</div>';
+      const proposalHtml = blocked ? '<div class="decision-section"><h4>Missing information</h4>' + missingInformationHtml + '</div>' : '<div class="decision-section"><h4>At most three proposal cards</h4><div id="topicDecisionProposals" class="decision-proposals">' + proposals.map((proposal) => '<article class="decision-proposal ' + (proposal.rank === 1 ? 'recommended' : '') + '"><div class="decision-proposal-head"><strong>' + esc(proposal.title) + '</strong><span class="pill">' + esc(proposal.effect) + '</span></div><p>' + esc(JSON.stringify(proposal.payload || {})) + '</p><button data-decision-action="approve" data-proposal-id="' + esc(proposal.id) + '" data-proposal-version="' + esc(proposal.version) + '">Approve proposal</button></article>').join("") + '</div></div>';
       const agents = session.agents || payload.agents || [];
       const roster = '<div class="decision-section"><h4>Agent roster</h4><div class="decision-roster">' + agents.map((agent) => '<div class="decision-agent"><strong>' + esc(agent.id || agent.role || "agent") + '</strong><span class="muted">' + esc(agent.role || "") + '</span></div>').join("") + '</div></div>';
       const execution = runs.length ? '<div class="decision-progress"><strong>Awaiting confirmation</strong>' + runs.map((run) => '<div>' + esc(run.status) + ' <button data-decision-action="resume" data-run-id="' + esc(run.id) + '">Resume execution</button></div>').join("") + '<div id="confirmationCheckpoint">First confirmation required. Second confirmation is required for irreversible effects.</div></div>' : '<div class="decision-progress">Execution starts only after an explicit approval click.</div>';
       $("topicDecisionBody").innerHTML = banner + '<div id="topicDecisionSummary" class="decision-section"><h4>Decision summary</h4><div class="decision-summary">' + esc(payload.summary || session.metadata?.summary || "No summary yet") + '</div></div>' + proposalHtml + roster + execution + '<details class="decision-details"><summary>Debate details</summary><div class="muted">Agent positions and debate rounds remain collapsed until expanded.</div></details>';
       $("topicDecisionDetail").classList.remove("hidden");
       for (const button of $("topicDecisionBody").querySelectorAll("button[data-decision-action]")) button.onclick = () => handleTopicDecisionAction(button);
+      if ((state.topicInbox.projects || []).length) renderTopicInbox(state.topicInbox);
     }
+    const topicEvidenceClosedStates = new Set(["answered", "auto_acquired", "resolved"]);
     const topicDecisionStopStates = new Set(["gathering_evidence", "awaiting_user_input", "blocked_by_evidence", "blocked", "executing", "completed", "stale", "failed", "cancelled"]);
     function renderTopicDecisionProgress(step) {
       $("topicDecisionDetail").classList.remove("hidden");
@@ -1456,18 +1508,22 @@ export function memoryPanelHtml(): string {
     }
     async function runTopicDecisionPipeline(sessionId, namespace, requestPrefix) {
       let detail = await readTopicDecisionDetail(sessionId, namespace);
-      if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
-      if (detail.session.state === "draft") {
+      const shouldStop = (current) => {
+        const hasOpenQuestions = (current.evidenceRequests || []).some((item) => !topicEvidenceClosedStates.has(item.status));
+        return (topicDecisionStopStates.has(current.session.state) && !(current.session.state === "gathering_evidence" && !hasOpenQuestions)) || (current.proposals || []).length > 0;
+      };
+      if (shouldStop(detail)) return detail;
+      if (detail.session.state === "draft" || detail.session.state === "gathering_evidence") {
         renderTopicDecisionProgress("Gathering positions");
         await topicDecisionMutationStep(sessionId, "run", detail.session.version, namespace, requestPrefix + "-run");
         detail = await readTopicDecisionDetail(sessionId, namespace);
-        if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
+        if (shouldStop(detail)) return detail;
       }
       if (detail.session.state === "debating" || (detail.session.state === "ready_for_decision" && !(detail.debateRounds || []).length)) {
         renderTopicDecisionProgress("Running debate");
         await topicDecisionMutationStep(sessionId, "debate", detail.session.version, namespace, requestPrefix + "-debate");
         detail = await readTopicDecisionDetail(sessionId, namespace);
-        if (topicDecisionStopStates.has(detail.session.state) || (detail.proposals || []).length > 0) return detail;
+        if (shouldStop(detail)) return detail;
       }
       renderTopicDecisionProgress("Generating proposals");
       await topicDecisionMutationStep(sessionId, "proposals", detail.session.version, namespace, requestPrefix + "-proposals");
@@ -1507,7 +1563,13 @@ export function memoryPanelHtml(): string {
       const action = button.dataset.decisionAction; const detail = state.topicDecision || {}; const session = detail.session || {}; const namespace = selectedTopicNamespace(); state.topicDecisionInFlight = true; button.disabled = true;
       try {
         if (action === "approve") await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/proposals/" + encodeURIComponent(button.dataset.proposalId || "") + "/approve", { method: "POST", body: JSON.stringify({ namespace, expectedProposalVersion: Number(button.dataset.proposalVersion || 1), adapterId: "memory-console", requestId: "web-decision-" + Date.now() }) });
-        else if (action === "answers") { const answers = [...$("topicDecisionBody").querySelectorAll("input[data-decision-answer]")].map((input) => ({ questionKey: input.dataset.decisionAnswer, answer: input.value, source: "user_supplied_unverified" })); await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/answers", { method: "POST", body: JSON.stringify({ namespace, expectedVersion: session.version, answers, adapterId: "memory-console", requestId: "web-answer-" + Date.now() }) }); }
+        else if (action === "answers") {
+          const answers = [...$("topicDecisionBody").querySelectorAll("input[data-decision-answer]")]
+            .map((input) => ({ questionKey: input.dataset.decisionAnswer, answer: input.value, source: "user_supplied_unverified" }));
+          const answered = await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/answers", { method: "POST", body: JSON.stringify({ namespace, expectedVersion: session.version, answers, adapterId: "memory-console", requestId: "web-answer-" + Date.now() }) });
+          renderTopicDecision(await runTopicDecisionPipeline(session.id, namespace, "web-answer-" + Date.now()));
+          return answered;
+        }
         else if (action === "resume") await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "/executions/" + encodeURIComponent(button.dataset.runId || "") + "/resume", { method: "POST", body: JSON.stringify({ namespace, adapterId: "memory-console", requestId: "web-resume-" + Date.now() }) });
         renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace))));
       } catch (error) { if (error.status === 409) renderTopicDecision(await api("/api/v1/topic-inbox/decisions/" + encodeURIComponent(session.id) + "?namespace=" + encodeURIComponent(JSON.stringify(namespace)))); throw error; } finally { state.topicDecisionInFlight = false; }
@@ -1515,12 +1577,16 @@ export function memoryPanelHtml(): string {
     function confirmExecution(runId, actionId, approved) { return api("/api/v1/topic-inbox/decisions/" + encodeURIComponent((state.topicDecision || {}).session?.id || "") + "/executions/" + encodeURIComponent(runId) + "/actions/" + encodeURIComponent(actionId) + "/confirm", { method: "POST", body: JSON.stringify({ namespace: selectedTopicNamespace(), expectedRunVersion: 1, approved, idempotencyKey: "web-confirm-" + Date.now(), adapterId: "memory-console", requestId: "web-confirm-" + Date.now() }) }); }
     const decisionExecutionRoute = "execution route requires a separate explicit click";
     const confirmationCheckpoint = "First confirmation required. Second confirmation is required for irreversible effects.";
+    function topicDecisionActionLabel(topicId) {
+      const session = (state.topicDecision || {}).session || {};
+      return session.topicId === topicId && (session.state === "blocked" || session.state === "blocked_by_evidence") ? "Review missing evidence" : "Start analysis";
+    }
     function renderTopicCard(topic) {
       const candidates = (topic.candidates || []).filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
       const evidence = state.topicEvidence[topic.id];
       const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
       const evidenceHtml = evidence ? '<div class="topic-evidence">' + (evidence.items || []).map((item) => '<article class="evidence-item"><div class="tag-list"><span class="pill mono">' + esc(item.memoryId) + '</span><span class="pill">' + esc(item.role) + '</span></div><p>' + esc(item.summary || item.rawText || "") + '</p></article>').join("") + '</div>' : '';
-      return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="decision" data-topic-id="' + esc(topic.id) + '" class="primary">Start analysis</button><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
+      return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="decision" data-topic-id="' + esc(topic.id) + '" class="primary">' + topicDecisionActionLabel(topic.id) + '</button><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
     }
     function selectedTopicNamespace() { const namespace = namespaceFromOption($("topicInboxProject").value); if (!namespace) throw new Error("请先选择项目 / Workspace"); return topicNamespace(namespace); }
     async function loadTopicInbox() {
