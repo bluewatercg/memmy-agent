@@ -215,6 +215,108 @@ describe("topic decision real-server smoke", () => {
     fixture.cleanup();
   });
 
+  it("repairs an unknown evidence citation through the positions endpoint", async () => {
+    const fixture = createMemoryServiceFixture();
+    let completionCount = 0;
+    const repairLlm: LlmClient = {
+      ...deterministicLlm,
+      completeJson: async <T extends Record<string, unknown>>() => {
+        completionCount += 1;
+        return {
+          judgment: "support",
+          confidence: 0.8,
+          evidenceIds: completionCount === 1 ? ["topic_evidence_unknown"] : ["smoke-evidence"],
+          facts: [],
+          assumptions: [],
+          missingInformation: [],
+          risks: [],
+          counterarguments: [],
+          suggestedActions: []
+        } as unknown as T;
+      }
+    };
+    const config = {
+      ...DEFAULT_MEMMY_CONFIG,
+      algorithm: {
+        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        topicDecisions: { enabled: true, models: ["smoke-model"] }
+      }
+    };
+    const { service, db } = fixture.createTestService({ config, createLlmClient: () => repairLlm });
+    const repos = new Repositories(db.db);
+    const namespaceId = namespaceIdFromContext(namespace);
+    const at = nowIso();
+    repos.topics.insertTopic({ id: "repair-topic", namespaceId, title: "Repair topic", summary: "Citation repair", status: "active", version: 1, sourceMemoryIds: [], metadata: {}, createdAt: at, updatedAt: at });
+    repos.topics.insertEvidence({ id: "smoke-evidence", topicId: "repair-topic", namespaceId, memoryId: "smoke-memory", role: "support", summary: "Verified evidence", metadata: {}, createdAt: at });
+
+    await openServer(service, async (base) => {
+      const headers = { authorization: "Bearer smoke", "content-type": "application/json" };
+      const start = await fetch(`${base}/api/v1/topic-inbox/topics/repair-topic/decisions`, { method: "POST", headers, body: JSON.stringify({ namespace, adapterId: "smoke", requestId: "repair-start", agents: [{ id: "agent-1", role: "evidence_analyst", model: "smoke-model", reason: "deterministic" }] }) });
+      expect(start.status, await start.clone().text()).toBe(200);
+      const started = await start.json() as { session: { id: string } };
+      const positions = await fetch(`${base}/api/v1/topic-inbox/decisions/${started.session.id}/positions`, { method: "POST", headers, body: JSON.stringify({ namespace, expectedVersion: 1, adapterId: "smoke", requestId: "repair-positions" }) });
+      expect(positions.status, await positions.clone().text()).toBe(200);
+      expect(completionCount).toBe(2);
+
+      const detail = await fetch(`${base}/api/v1/topic-inbox/decisions/${started.session.id}?namespace=${encodeURIComponent(JSON.stringify(namespace))}`, { headers });
+      const body = await detail.json() as { positions: Array<{ stance: string; evidenceIds: string[] }> };
+      expect(body.positions).toEqual([expect.objectContaining({ stance: "support", evidenceIds: ["smoke-evidence"] })]);
+    });
+    db.close();
+    fixture.cleanup();
+  });
+
+  it("accepts legacy unscoped position requests through local authentication", async () => {
+    const fixture = createMemoryServiceFixture();
+    const config = {
+      ...DEFAULT_MEMMY_CONFIG,
+      algorithm: {
+        ...DEFAULT_MEMMY_CONFIG.algorithm,
+        topicDecisions: { enabled: true, models: ["smoke-model"] }
+      }
+    };
+    const { service, db } = fixture.createTestService({
+      config,
+      createLlmClient: () => deterministicLlm
+    });
+    const repos = new Repositories(db.db);
+    const legacyNamespace = { source: "legacy", profileId: "default", userId: "legacy-user" };
+    const at = nowIso();
+    repos.topics.insertTopic({ id: "legacy-topic", namespaceId: namespaceIdFromContext(legacyNamespace), title: "Legacy topic", summary: "Unscoped compatibility", status: "active", version: 1, sourceMemoryIds: [], metadata: {}, createdAt: at, updatedAt: at });
+    const started = service.startTopicDecisionSession({
+      namespace: legacyNamespace,
+      topicId: "legacy-topic",
+      agents: [{ id: "agent-1", role: "evidence_analyst", model: "smoke-model", reason: "deterministic" }]
+    });
+    const server = createMemoryHttpServer({ service, auth: { localServiceToken: "local-token" } });
+
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/${started.session.id}/positions`, {
+        method: "POST",
+        headers: { authorization: "Bearer local-token", "content-type": "application/json" },
+        body: JSON.stringify({ expectedVersion: 1, adapterId: "legacy", requestId: "legacy-positions" })
+      });
+
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(repos.runtime.listAudit().some((entry) => entry.sessionId === started.session.id && entry.action === "topic_decision_position_created")).toBe(true);
+      const auditCountAfterFirstRun = repos.runtime.listAudit().filter((entry) => entry.sessionId === started.session.id && entry.action === "topic_decision_position_created").length;
+      const replay = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/${started.session.id}/positions`, {
+        method: "POST",
+        headers: { authorization: "Bearer local-token", "content-type": "application/json" },
+        body: JSON.stringify({ adapterId: "legacy", requestId: "unscoped-replay", expectedVersion: started.session.version })
+      });
+      expect(replay.status, await replay.clone().text()).toBe(200);
+      expect(repos.runtime.listAudit().filter((entry) => entry.sessionId === started.session.id && entry.action === "topic_decision_position_created")).toHaveLength(auditCountAfterFirstRun);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      db.close();
+      fixture.cleanup();
+    }
+  });
+
   it("advertises decision capabilities and aggregate metrics only when enabled", async () => {
     const fixture = createMemoryServiceFixture();
     const enabledConfig = {

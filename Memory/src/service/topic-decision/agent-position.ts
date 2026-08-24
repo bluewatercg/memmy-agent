@@ -19,7 +19,7 @@ export interface AgentPositionResult {
 }
 
 export interface PositionParseError {
-  code: "INVALID_JSON" | "UNKNOWN_JUDGMENT" | "INVALID_CONFIDENCE" | "UNKNOWN_EVIDENCE_CITATION" | "MISSING_FIELD";
+  code: "INVALID_JSON" | "UNKNOWN_JUDGMENT" | "INVALID_CONFIDENCE" | "UNKNOWN_EVIDENCE_CITATION" | "MISSING_FIELD" | "EMPTY_POSITION";
   message: string;
 }
 
@@ -94,6 +94,10 @@ export function parseAgentPosition(
     return { code: "MISSING_FIELD", message: "assumptions must be an array" };
   }
 
+  if (!assumptions.every(assumption => typeof assumption === "string")) {
+    return { code: "MISSING_FIELD", message: "assumptions must contain only strings" };
+  }
+
   // Parse missingInformation
   const missingInformation = obj.missingInformation;
   if (!Array.isArray(missingInformation)) {
@@ -133,10 +137,30 @@ export function parseAgentPosition(
     return { code: "MISSING_FIELD", message: "counterarguments must be an array" };
   }
 
+  if (!counterarguments.every(counterargument => typeof counterargument === "string")) {
+    return { code: "MISSING_FIELD", message: "counterarguments must contain only strings" };
+  }
+
   const suggestedActions = obj.suggestedActions;
   if (!Array.isArray(suggestedActions)) {
     return { code: "MISSING_FIELD", message: "suggestedActions must be an array" };
   }
+
+  if (!suggestedActions.every(action => typeof action === "string")) {
+    return { code: "MISSING_FIELD", message: "suggestedActions must contain only strings" };
+  }
+
+  const hasMeaningfulContent = evidenceIds.length > 0
+    || facts.some(fact => fact.claim.trim().length > 0)
+    || assumptions.some(assumption => typeof assumption === "string" && assumption.trim().length > 0)
+    || normalizedMissingInformation.some(missing => missing.trim().length > 0)
+    || risks.some(risk => risk.description.trim().length > 0)
+    || counterarguments.some(counterargument => typeof counterargument === "string" && counterargument.trim().length > 0)
+    || suggestedActions.some(action => typeof action === "string" && action.trim().length > 0);
+  if (!hasMeaningfulContent) {
+    return { code: "EMPTY_POSITION", message: "position must contain evidence or substantive analysis" };
+  }
+
   return {
     judgment: judgment as string,
     confidence,
@@ -150,6 +174,16 @@ export function parseAgentPosition(
   };
 }
 
+export class PositionAnalysisError extends Error {
+  constructor(
+    readonly cause: unknown,
+    readonly createdPositions: TopicAgentPositionRecord[]
+  ) {
+    super(cause instanceof Error ? cause.message : "position analysis failed");
+    this.name = "PositionAnalysisError";
+  }
+}
+
 export interface AgentPositionOptions {
   repos: Repositories;
   createLlmClient: (model: string) => LlmClient;
@@ -161,7 +195,7 @@ export class AgentPositionService {
   async runIndependentPositions(
     namespace: RuntimeNamespace,
     sessionId: string
-  ): Promise<void> {
+  ): Promise<TopicAgentPositionRecord[]> {
     const namespaceId = namespaceIdFromContext(namespace)
 
     // Get session
@@ -187,19 +221,21 @@ export class AgentPositionService {
       snapshot.id
     );
 
-    // Build valid evidence IDs set - must be before any callback that uses it
     const validEvidenceIds = new Set(snapshot.payload.evidenceIds);
 
-    // Filter positions: must belong to active snapshot AND have valid evidence citations
+    // Reuse only successful positions from the active snapshot with valid citations.
     const validPositions = allPositions.filter(p => {
-      // Must be from the current active snapshot
       if (p.snapshotId !== snapshot.id) return false;
-
-      // Re-validate all cited evidence IDs against current snapshot
-      for (const evId of p.evidenceIds) {
-        if (!validEvidenceIds.has(evId)) return false;
-      }
-      return true;
+      if (p.stance === "unknown" && (
+        p.rationale.startsWith("error:")
+        || (p.rationale.trim().length === 0
+          && p.evidenceIds.length === 0
+          && p.confidence === 0
+          && (p.missingInformation ?? []).length === 0
+          && (p.risks ?? []).length === 0
+          && (p.assumptions ?? []).length === 0)
+      )) return false;
+      return p.evidenceIds.every(evId => validEvidenceIds.has(evId));
     });
 
     const existingPositionMap = new Map(validPositions.map(p => [p.agentId, p]));
@@ -231,8 +267,18 @@ export class AgentPositionService {
       };
 
       try {
-        const response = await llm.completeJson(messages, options);
-        const parsed = parseAgentPosition(response, validEvidenceIds);
+        let response = await llm.completeJson(messages, options);
+        let parsed = parseAgentPosition(response, validEvidenceIds);
+
+        if ("code" in parsed) {
+          const repairMessages: LlmMessage[] = [
+            ...messages,
+            { role: "assistant", content: JSON.stringify(response) },
+            { role: "user", content: this.buildPositionRepairPrompt(parsed, validEvidenceIds) }
+          ];
+          response = await llm.completeJson(repairMessages, options);
+          parsed = parseAgentPosition(response, validEvidenceIds);
+        }
 
         if ("code" in parsed) {
           throw new Error(`position parse error: ${parsed.code} - ${parsed.message}`);
@@ -247,7 +293,14 @@ export class AgentPositionService {
           round: snapshot.round,
           agentId: agent.id,
           stance: parsed.judgment,
-          rationale: parsed.facts.map(f => f.claim).join("; ") + " " + parsed.assumptions.join("; "),
+          rationale: [
+            ...parsed.facts.map(fact => fact.claim),
+            ...parsed.assumptions,
+            ...parsed.missingInformation,
+            ...parsed.risks.map(risk => risk.description),
+            ...parsed.counterarguments,
+            ...parsed.suggestedActions
+          ].filter(value => value.trim().length > 0).join("; "),
           evidenceIds: parsed.evidenceIds,
           confidence: parsed.confidence,
           missingInformation: parsed.missingInformation,
@@ -256,9 +309,8 @@ export class AgentPositionService {
           createdAt: nowIso()
         };
 
-        return this.options.repos.topicDecisions.insertPosition(position);
+        return this.options.repos.topicDecisions.insertPositionReplacingFailure(position);
       } catch (error) {
-        // Store failed position
         const failedPosition: TopicAgentPositionRecord = {
           id: newId("tdpos"),
           namespaceId,
@@ -272,13 +324,25 @@ export class AgentPositionService {
           createdAt: nowIso()
         };
 
-        // Still store the failed position for traceability
-        this.options.repos.topicDecisions.insertPosition(failedPosition);
+        this.options.repos.topicDecisions.insertPositionReplacingFailure(failedPosition);
         throw error;
       }
     });
 
-    await Promise.all(positionPromises);
+    const settled = await Promise.allSettled(positionPromises);
+    const createdPositions: TopicAgentPositionRecord[] = [];
+    let failure: unknown;
+    for (const result of settled) {
+      if (result.status === "fulfilled") {
+        if (!existingPositionMap.has(result.value.agentId)) createdPositions.push(result.value);
+      } else if (failure === undefined) {
+        failure = result.reason;
+      }
+    }
+    if (failure !== undefined) {
+      throw new PositionAnalysisError(failure, createdPositions);
+    }
+    return createdPositions;
   }
 
   private buildSystemPrompt(role: string): string {
@@ -291,6 +355,16 @@ export class AgentPositionService {
     };
 
     return rolePrompts[role] || rolePrompts.specialist || "You are a specialist.";
+  }
+
+  private buildPositionRepairPrompt(
+    error: PositionParseError,
+    validEvidenceIds: ReadonlySet<string>
+  ): string {
+    const evidenceRule = error.code === "UNKNOWN_EVIDENCE_CITATION"
+      ? ` Evidence citations must be copied exactly from this whitelist: ${JSON.stringify([...validEvidenceIds])}. Use only these values in both evidenceIds and facts[].evidenceIds. If no listed evidence supports a claim, use an empty array. Do not invent, transform, or infer evidence IDs.`
+      : "";
+    return `Your previous JSON failed validation with ${error.code}: ${error.message}. Return the complete JSON object again with every field in the requested type.${evidenceRule}`;
   }
 
   private buildSnapshotPrompt(payload: TopicDecisionSnapshotPayload): string {
@@ -315,11 +389,12 @@ export class AgentPositionService {
     }
 
     prompt += `\n## Response Format\nProvide your analysis as JSON with the following structure:\n`;
+    prompt += `Evidence citations are a strict whitelist. Copy IDs exactly from the Evidence headings above in both evidenceIds and facts[].evidenceIds. If no listed evidence supports a claim, use an empty array. Never invent, transform, or infer an evidence ID.\n`;
     prompt += `{
   "judgment": "support" | "oppose" | "neutral" | "unknown",
   "confidence": 0.0-1.0,
-  "evidenceIds": ["evidence-id-1", ...],
-  "facts": [{"claim": "...", "evidenceIds": [...]}],
+  "evidenceIds": [],
+  "facts": [{"claim": "...", "evidenceIds": []}],
   "assumptions": ["..."],
   "missingInformation": [{"key": "...", "question": "...", "blocking": true/false, "decisionImpact": "..."}],
   "risks": [{"severity": "low"|"medium"|"high", "description": "..."}],

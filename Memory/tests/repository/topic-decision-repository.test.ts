@@ -440,6 +440,39 @@ describe("TopicDecisionRepository", () => {
     }
   });
 
+  it("replaces only an error position in the same immutable slot", () => {
+    const root = mkdtempSync(join(tmpdir(), "topic-decision-recover-pos-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.topicDecisions.createSession(baseSession());
+      repos.topicDecisions.insertSnapshot(baseSnapshot());
+      repos.topicDecisions.insertPosition(basePosition({ stance: "unknown", rationale: "  error: malformed response" }));
+
+      const recovered = repos.topicDecisions.insertPositionReplacingFailure(basePosition({
+        id: "replacement-id",
+        stance: "support",
+        rationale: "recovered",
+        confidence: 0.9
+      }));
+
+      expect(recovered.id).toBe("position-1");
+      expect(repos.topicDecisions.listPositions(nsA, "session-1", "snapshot-1")).toMatchObject([{
+        id: "position-1",
+        stance: "support",
+        rationale: "recovered",
+        confidence: 0.9
+      }]);
+      expect(() => repos.topicDecisions.insertPositionReplacingFailure(basePosition({
+        id: "second-replacement-id",
+        stance: "oppose"
+      }))).toThrow(TopicDecisionImmutablePositionError);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("insertProposal is idempotent on exact replay and conflicts on different content", () => {
     const root = mkdtempSync(join(tmpdir(), "topic-decision-idem-proposal-"));
     try {

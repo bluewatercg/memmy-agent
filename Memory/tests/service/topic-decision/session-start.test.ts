@@ -437,7 +437,7 @@ describe("TopicDecisionService.start", () => {
         missingInformation: [],
         risks: [],
         counterarguments: [],
-        suggestedActions: []
+        suggestedActions: ["continue with available evidence"]
       }) } }]
     }), { status: 200, headers: { "content-type": "application/json" } }));
     vi.stubGlobal("fetch", fetchMock);
@@ -464,6 +464,135 @@ describe("TopicDecisionService.start", () => {
     expect(requests[0]?.enableThinking).toBe(true);
     expect(requests[1]?.enableThinking).toBe(false);
   });
+  it("marks the session failed when independent position analysis throws", async () => {
+    setEnv("MEMMY_EVOLUTION_PROVIDER", "openai_compatible");
+    setEnv("MEMMY_EVOLUTION_ENDPOINT", "https://example.test/v1");
+    setEnv("MEMMY_EVOLUTION_API_KEY", "decision-secret");
+    const { service, repos, namespaceId } = await setupService();
+    repos.topics.insertTopic({
+      id: "topic-failure",
+      namespaceId,
+      title: "Failure topic",
+      summary: "Failure topic summary",
+      status: "active",
+      version: 1,
+      sourceMemoryIds: [],
+      metadata: {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-failure" });
+    const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new Error("upstream unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(service.runIndependentPositions(namespace, result.session.id, result.session.version))
+      .rejects.toThrow("upstream unavailable");
+    expect(fetchMock).toHaveBeenCalled();
+
+    const updated = service.readTopicDecisionSession(namespace, result.session.id);
+    expect(updated.session.state).toBe("failed");
+    expect(updated.session.version).toBe(result.session.version + 1);
+  });
+
+
+  it("audits successful positions when another agent fails", async () => {
+    setEnv("MEMMY_EVOLUTION_PROVIDER", "openai_compatible");
+    setEnv("MEMMY_EVOLUTION_ENDPOINT", "https://example.test/v1");
+    setEnv("MEMMY_EVOLUTION_API_KEY", "decision-secret");
+    const { service, repos, namespaceId } = await setupService();
+    repos.topics.insertTopic({
+      id: "topic-partial-success",
+      namespaceId,
+      title: "Partial success topic",
+      summary: "One agent succeeds while another fails",
+      status: "active",
+      version: 1,
+      sourceMemoryIds: [],
+      metadata: {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const started = service.startTopicDecisionSession({ namespace, topicId: "topic-partial-success" });
+    const validResponse = {
+      judgment: "support",
+      confidence: 0.8,
+      evidenceIds: [],
+      facts: [{ claim: "successful analysis", evidenceIds: [] }],
+      assumptions: [],
+      missingInformation: [],
+      risks: [],
+      counterarguments: [],
+      suggestedActions: []
+    };
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(validResponse) } }] }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      throw new Error("upstream unavailable");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(service.runIndependentPositions(namespace, started.session.id, started.session.version))
+      .rejects.toThrow("upstream unavailable");
+
+    expect(service.readTopicDecisionSession(namespace, started.session.id).session.state).toBe("failed");
+    expect(repos.runtime.listAudit().filter((entry) => entry.sessionId === started.session.id && entry.action === "topic_decision_position_created"))
+      .toHaveLength(1);
+  });
+
+  it("recovers a failed session by rerunning only failed positions", async () => {
+    setEnv("MEMMY_EVOLUTION_PROVIDER", "openai_compatible");
+    setEnv("MEMMY_EVOLUTION_ENDPOINT", "https://example.test/v1");
+    setEnv("MEMMY_EVOLUTION_API_KEY", "decision-secret");
+    const { service, repos, namespaceId } = await setupService();
+    repos.topics.insertTopic({
+      id: "topic-recovery",
+      namespaceId,
+      title: "Recovery topic",
+      summary: "Recover failed agent positions",
+      status: "active",
+      version: 1,
+      sourceMemoryIds: [],
+      metadata: {},
+      createdAt: nowIso(),
+      updatedAt: nowIso()
+    });
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const started = service.startTopicDecisionSession({ namespace, topicId: "topic-recovery" });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockRejectedValue(new Error("upstream unavailable")));
+    await expect(service.runIndependentPositions(namespace, started.session.id, started.session.version))
+      .rejects.toThrow("upstream unavailable");
+
+    const failed = service.readTopicDecisionSession(namespace, started.session.id).session;
+    const recoveredResponse = {
+      judgment: "support",
+      confidence: 0.8,
+      evidenceIds: [],
+      facts: [{ claim: "recovered analysis", evidenceIds: [] }],
+      assumptions: [],
+      missingInformation: [],
+      risks: [],
+      counterarguments: [],
+      suggestedActions: []
+    };
+    const recoveryFetch = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(recoveredResponse) } }]
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    vi.stubGlobal("fetch", recoveryFetch);
+
+    await service.runIndependentPositions(namespace, started.session.id, failed.version);
+
+    const recovered = service.readTopicDecisionSession(namespace, started.session.id);
+
+    expect(recovered.session.state).toBe("gathering_evidence");
+    expect(recovered.session.version).toBe(failed.version + 1);
+    expect(recoveryFetch).toHaveBeenCalledTimes(started.snapshot.payload.roster.length);
+    expect(repos.topicDecisions.listPositions(namespaceId, started.session.id, started.snapshot.id))
+      .toHaveLength(started.snapshot.payload.roster.length);
+  });
+
 });
 
 function tempRoot(): string {

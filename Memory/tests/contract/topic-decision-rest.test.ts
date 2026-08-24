@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryHttpServer, API_ROUTES } from "../../src/index.js";
 import { MemoryRestClient } from "../../src/client/rest-client.js";
 import type { MemoryService } from "../../src/service/memory-service.js";
+import type { TopicDecisionDetail } from "../../src/service/topic-decision/decision-types.js";
 import { createMemoryServiceFixture, configWithMemoryGates } from "../fixtures/memory-service-fixture.js";
 
 const { cleanup, createTestService } = createMemoryServiceFixture();
@@ -565,6 +566,11 @@ describe("Topic Decision REST contract", () => {
       expect(typeof client.readTopicDecision).toBe("function");
       expect(typeof client.patchTopicDecisionAgents).toBe("function");
       expect(typeof client.runTopicDecisionPositions).toBe("function");
+      expect(API_ROUTES).toEqual(expect.arrayContaining([
+        "POST /api/v1/topic-inbox/decisions/:sessionId/positions",
+        "POST /api/v1/topic-inbox/decisions/:sessionId/debate",
+        "POST /api/v1/topic-inbox/decisions/:sessionId/proposals"
+      ]));
       expect(typeof client.runTopicDecisionDebate).toBe("function");
       expect(typeof client.runTopicDecisionProposals).toBe("function");
       expect(typeof client.submitTopicDecisionAnswers).toBe("function");
@@ -597,7 +603,9 @@ describe("Topic Decision REST contract", () => {
         await client.submitTopicDecisionAnswers("session-1", {
           namespace,
           expectedVersion: 1,
-          answers: [{ questionKey: "q1", answer: "a", source: "user_preference" }]
+          answers: [{ questionKey: "q1", answer: "a", source: "user_preference" }],
+          adapterId: "test-adapter",
+          requestId: "test-request"
         });
         expect.fail("expected error");
       } catch (err: any) {
@@ -1009,6 +1017,72 @@ describe("Topic Decision REST contract", () => {
     await client.readTopicDecision("s1", namespace);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("namespace=");
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain(encodeURIComponent(JSON.stringify(namespace)));
+  });
+  it("includes expectedVersion in every versioned decision mutation", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ accepted: true, session: {}, snapshots: [] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new MemoryRestClient({ endpoint: "http://example.test" });
+    const namespace = { source: "codex", profileId: "default", userId: "u", projectId: "p" };
+    await client.runTopicDecision("s1", { namespace, expectedVersion: 2, adapterId: "adapter", requestId: "request" });
+    await client.runTopicDecisionPositions("s1", { namespace, expectedVersion: 2, adapterId: "adapter", requestId: "request" });
+    await client.runTopicDecisionDebate("s1", { namespace, expectedVersion: 2, adapterId: "adapter", requestId: "request" });
+    await client.runTopicDecisionProposals("s1", { namespace, expectedVersion: 2, adapterId: "adapter", requestId: "request" });
+    await client.resumeTopicDecisionExecution("s1", "r1", { namespace, expectedVersion: 2, adapterId: "adapter", requestId: "request" });
+    await client.submitTopicDecisionAnswers("s1", { namespace, expectedVersion: 2, answers: [], adapterId: "adapter", requestId: "request" });
+
+    expect(fetchMock.mock.calls).toHaveLength(6);
+    for (const call of fetchMock.mock.calls) {
+      expect(JSON.parse(String(call[1]?.body))).toMatchObject({ expectedVersion: 2 });
+    }
+  });
+
+  it("exposes allowlisted decision details without execution secrets", async () => {
+    const { db, service } = createTestService({ topicDecisionEnabled: true });
+    const namespace = { source: "codex", profileId: "default", userId: "td-user", projectId: "td-project" };
+    const detail = {
+      session: { id: "s1", namespaceId: "ns", topicId: "t1", inputHash: "h1", state: "executing", version: 4, metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z" },
+      snapshots: [],
+      proposals: [{
+        id: "p1", namespaceId: "ns", sessionId: "s1", round: 1, rank: 1, effect: "external_write", title: "Deploy", status: "approved", version: 3,
+        payload: {
+          benefit: "Ships the fix", risk: "Deployment risk", dependencies: ["CI"], reversible: false, rollbackPlan: "Restore release", verificationPlan: "Run smoke test",
+          evidenceIds: ["e1"], agentContributions: ["risk-agent"], acceptanceCondition: "Health is green", recoveryPoint: "release-42", recommended: true,
+          actions: [{ id: "a1", effect: "external_write", target: "production", input: { apiKey: "proposal-secret" }, dependsOn: [], recoveryPoint: "release-42", acceptanceCondition: "Health is green", permission: "admin", artifact: { token: "artifact-secret" } }],
+          providerPayload: { token: "provider-secret" }, unknownSecret: "unknown-secret"
+        },
+        metadata: {}, createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z"
+      }],
+      executionRuns: [{
+        id: "r1", namespaceId: "ns", sessionId: "s1", proposalId: "p1", status: "awaiting_confirmation", version: 5,
+        result: {
+          status: "awaiting_confirmation",
+          actions: [{ id: "a1", status: "awaiting_confirmation", confirmationRequired: true, output: { token: "output-secret" }, error: { code: "WAIT", message: "Approval required", providerPayload: { token: "error-secret" } }, confirmationEvents: [{ actor: "secret-actor" }] }],
+          pendingAction: { id: "a1", effect: "external_write", target: "production", input: { token: "input-secret" }, rollbackMetadata: { token: "rollback-secret", recoveryPoint: "release-42" }, confirmationOrdinal: 1, lastIdempotencyKey: "idempotency-secret" }
+        },
+        createdAt: "2026-08-12T00:00:00Z", updatedAt: "2026-08-12T00:00:00Z"
+      }]
+    } satisfies TopicDecisionDetail;
+    service.readTopicDecisionSession = () => detail;
+    const server = createMemoryHttpServer({ service, auth: { scopedApiKeys: { reader: { namespace, scopes: ["panel:read"] } } } });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const query = encodeURIComponent(JSON.stringify(namespace));
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/topic-inbox/decisions/s1?namespace=${query}`, { headers: { authorization: "Bearer reader" } });
+      expect(response.status).toBe(200);
+      const body: unknown = await response.json();
+      expect(body).toMatchObject({
+        proposals: [{ payload: {
+          benefit: "Ships the fix", risk: "Deployment risk", dependencies: ["CI"], reversible: false, rollbackPlan: "Restore release", verificationPlan: "Run smoke test",
+          evidenceIds: ["e1"], agentContributions: ["risk-agent"], acceptanceCondition: "Health is green", recoveryPoint: "release-42", recommended: true,
+          actions: [{ id: "a1", effect: "external_write", target: "production", dependsOn: [], recoveryPoint: "release-42", acceptanceCondition: "Health is green" }]
+        } }],
+        executionRuns: [{ pendingConfirmation: { actionId: "a1", effect: "external_write", target: "production", recoveryPoint: "release-42", confirmationOrdinal: 1 }, result: { actions: [{ id: "a1", status: "awaiting_confirmation", confirmationRequired: true, output: {}, error: { code: "WAIT", message: "Approval required" } }] } }]
+      });
+      expect(JSON.stringify(body)).not.toMatch(/proposal-secret|artifact-secret|provider-secret|unknown-secret|output-secret|error-secret|secret-actor|input-secret|rollback-secret|idempotency-secret/);
+    });
+    db.close();
   });
 
   it("sanitizes nested execution result fields", async () => {

@@ -75,7 +75,10 @@ export class DecisionabilityService {
       namespaceId,
       sessionId,
       snapshot.id
-    );
+    ).filter(position => !(
+      position.stance === "unknown"
+      && position.rationale.trimStart().startsWith("error:")
+    ));
 
     if (positions.length === 0) {
       return {

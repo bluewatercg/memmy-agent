@@ -634,4 +634,26 @@ describe("auto-acquired answers rebuild snapshot", () => {
     // Questions should be resolved or removed after auto-acquisition
     expect(questionCountAfter).toBeLessThanOrEqual(questionCountBefore);
   });
+  it("ignores failed positions when checking decisionability", async () => {
+    const { service, repos, namespaceId } = await setupService();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+
+    await repos.topicDecisions.insertPosition({
+      id: "failed-position",
+      namespaceId,
+      sessionId: result.session.id,
+      snapshotId: result.snapshot.id,
+      round: 0,
+      agentId: "agent-domain_analyst",
+      stance: "unknown",
+      rationale: "error: upstream unavailable",
+      evidenceIds: [],
+      createdAt: nowIso()
+    });
+
+    const decisionability = await service.checkDecisionability(namespace, result.session.id);
+    expect(decisionability.status).toBe("gathering_evidence");
+    expect(decisionability.openQuestions).toEqual([]);
+  });
 });

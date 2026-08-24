@@ -27,6 +27,7 @@ import type {
   SessionCheckpointRequest,
   SessionOpenRequest,
   TopicAgentSpec,
+  TopicActionProposalRecord,
   TopicExecutionRunRecord,
   TurnCompleteRequest,
   TurnStartRequest
@@ -57,6 +58,9 @@ const TOPIC_DECISION_API_ROUTES = [
   "GET /api/v1/topic-inbox/decisions/:sessionId",
   "PATCH /api/v1/topic-inbox/decisions/:sessionId/agents",
   "POST /api/v1/topic-inbox/decisions/:sessionId/run",
+  "POST /api/v1/topic-inbox/decisions/:sessionId/positions",
+  "POST /api/v1/topic-inbox/decisions/:sessionId/debate",
+  "POST /api/v1/topic-inbox/decisions/:sessionId/proposals",
   "POST /api/v1/topic-inbox/decisions/:sessionId/answers",
   "POST /api/v1/topic-inbox/decisions/:sessionId/proposals/:proposalId/approve",
   "POST /api/v1/topic-inbox/decisions/:sessionId/executions/:runId/resume",
@@ -1161,7 +1165,7 @@ async function routeRequest(
     const sessionId = decodeMatchSegment(topicDecisionRead, 1);
     try {
       const result = service.readTopicDecisionSession(namespace, sessionId);
-      return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot), positions: result.positions ?? [], debateRounds: result.debateRounds ?? [], evidenceRequests: result.evidenceRequests ?? [], proposals: (result.proposals ?? []).map((proposal) => ({ ...proposal, payload: undefined })), executionRuns: (result.executionRuns ?? []).map(publicTopicExecutionRun) };
+      return { session: publicTopicDecisionSession(result.session), snapshots: result.snapshots.map(publicTopicDecisionSnapshot), positions: result.positions ?? [], debateRounds: result.debateRounds ?? [], evidenceRequests: result.evidenceRequests ?? [], proposals: (result.proposals ?? []).map(publicTopicActionProposal), executionRuns: (result.executionRuns ?? []).map(publicTopicExecutionRun) };
     } catch (error) {
       throw mapTopicDecisionError(error);
     }
@@ -2610,6 +2614,49 @@ function publicTopicDecisionSnapshot(snapshot: Record<string, unknown>): Record<
   return { ...snapshot, payload: payloadRest };
 }
 
+function publicTopicActionProposal(proposal: TopicActionProposalRecord): Record<string, unknown> {
+  const payload = isRecord(proposal.payload) ? proposal.payload : {};
+  const actions = Array.isArray(payload.actions) ? payload.actions.flatMap((action) => {
+    if (!isRecord(action)) return [];
+    return [{
+      id: action.id,
+      effect: action.effect,
+      target: action.target,
+      dependsOn: action.dependsOn,
+      recoveryPoint: action.recoveryPoint,
+      acceptanceCondition: action.acceptanceCondition
+    }];
+  }) : undefined;
+  return {
+    id: proposal.id,
+    namespaceId: proposal.namespaceId,
+    sessionId: proposal.sessionId,
+    round: proposal.round,
+    rank: proposal.rank,
+    effect: proposal.effect,
+    title: proposal.title,
+    status: proposal.status,
+    version: proposal.version,
+    createdAt: proposal.createdAt,
+    updatedAt: proposal.updatedAt,
+    payload: {
+      benefit: payload.benefit,
+      risk: payload.risk,
+      dependencies: payload.dependencies,
+      reversible: payload.reversible,
+      rollbackPlan: payload.rollbackPlan,
+      verificationPlan: payload.verificationPlan,
+      evidenceIds: payload.evidenceIds,
+      agentContributions: payload.agentContributions,
+      acceptanceCondition: payload.acceptanceCondition,
+      recoveryPoint: payload.recoveryPoint,
+      recommended: payload.recommended,
+      actions
+    }
+  };
+}
+
+
 function publicTopicExecutionRun(run: TopicExecutionRunRecord): Record<string, unknown> {
   const result = isRecord(run.result) ? run.result : {};
   const actions = Array.isArray(result.actions) ? result.actions.map((action) => {
@@ -2617,7 +2664,16 @@ function publicTopicExecutionRun(run: TopicExecutionRunRecord): Record<string, u
     const error = isRecord(action.error) ? { code: typeof action.error.code === "string" ? action.error.code : undefined, message: typeof action.error.message === "string" ? action.error.message : undefined } : undefined;
     return { id: action.id, status: action.status, confirmationRequired: action.confirmationRequired, output: {}, error };
   }) : undefined;
-  return { id: run.id, namespaceId: run.namespaceId, sessionId: run.sessionId, proposalId: run.proposalId, status: run.status, version: run.version, createdAt: run.createdAt, updatedAt: run.updatedAt, result: actions ? { status: result.status, actions } : { status: result.status } };
+  const pendingAction = isRecord(result.pendingAction) ? result.pendingAction : undefined;
+  const rollbackMetadata = pendingAction && isRecord(pendingAction.rollbackMetadata) ? pendingAction.rollbackMetadata : undefined;
+  const pendingConfirmation = pendingAction ? {
+    actionId: pendingAction.id,
+    effect: pendingAction.effect,
+    target: pendingAction.target,
+    recoveryPoint: rollbackMetadata?.recoveryPoint,
+    confirmationOrdinal: pendingAction.confirmationOrdinal
+  } : undefined;
+  return { id: run.id, namespaceId: run.namespaceId, sessionId: run.sessionId, proposalId: run.proposalId, status: run.status, version: run.version, createdAt: run.createdAt, updatedAt: run.updatedAt, result: actions ? { status: result.status, actions } : { status: result.status }, pendingConfirmation };
 }
 
 function mapTopicDecisionError(error: unknown): Error {

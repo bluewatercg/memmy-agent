@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryDb, MemoryService, Repositories } from "../../../src/index.js";
 import { loadMemmyConfig } from "../../../src/config/index.js";
 import type { RuntimeNamespace } from "../../../src/types.js";
-import { AgentPositionService } from "../../../src/service/topic-decision/agent-position.js";
+import { AgentPositionService, parseAgentPosition } from "../../../src/service/topic-decision/agent-position.js";
 import { nowIso } from "../../../src/utils/time.js";
 import { stableHash } from "../../../src/utils/id.js";
 import { namespaceIdFromContext } from "../../../src/service/namespace/namespace-scope.js";
@@ -106,6 +106,31 @@ describe("position reuse validation", () => {
     const parseResult = parseAgentPosition(validPosition, currentValidEvidenceIds);
     expect(parseResult).not.toHaveProperty("code");
   });
+});
+
+describe("position analysis field validation", () => {
+  it.each(["assumptions", "counterarguments", "suggestedActions"] as const)(
+    "rejects a non-string %s item with a structured parse error",
+    (field) => {
+      const raw = {
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: [],
+        facts: [],
+        assumptions: ["substantive analysis"],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: [],
+        [field]: [42]
+      };
+
+      expect(parseAgentPosition(raw, new Set())).toEqual({
+        code: "MISSING_FIELD",
+        message: `${field} must contain only strings`
+      });
+    }
+  );
 });
 
 // Production-path tests for AgentPositionService.runIndependentPositions
@@ -372,7 +397,212 @@ describe("runIndependentPositions", () => {
     // LLM SHOULD be called because the cached position has invalid evidence
     expect(mockLlmClient).toHaveBeenCalled();
   });
+  it("retries and replaces a failed position from the active snapshot", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const activeSnapshot = repos.topicDecisions.getSnapshotsForSession(namespaceId, result.session.id).at(-1)!;
+
+    await repos.topicDecisions.insertPosition({
+      id: "pos-failed",
+      namespaceId,
+      sessionId: result.session.id,
+      snapshotId: activeSnapshot.id,
+      round: activeSnapshot.round,
+      agentId: "agent-evidence_analyst",
+      stance: "unknown",
+      rationale: "error: position parse error: MISSING_FIELD - suggestedActions must be an array",
+      evidenceIds: [],
+      createdAt: nowIso()
+    });
+
+    const mockLlmClient = vi.fn().mockImplementation(() => ({
+      completeJson: async () => ({
+        judgment: "support",
+        confidence: 0.8,
+        evidenceIds: activeSnapshot.payload.evidenceIds,
+        facts: [{ claim: "recovered", evidenceIds: activeSnapshot.payload.evidenceIds }],
+        assumptions: [],
+        missingInformation: [],
+        risks: [],
+        counterarguments: [],
+        suggestedActions: []
+      })
+    }));
+    const agentPosService = new AgentPositionService({ repos, createLlmClient: mockLlmClient });
+
+    await agentPosService.runIndependentPositions(namespace, result.session.id);
+
+    expect(mockLlmClient).toHaveBeenCalledTimes(activeSnapshot.payload.roster.length);
+    const positions = repos.topicDecisions.listPositions(namespaceId, result.session.id, activeSnapshot.id);
+    expect(positions).toHaveLength(activeSnapshot.payload.roster.length);
+    expect(positions.find(position => position.agentId === "agent-evidence_analyst")).toMatchObject({
+      stance: "support",
+      rationale: "recovered"
+    });
+  });
+  it("retries and replaces a semantically empty unknown position", async () => {
+    const { service, repos, namespaceId, AgentPositionService } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const activeSnapshot = repos.topicDecisions.getSnapshotsForSession(namespaceId, result.session.id).at(-1)!;
+
+    await repos.topicDecisions.insertPosition({
+      id: "pos-empty",
+      namespaceId,
+      sessionId: result.session.id,
+      snapshotId: activeSnapshot.id,
+      round: activeSnapshot.round,
+      agentId: "agent-evidence_analyst",
+      stance: "unknown",
+      rationale: " ",
+      evidenceIds: [],
+      confidence: 0,
+      createdAt: nowIso()
+    });
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: () => ({
+        completeJson: async () => ({
+          judgment: "support",
+          confidence: 0.8,
+          evidenceIds: ["ev-1"],
+          facts: [{ claim: "recovered", evidenceIds: ["ev-1"] }],
+          assumptions: [],
+          missingInformation: [],
+          risks: [],
+          counterarguments: [],
+          suggestedActions: []
+        })
+      }) as never
+    });
+
+    await agentPosService.runIndependentPositions(namespace, result.session.id);
+
+    expect(repos.topicDecisions.listPositions(namespaceId, result.session.id, activeSnapshot.id)
+      .find(position => position.agentId === "agent-evidence_analyst"))
+      .toMatchObject({ stance: "support", rationale: "recovered" });
+  });
+
 });
+
+  it("retries an unknown evidence citation once with the snapshot whitelist", async () => {
+    const { service, repos, namespaceId } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const completions: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: () => {
+        let attempts = 0;
+        return {
+          completeJson: async (messages: Array<{ role: string; content: string }>) => {
+            completions.push({ messages });
+            attempts += 1;
+            return {
+              judgment: "support",
+              confidence: 0.8,
+              evidenceIds: attempts === 1 ? ["topic_evidence_unknown"] : ["ev-1"],
+              facts: [],
+              assumptions: [],
+              missingInformation: [],
+              risks: [],
+              counterarguments: [],
+              suggestedActions: []
+            };
+          }
+        } as never;
+      }
+    });
+
+    await agentPosService.runIndependentPositions(namespace, result.session.id);
+
+    expect(completions).toHaveLength(result.snapshot.payload.roster.length * 2);
+    const repairPrompt = completions.flatMap(completion => completion.messages).find(message => message.content.includes("UNKNOWN_EVIDENCE_CITATION"))?.content ?? "";
+    expect(repairPrompt).toContain("UNKNOWN_EVIDENCE_CITATION");
+    expect(repairPrompt).toContain('"ev-1"');
+    const positions = repos.topicDecisions.listPositions(namespaceId, result.session.id, result.snapshot.id);
+    expect(positions).toHaveLength(result.snapshot.payload.roster.length);
+    expect(positions.every(position => position.evidenceIds.every(id => id === "ev-1"))).toBe(true);
+  });
+
+  it("retries a malformed position once with the parser diagnostic", async () => {
+    const { service, repos, namespaceId } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    const completions: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: () => {
+        let attempts = 0;
+        return {
+          completeJson: async (messages: Array<{ role: string; content: string }>) => {
+            completions.push({ messages });
+            attempts += 1;
+            return {
+              judgment: "support",
+              confidence: 0.8,
+              evidenceIds: ["ev-1"],
+              facts: [],
+              assumptions: [],
+              missingInformation: [],
+              risks: [],
+              counterarguments: [],
+              suggestedActions: attempts === 1 ? "verify the release gate" : ["verify the release gate"]
+            };
+          }
+        } as never;
+      }
+    });
+
+    await agentPosService.runIndependentPositions(namespace, result.session.id);
+
+    expect(completions).toHaveLength(result.snapshot.payload.roster.length * 2);
+    const repairPrompt = completions.flatMap(completion => completion.messages).find(message => message.content.includes("suggestedActions must be an array"))?.content ?? "";
+    expect(repairPrompt).toContain("MISSING_FIELD");
+    expect(repairPrompt).toContain("suggestedActions must be an array");
+    const positions = repos.topicDecisions.listPositions(namespaceId, result.session.id, result.snapshot.id);
+    expect(positions).toHaveLength(result.snapshot.payload.roster.length);
+    expect(positions.every(position => position.stance === "support")).toBe(true);
+  });
+
+  it("stops after one citation repair attempt when the citation remains invalid", async () => {
+    const { service, repos, namespaceId } = await setupServiceWithAgentPosition();
+    const namespace: RuntimeNamespace = { source: "test", profileId: "test-profile", userId: "user-1" };
+    const result = service.startTopicDecisionSession({ namespace, topicId: "topic-1" });
+    let completionCount = 0;
+
+    const agentPosService = new AgentPositionService({
+      repos,
+      createLlmClient: () => ({
+        completeJson: async () => {
+          completionCount += 1;
+          return {
+            judgment: "support",
+            confidence: 0.8,
+            evidenceIds: ["topic_evidence_unknown"],
+            facts: [],
+            assumptions: [],
+            missingInformation: [],
+            risks: [],
+            counterarguments: [],
+            suggestedActions: []
+          };
+        }
+      }) as never
+    });
+
+    await expect(agentPosService.runIndependentPositions(namespace, result.session.id))
+      .rejects.toThrow("UNKNOWN_EVIDENCE_CITATION");
+
+    expect(completionCount).toBe(result.snapshot.payload.roster.length * 2);
+    const positions = repos.topicDecisions.listPositions(namespaceId, result.session.id, result.snapshot.id);
+    expect(positions).toHaveLength(result.snapshot.payload.roster.length);
+    expect(positions.every(position => position.stance === "unknown" && position.evidenceIds.length === 0)).toBe(true);
+  });
 
 // Tests that verify the position parsing logic without needing actual LLM calls
 describe("parseAgentPosition", () => {
@@ -466,6 +696,24 @@ describe("parseAgentPosition", () => {
     if (!("code" in result)) {
       expect(result.judgment).toBe("unknown");
     }
+  });
+
+  it("rejects a semantically empty position", async () => {
+    const { parseAgentPosition } = await import("../../../src/service/topic-decision/agent-position.js");
+
+    const result = parseAgentPosition({
+      judgment: "unknown",
+      confidence: 0,
+      evidenceIds: [],
+      facts: [],
+      assumptions: [],
+      missingInformation: [],
+      risks: [],
+      counterarguments: [],
+      suggestedActions: []
+    }, new Set());
+
+    expect(result).toHaveProperty("code", "EMPTY_POSITION");
   });
 
   it("validates risk severity values", async () => {

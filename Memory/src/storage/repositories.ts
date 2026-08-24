@@ -4251,6 +4251,32 @@ export class TopicDecisionRepository {
     return position;
   }
 
+  insertPositionReplacingFailure(position: TopicAgentPositionRecord): TopicAgentPositionRecord {
+    return this.db.transaction(() => {
+      const existingRow = this.db.prepare(`SELECT * FROM project_topic_agent_positions WHERE namespace_id = ? AND session_id = ? AND snapshot_id = ? AND round = ? AND agent_id = ?`)
+        .get(position.namespaceId, position.sessionId, position.snapshotId, position.round, position.agentId) as TopicAgentPositionSqlRow | undefined;
+      if (!existingRow) return this.insertPosition(position);
+
+      const existing = topicAgentPositionFromSql(existingRow);
+      const isFailedPosition = existing.stance === "unknown" && (
+        existing.rationale.trimStart().startsWith("error:")
+        || (existing.rationale.trim().length === 0
+          && existing.evidenceIds.length === 0
+          && existing.confidence === 0
+          && (existing.missingInformation ?? []).length === 0
+          && (existing.risks ?? []).length === 0
+          && (existing.assumptions ?? []).length === 0)
+      );
+      if (!isFailedPosition) {
+        throw new TopicDecisionImmutablePositionError(position.sessionId, position.snapshotId, position.round, position.agentId);
+      }
+
+      this.db.prepare(`UPDATE project_topic_agent_positions SET stance = ?, rationale = ?, evidence_ids_json = ?, confidence = ?, missing_information_json = ?, risks_json = ?, assumptions_json = ?, created_at = ? WHERE id = ?`)
+        .run(position.stance, position.rationale, toJson(position.evidenceIds), position.confidence ?? null, toJson(position.missingInformation ?? []), toJson(position.risks ?? []), toJson(position.assumptions ?? []), position.createdAt, existing.id);
+      return { ...position, id: existing.id };
+    })();
+  }
+
   listPositions(namespaceId: string, sessionId: string, snapshotId: string): TopicAgentPositionRecord[] {
     return (this.db.prepare(`SELECT * FROM project_topic_agent_positions WHERE namespace_id = ? AND session_id = ? AND snapshot_id = ? ORDER BY round, agent_id`)
       .all(namespaceId, sessionId, snapshotId) as TopicAgentPositionSqlRow[]).map(topicAgentPositionFromSql);
