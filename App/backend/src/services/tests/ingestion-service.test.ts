@@ -119,6 +119,50 @@ describe("ingestion service", () => {
     }));
   });
 
+  it("scopes imported L1 memories to the conversation workspace path", async () => {
+    const added: Array<Record<string, unknown>> = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input as Record<string, unknown>);
+        return {
+          id: `memory-${added.length}`,
+          kind: "trace",
+          memoryLayer: "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+
+    const message = createMessage("conv-a", 1);
+    await service.ingest(
+      toAsyncIterable([
+        { ...message, workspacePath: "/mnt/d/Project/vocat" },
+        { ...createMessage("conv-a", 2), workspacePath: "/mnt/d/Project/vocat" }
+      ]),
+      { sourceId: "codex" }
+    );
+
+    expect(added[0]).toEqual(expect.objectContaining({
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        workspacePath: "/mnt/d/Project/vocat"
+      }
+    }));
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-b", 3), createMessage("conv-b", 4)]),
+      { sourceId: "codex" }
+    );
+
+    expect(added[1].namespace).toBeUndefined();
+  });
+
   it("uses the user-entered Agent name as the L1 memory source when supplied", async () => {
     const added: Array<Record<string, unknown>> = [];
     const service = createService({

@@ -45,6 +45,20 @@ export const JobTypeSchema = z.enum([
 export type JobType = z.infer<typeof JobTypeSchema>;
 
 const NonEmptyStringSchema = z.string().min(1);
+
+/** Schema for a runtime namespace. */
+export const RuntimeNamespaceSchema = z.object({
+  source: NonEmptyStringSchema,
+  profileId: NonEmptyStringSchema,
+  profileLabel: NonEmptyStringSchema.optional(),
+  projectId: NonEmptyStringSchema.optional(),
+  workspaceId: NonEmptyStringSchema.optional(),
+  workspacePath: NonEmptyStringSchema.optional(),
+  sessionKey: NonEmptyStringSchema.optional(),
+  userId: NonEmptyStringSchema.optional(),
+  tenantId: NonEmptyStringSchema.optional()
+}).strict();
+export type RuntimeNamespace = z.infer<typeof RuntimeNamespaceSchema>;
 const UnknownRecordSchema = z.record(z.string(), z.unknown());
 
 export const InjectedContextSectionSchema = z.object({
@@ -399,6 +413,7 @@ export type SearchOutput = z.infer<typeof SearchOutputSchema>;
 
 /** Definition for add memory input. */
 export const AddMemoryInputSchema = RuntimeRequestFieldsSchema.extend({
+  namespace: RuntimeNamespaceSchema.optional(),
   content: NonEmptyStringSchema,
   layer: MemoryLayerSchema.optional(),
   title: z.string().optional(),
@@ -760,19 +775,6 @@ export const ProjectContextPackOutputSchema = z.object({
 });
 export type ProjectContextPackOutput = z.infer<typeof ProjectContextPackOutputSchema>;
 /** Schema for a runtime namespace used by project context operations. */
-export const RuntimeNamespaceSchema = z.object({
-  source: NonEmptyStringSchema,
-  profileId: NonEmptyStringSchema,
-  profileLabel: NonEmptyStringSchema.optional(),
-  projectId: NonEmptyStringSchema.optional(),
-  workspaceId: NonEmptyStringSchema.optional(),
-  workspacePath: NonEmptyStringSchema.optional(),
-  sessionKey: NonEmptyStringSchema.optional(),
-  userId: NonEmptyStringSchema.optional(),
-  tenantId: NonEmptyStringSchema.optional()
-}).strict();
-export type RuntimeNamespace = z.infer<typeof RuntimeNamespaceSchema>;
-
 /** Schema for project-context mutation provenance. */
 export const ProjectContextProvenanceSchema = z.object({
   sourceAgent: NonEmptyStringSchema,

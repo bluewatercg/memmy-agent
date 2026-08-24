@@ -143,7 +143,7 @@ export class ImportJobProcessor {
       conversationId: session?.conversationId,
       sessionId: session?.id ?? request.sessionId,
       agentId: session?.source ?? request.source?.trim() ?? context.namespace.source,
-      appId: session?.workspaceId,
+      appId: session?.workspaceId ?? context.namespace.workspaceId,
       projectId: session?.projectId ?? context.namespace.projectId,
       profileId: session?.profileId ?? context.namespace.profileId,
       layer, kind, memoryType: layer === "Skill" ? "SkillMemory" : "LongTermMemory",

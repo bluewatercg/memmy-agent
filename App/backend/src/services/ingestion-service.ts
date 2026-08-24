@@ -175,6 +175,7 @@ async function processConversation(
       continue;
     }
 
+    const workspacePath = firstWorkspacePath(turn.messages);
     const request = {
       requestId: createTurnRequestId(ctx.sourceId, turn),
       adapterId: `agent-source:${ctx.sourceId}`,
@@ -185,6 +186,7 @@ async function processConversation(
       source: memorySource,
       turnId: createStableTurnId(ctx.sourceId, turn),
       createdAt: turnCreatedAt(turn),
+      ...(workspacePath ? { namespace: { source: memorySource, profileId: "default", workspacePath } } : {}),
       ...(ctx.deferProcessing ? { deferProcessing: true } : {})
     } satisfies Parameters<MemoryClient["addMemory"]>[0];
     const bodyBytes = Buffer.byteLength(JSON.stringify(request));
@@ -360,6 +362,10 @@ function titleForTurn(sourceId: string, turn: ImportedTurn): string {
     .find((line): line is string => Boolean(line));
 
   return clipTitle(userLine ?? `${sourceId} turn ${turn.conversationId} #${turn.turnIndex + 1}`);
+}
+
+function firstWorkspacePath(messages: readonly ConversationMessage[]): string | null {
+  return messages.find((message) => message.workspacePath)?.workspacePath ?? null;
 }
 
 function firstReadableLine(value: string): string | undefined {
