@@ -135,6 +135,10 @@ services:
       retries: 10
       start_period: 20s
     cap_drop: [ALL]
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
     security_opt: [no-new-privileges:true]
 
   web:
