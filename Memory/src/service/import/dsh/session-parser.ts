@@ -53,6 +53,7 @@ export interface ParsedDshSession {
 
 export interface ParseOptions {
   maxEvents?: number; // safety cap; default 1_000_000
+  initialTurns?: DshTurn[];
 }
 
 export function parseDshSessionLines(
@@ -71,7 +72,14 @@ export function parseDshSessionLines(
   const header = first as unknown as DshSessionHeader;
 
   const turns = new Map<number, DshTurn>();
-  let maxSeq = 0;
+  for (const initial of options.initialTurns ?? []) {
+    turns.set(initial.turn, {
+      ...initial,
+      userMessages: [...initial.userMessages],
+      toolCalls: initial.toolCalls.map((call) => ({ ...call })),
+    });
+  }
+  let maxSeq = [...turns.values()].reduce((max, turn) => Math.max(max, turn.endSeq ?? turn.startSeq), 0);
   let skippedCorrupt = 0;
 
   for (let i = 1; i < lines.length; i += 1) {

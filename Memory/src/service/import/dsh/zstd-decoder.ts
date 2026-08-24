@@ -34,39 +34,40 @@ export function findZstdFrameRanges(buffer: Buffer): ZstdFrameRange[] {
   return frames;
 }
 
-/** Decompress every complete frame; a trailing incomplete frame is skipped. */
+/** Decompress complete frames, optionally starting at a previously committed byte offset. */
 export function decompressZstdFrames(
   buffer: Buffer,
-  options: { maxBytes?: number } = {},
-): { lines: string[]; completeFrames: number; skippedTail: boolean } {
+  options: { maxBytes?: number; offset?: number } = {},
+): { lines: string[]; completeFrames: number; lastCompleteFrameEnd: number; skippedTail: boolean } {
   const maxBytes = options.maxBytes ?? MAX_FRAME_BYTES;
+  const offset = options.offset ?? 0;
   const ranges = findZstdFrameRanges(buffer);
   const all: string[] = [];
   let complete = 0;
   let skippedTail = false;
+  let lastCompleteFrameEnd = offset;
 
   for (let i = 0; i < ranges.length; i += 1) {
     const range = ranges[i];
-    if (!range) continue;
-    const { start, end } = range;
-    const frame = buffer.subarray(start, end);
-    if (frame.length === 0) continue;
+    if (!range || range.start < offset) continue;
+    const frame = buffer.subarray(range.start, range.end);
     try {
-      if (frame.length > maxBytes) {
-        throw new Error("zstd frame exceeds maxBytes");
-      }
+      if (frame.length > maxBytes) throw new Error("zstd frame exceeds maxBytes");
       const out = zstdDecompressSync(frame);
       all.push(out.toString("utf8"));
       complete += 1;
+      lastCompleteFrameEnd = range.end;
     } catch {
-      // Incomplete/corrupt tail frame: stop reading further frames.
-      skippedTail = i < ranges.length - 1 ? true : skippedTail;
+      skippedTail = i === ranges.length - 1 || i < ranges.length - 1;
       break;
     }
   }
-
-  const lines = all.join("").split("\n").filter((line) => line.trim().length > 0);
-  return { lines, completeFrames: complete, skippedTail };
+  return {
+    lines: all.join("").split("\n").filter((line) => line.trim().length > 0),
+    completeFrames: complete,
+    lastCompleteFrameEnd,
+    skippedTail,
+  };
 }
 
 export function isZstdBuffer(buffer: Buffer): boolean {

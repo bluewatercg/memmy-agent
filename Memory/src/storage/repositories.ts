@@ -1417,6 +1417,18 @@ export class RuntimeRepository {
     return result.changes > 0;
   }
 
+  /** Replace a KV value only when its persisted JSON still matches the observed value. */
+  setKvIfValue(key: string, expectedValue: unknown, value: unknown, at = nowIso()): boolean {
+    const result = this.db
+      .prepare(
+        `UPDATE runtime_kv
+         SET value_json = ?, updated_at = ?
+         WHERE key = ? AND value_json = ?`
+      )
+      .run(toJson(value), at, key, toJson(expectedValue));
+    return result.changes > 0;
+  }
+
   /** List all runtime_kv keys (for reaping scoped prefixes). */
   listKvKeys(prefix?: string): string[] {
     const rows = prefix

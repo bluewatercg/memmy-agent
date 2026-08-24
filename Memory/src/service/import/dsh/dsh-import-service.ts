@@ -1,21 +1,30 @@
 // DSH source adapter: discover DSH session artifacts, parse them, and import
 // user turns / tool calls into Memmy memories with idempotent keys.
 // See design §8 Phase 1.
+import { open } from "node:fs/promises";
 import type { Repositories } from "../../../storage/repositories.js";
 import type { MemoryAddRequest } from "../../../types.js";
 import { redactSensitiveText } from "../../../utils/sensitive-data.js";
 import { nowIso } from "../../../utils/time.js";
-import { discoverDshSessions, readDshSessionFile, dshSessionsRoot, type DshSessionFile } from "./session-discovery.js";
+import { discoverDshSessions, dshSessionsRoot, type DshSessionFile } from "./session-discovery.js";
 import { DshImportState } from "./import-state.js";
-import type { DshTurn } from "./session-parser.js";
+import { decompressZstdFrames } from "./zstd-decoder.js";
+import { parseDshSessionLines, type DshTurn } from "./session-parser.js";
 
 export const DSH_SOURCE = "deepseek_harness";
 export const DSH_ADAPTER_ID = "agent-source:deepseek_harness";
+
+export const DSH_DEFAULT_MAX_SESSIONS_PER_RUN = 100;
+export const DSH_DEFAULT_MAX_TURNS_PER_SESSION = 100;
+export const DSH_DEFAULT_MAX_SESSION_BYTES = 16 * 1024 * 1024;
+export const DSH_DEFAULT_MAX_SESSION_TOKENS = 100_000;
 
 export interface DshImportOptions {
   root?: string;
   maxSessionsPerRun?: number;
   maxTurnsPerSession?: number;
+  maxSessionBytes?: number;
+  maxSessionTokens?: number;
 }
 
 export interface DshImportResult {
@@ -51,62 +60,94 @@ export class DshImportService {
   }
 
   async importAll(options: DshImportOptions = {}): Promise<DshImportResult> {
+    const boundedOptions: DshImportOptions = {
+      ...options,
+      maxSessionsPerRun: options.maxSessionsPerRun ?? DSH_DEFAULT_MAX_SESSIONS_PER_RUN,
+      maxTurnsPerSession: options.maxTurnsPerSession ?? DSH_DEFAULT_MAX_TURNS_PER_SESSION,
+      maxSessionBytes: options.maxSessionBytes ?? DSH_DEFAULT_MAX_SESSION_BYTES,
+      maxSessionTokens: options.maxSessionTokens ?? DSH_DEFAULT_MAX_SESSION_TOKENS,
+    };
     const result: DshImportResult = {
       sessionsSeen: 0, sessionsImported: 0, sessionsSkipped: 0,
       turnsImported: 0, memoriesWritten: 0, errors: [],
     };
-    const files = await discoverDshSessions(this.root());
+    const files = await discoverDshSessions(boundedOptions.root ? dshSessionsRoot(boundedOptions.root) : this.root());
     result.sessionsSeen = files.length;
-
     for (const file of files) {
-      if (options.maxSessionsPerRun && result.sessionsImported >= options.maxSessionsPerRun) break;
+      if (result.sessionsImported >= boundedOptions.maxSessionsPerRun!) break;
       try {
-        const outcome = await this.importSession(file, options);
-        if (outcome === "imported") result.sessionsImported += 1;
-        if (outcome === "skipped") result.sessionsSkipped += 1;
+        const outcome = await this.importSession(file, boundedOptions);
+        if (outcome.status === "imported") result.sessionsImported += 1;
+        if (outcome.status === "skipped") result.sessionsSkipped += 1;
+        result.turnsImported += outcome.turnsImported;
+        result.memoriesWritten += outcome.memoriesWritten;
       } catch (error) {
-        result.errors.push({
-          sessionId: file.sessionId,
-          message: error instanceof Error ? error.message : String(error),
-        });
+        result.errors.push({ sessionId: file.sessionId, message: error instanceof Error ? error.message : String(error) });
       }
     }
     return result;
   }
 
-  private async importSession(file: DshSessionFile, options: DshImportOptions): Promise<"imported" | "skipped"> {
+  private async importSession(file: DshSessionFile, options: DshImportOptions): Promise<{ status: "imported" | "skipped"; turnsImported: number; memoriesWritten: number }> {
     const at = nowIso();
     const claim = this.state.getClaim(file.sessionId);
-    if (claim && claim.channel === "realtime" && claim.expiresAt > at) {
-      return "skipped"; // realtime owns live sessions
+    if (claim && claim.channel === "realtime" && claim.expiresAt > at) return { status: "skipped", turnsImported: 0, memoriesWritten: 0 };
+    if (this.state.claim(file.sessionId, "historical", "dsh-import-service") === "existing") return { status: "skipped", turnsImported: 0, memoriesWritten: 0 };
+    try {
+      const previous = this.state.getCheckpoint(file.path);
+      const reset = !previous || file.size < previous.frameEndOffset || previous.mtimeMs > file.mtimeMs;
+      const start = reset ? 0 : previous.frameEndOffset;
+      const remaining = Math.max(0, file.size - start);
+      const length = Math.min(remaining, options.maxSessionBytes ?? Number.MAX_SAFE_INTEGER);
+      const handle = await open(file.path, "r");
+      let buffer = Buffer.alloc(length);
+      try {
+        if (length > 0) await handle.read(buffer, 0, length, start);
+        // A compressed frame is atomic. A byte budget may cut through its
+        // payload, so extend this one read through the available tail rather
+        // than retrying an undecodable prefix forever.
+        if (file.compression === "zstd" && length < remaining) {
+          buffer = Buffer.alloc(remaining);
+          await handle.read(buffer, 0, remaining, start);
+        }
+      } finally {
+        await handle.close();
+      }
+      const decoded = file.compression === "zstd"
+        ? decompressZstdFrames(buffer)
+        : decodePlainJsonl(buffer);
+      if (decoded.lines.length === 0 && !reset) return { status: "skipped", turnsImported: 0, memoriesWritten: 0 };
+      const headerLine = reset ? decoded.lines[0] : previous?.headerLine;
+      if (!headerLine) throw new Error("dsh session checkpoint missing header");
+      const parsed = parseDshSessionLines(reset ? decoded.lines : [headerLine, ...decoded.lines], {
+        maxEvents: options.maxSessionTokens ? Math.max(1, options.maxSessionTokens * 4) : undefined,
+        initialTurns: reset ? undefined : previous?.incompleteTurns,
+      });
+      const tokenBudgetExceeded = Boolean(options.maxSessionTokens && decoded.lines.join("\n").length > options.maxSessionTokens * 4);
+      if (tokenBudgetExceeded) parsed.turns.push({ turn: -1, startSeq: parsed.maxSeq, userMessages: [{ seq: parsed.maxSeq, text: `[DSH history truncated: token budget ${options.maxSessionTokens} exceeded]` }], toolCalls: [], startedAt: Date.now(), complete: true });
+      const turns = parsed.turns.filter((turn) => turn.complete && (previous?.lastImportedTurn === undefined || turn.turn > previous.lastImportedTurn));
+      const boundedTurns = options.maxTurnsPerSession ? turns.slice(0, options.maxTurnsPerSession) : turns;
+      let memories = 0;
+      for (const turn of boundedTurns) memories += this.importTurn(file, turn);
+      const lastImportedTurn = boundedTurns.at(-1)?.turn ?? previous?.lastImportedTurn;
+      const hasPendingTurns = boundedTurns.length < turns.length;
+      this.state.saveCheckpoint({
+        sourcePath: file.path,
+        frameEndOffset: hasPendingTurns ? (previous?.frameEndOffset ?? start) : start + decoded.lastCompleteFrameEnd,
+        lastFrameIndex: hasPendingTurns ? (previous?.lastFrameIndex ?? -1) : (reset ? -1 : previous?.lastFrameIndex ?? -1) + decoded.completeFrames,
+        mtimeMs: file.mtimeMs,
+        lastSeq: parsed.maxSeq,
+        lastEventId: "",
+        status: hasPendingTurns || decoded.skippedTail || start + decoded.lastCompleteFrameEnd < file.size ? "partial" : "complete",
+        headerLine,
+        incompleteTurns: parsed.turns.filter((turn) => !turn.complete),
+        lastImportedTurn,
+        updatedAt: at,
+      });
+      return { status: "imported", turnsImported: boundedTurns.length, memoriesWritten: memories };
+    } finally {
+      this.state.release(file.sessionId, "dsh-import-service");
     }
-
-    const claimOutcome = this.state.claim(file.sessionId, "historical", "dsh-import-service");
-    if (claimOutcome === "existing") {
-      return "skipped"; // another importer active
-    }
-
-    const { parsed } = await readDshSessionFile(file);
-    let turns = parsed.turns;
-    if (options.maxTurnsPerSession) turns = turns.slice(0, options.maxTurnsPerSession);
-
-    let memories = 0;
-    for (const turn of turns) {
-      memories += this.importTurn(file, turn);
-    }
-
-    this.state.saveCheckpoint({
-      sourcePath: file.path,
-      frameEndOffset: file.size,
-      lastFrameIndex: -1,
-      mtimeMs: file.mtimeMs,
-      lastSeq: parsed.maxSeq,
-      lastEventId: "",
-      status: "complete",
-      updatedAt: at,
-    });
-    void memories;
-    return "imported";
   }
 
   private importTurn(file: DshSessionFile, turn: DshTurn): number {
@@ -124,8 +165,6 @@ export class DshImportService {
         source: DSH_SOURCE,
         content: redactSensitiveText(msg.text),
         title: `DSH turn ${turn.turn} user`,
-        layer: "L1",
-        sessionId: `dsh-session-${sessionId}`,
         turnId: `${turnKey}:user:${msg.seq}`,
         tags: [DSH_SOURCE, "agent-source", "dsh-user-message"],
         deferProcessing: true,
@@ -144,15 +183,27 @@ export class DshImportService {
         content: redactSensitiveText(summary),
         title: `DSH turn ${turn.turn} tool ${call.name}`,
         layer: "L1",
-        sessionId: `dsh-session-${sessionId}`,
         turnId: `${turnKey}:tool:${call.seq}`,
         tags: [DSH_SOURCE, "agent-source", "dsh-tool-call"],
         deferProcessing: true,
       });
+
       written += 1;
     }
     return written;
   }
+}
+function decodePlainJsonl(buffer: Buffer): { lines: string[]; completeFrames: number; lastCompleteFrameEnd: number; skippedTail: boolean } {
+  const text = buffer.toString("utf8");
+  const newline = text.lastIndexOf("\n");
+  if (newline < 0) return { lines: [], completeFrames: 0, lastCompleteFrameEnd: 0, skippedTail: buffer.length > 0 };
+  const completeText = text.slice(0, newline);
+  return {
+    lines: completeText.split("\n").filter((line) => line.trim().length > 0),
+    completeFrames: 1,
+    lastCompleteFrameEnd: Buffer.byteLength(text.slice(0, newline + 1), "utf8"),
+    skippedTail: newline + 1 < text.length,
+  };
 }
 
 function truncate(value: string, max: number): string {

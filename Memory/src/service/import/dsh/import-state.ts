@@ -1,5 +1,6 @@
 // Import checkpoints and session claims for the DSH source adapter.
 // Stored in runtime_kv under reserved key prefixes (see design §6.2/§7).
+import type { DshTurn } from "./session-parser.js";
 import type { Repositories } from "../../../storage/repositories.js";
 
 const CLAIM_PREFIX = "dsh:claim:";
@@ -22,6 +23,9 @@ export interface DshImportCheckpoint {
   lastEventId: string;
   status: "complete" | "partial" | "corrupt";
   error?: string;
+  headerLine?: string;
+  incompleteTurns?: DshTurn[];
+  lastImportedTurn?: number;
   updatedAt: string;
 }
 
@@ -45,20 +49,18 @@ export class DshImportState {
     const existing = this.repos.runtime.getKv(key);
     if (existing) {
       const claim = existing.value as DshClaim | undefined;
-      if (claim && claim.expiresAt > at) {
-        return "existing"; // still valid
-      }
-      // expired -> replace
-      this.repos.runtime.setKv(key, { channel, claimedAt: at, owner, expiresAt }, at);
-      return "expired-replaced";
+      const active = claim?.channel === "realtime" || claim?.channel === "historical";
+      if (claim && active && claim.expiresAt > at) return "existing";
+      const replaced = this.repos.runtime.setKvIfValue(
+        key,
+        existing.value,
+        { channel, claimedAt: at, owner, expiresAt },
+        at,
+      );
+      return replaced ? "expired-replaced" : "existing";
     }
-    // absent -> atomic insert
-    const inserted = this.repos.runtime.setKvIfAbsent(
-      key,
-      { channel, claimedAt: at, owner, expiresAt },
-      at,
-    );
-    return inserted ? "acquired" : "existing"; // lost a race
+    const inserted = this.repos.runtime.setKvIfAbsent(key, { channel, claimedAt: at, owner, expiresAt }, at);
+    return inserted ? "acquired" : "existing";
   }
 
   renew(sessionId: string, owner: string): boolean {
@@ -69,8 +71,12 @@ export class DshImportState {
     if (!claim || claim.owner !== owner) return false;
     const at = new Date();
     const expiresAt = new Date(at.getTime() + CLAIM_TTL_MS).toISOString();
-    this.repos.runtime.setKv(key, { ...claim, expiresAt }, at.toISOString());
-    return true;
+    return this.repos.runtime.setKvIfValue(
+      key,
+      existing.value,
+      { ...claim, expiresAt },
+      at.toISOString(),
+    );
   }
 
   release(sessionId: string, owner: string): boolean {
@@ -79,8 +85,12 @@ export class DshImportState {
     if (!existing) return false;
     const claim = existing.value as DshClaim | undefined;
     if (!claim || claim.owner !== owner) return false;
-    this.repos.runtime.setKv(key, { ...claim, channel: "released" }, new Date().toISOString());
-    return true;
+    return this.repos.runtime.setKvIfValue(
+      key,
+      existing.value,
+      { ...claim, channel: "released" },
+      new Date().toISOString(),
+    );
   }
 
   getClaim(sessionId: string): DshClaim | undefined {

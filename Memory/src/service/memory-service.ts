@@ -12,6 +12,8 @@ import {
 import { createMemoryLogger } from "../logging/logger.js";
 import { resolveMemoryAgentRegion } from "../model/agent-region.js";
 import { createEmbedder } from "../model/embedder.js";
+import { DshImportState, type DshClaim } from "./import/dsh/import-state.js";
+import { DshImportService, type DshImportOptions, type DshImportResult } from "./import/dsh/dsh-import-service.js";
 import { createLlmClient } from "../model/llm.js";
 import type { MemoryLlmModelRole } from "../model/token-usage.js";
 import type { Embedder,LlmClient } from "../model/types.js";
@@ -304,6 +306,8 @@ export class MemoryService {
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
   private readonly repos: Repositories;
+  private readonly dshImportState: DshImportState;
+  private readonly dshImporter: DshImportService;
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
   private config: MemmyConfig;
@@ -409,6 +413,11 @@ export class MemoryService {
 
     this.projectContext = new ProjectContextService({ repositories: this.repos });
     this.assetRecall = new AssetRecallService({ repositories: this.repos, now: nowIso, id: newId });
+    this.dshImportState = new DshImportState(this.repos);
+    this.dshImporter = new DshImportService({
+      repos: this.repos,
+      writeMemory: (request) => this.addMemory(request).id
+    });
     this.topicDecisions = new TopicDecisionService({
       repos: this.repos,
       enabled: this.config.algorithm.topicDecisions.enabled,
@@ -1088,6 +1097,33 @@ export class MemoryService {
 
   getAssetVersion(namespaceId: string, assetId: string, assetVersion: number): MemoryAssetRecord | undefined {
     return this.repos.assets.get(namespaceId, assetId, assetVersion);
+  }
+
+  importDshHistory(options: DshImportOptions = {}): Promise<DshImportResult> {
+    return this.dshImporter.importAll(options);
+  }
+
+  claimDshSession(sessionId: string, channel: "realtime" | "historical", owner: string): { outcome: "acquired" | "existing" | "expired-replaced"; claim?: DshClaim } {
+    const outcome = this.dshImportState.claim(sessionId, channel, owner);
+    return { outcome, claim: this.dshImportState.getClaim(sessionId) };
+  }
+
+  getDshClaim(sessionId: string): DshClaim | undefined {
+    return this.dshImportState.getClaim(sessionId);
+  }
+
+  renewDshClaim(sessionId: string, owner: string): { renewed: boolean; claim?: DshClaim } {
+    const renewed = this.dshImportState.renew(sessionId, owner);
+    return { renewed, claim: this.dshImportState.getClaim(sessionId) };
+  }
+
+  releaseDshClaim(sessionId: string, owner: string): { released: boolean; claim?: DshClaim } {
+    const released = this.dshImportState.release(sessionId, owner);
+    return { released, claim: this.dshImportState.getClaim(sessionId) };
+  }
+
+  reapDshClaims(): { reclaimed: number } {
+    return { reclaimed: this.dshImportState.reapExpired() };
   }
 
   bindAgentLoadout(input: BindAgentLoadoutInput): AgentLoadoutEntry {

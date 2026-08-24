@@ -74,6 +74,12 @@ export const API_ROUTES = [
   "POST /api/v1/sessions/:sessionId/close",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
+  "POST /api/v1/dsh/claims",
+  "GET /api/v1/dsh/claims/:sessionId",
+  "DELETE /api/v1/dsh/claims/:sessionId",
+  "POST /api/v1/dsh/claims/:sessionId/heartbeat",
+  "POST /api/v1/dsh/claims/reap",
+  "POST /api/v1/dsh/import",
   "POST /api/v1/memory/search",
   "POST /api/v1/memory/add",
   "GET /api/v1/memory/audit/markdown",
@@ -779,6 +785,49 @@ async function routeRequest(
     scheduleAutoWorkerForEvolution(result, autoWorker);
     return publicCloseSessionResponse(result);
   }
+
+  if (method === "POST" && path === "/api/v1/dsh/import") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.import");
+    return service.importDshHistory({
+      root: optionalString(request.root),
+      maxSessionsPerRun: optionalPositiveInteger(request.maxSessionsPerRun, "dsh.import.maxSessionsPerRun"),
+      maxTurnsPerSession: optionalPositiveInteger(request.maxTurnsPerSession, "dsh.import.maxTurnsPerSession"),
+      maxSessionBytes: optionalPositiveInteger(request.maxSessionBytes, "dsh.import.maxSessionBytes"),
+      maxSessionTokens: optionalPositiveInteger(request.maxSessionTokens, "dsh.import.maxSessionTokens")
+    });
+  }
+
+  if (method === "POST" && path === "/api/v1/dsh/claims") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim");
+    const channel = request.channel;
+    if (channel !== "realtime" && channel !== "historical") throw new MemoryServiceError("invalid_argument", "dsh.claim channel must be realtime or historical");
+    return service.claimDshSession(requiredBodyString(request, "sessionId", "dsh.claim"), channel, requiredBodyString(request, "owner", "dsh.claim"));
+  }
+  if (method === "POST" && path === "/api/v1/dsh/claims/reap") {
+    requireMemoryWrite(principal);
+    return service.reapDshClaims();
+  }
+  const dshClaimHeartbeat = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)\/heartbeat$/);
+  if (method === "POST" && dshClaimHeartbeat) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim.heartbeat");
+    return service.renewDshClaim(decodeMatchSegment(dshClaimHeartbeat, 1), requiredBodyString(request, "owner", "dsh.claim.heartbeat"));
+  }
+  const dshClaim = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)$/);
+  if (method === "GET" && dshClaim) {
+    requireMemoryRead(principal);
+    const claim = service.getDshClaim(decodeMatchSegment(dshClaim, 1));
+    if (!claim) throw new MemoryServiceError("not_found", "dsh claim not found");
+    return { claim };
+  }
+  if (method === "DELETE" && dshClaim) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim.release");
+    return service.releaseDshClaim(decodeMatchSegment(dshClaim, 1), requiredBodyString(request, "owner", "dsh.claim.release"));
+  }
+
 
   if (method === "POST" && path === "/api/v1/turns/start") {
     requireMemoryRead(principal);
@@ -2048,6 +2097,10 @@ function requiredNonEmptyStringArray(value: unknown, field: string): string[] {
 function finiteNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) throw new MemoryServiceError("invalid_argument", `${field} must be finite`);
   return value;
+}
+
+function optionalPositiveInteger(value: unknown, field: string): number | undefined {
+  return value === undefined ? undefined : positiveInteger(value, field);
 }
 
 function positiveInteger(value: unknown, field: string): number {

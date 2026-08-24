@@ -10,11 +10,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, "../../../scripts/mcp/memmy-mcp-bridge.mjs");
 const NODE_PATH = "/root/.dsh/profiles/web/node_modules";
 const TOKEN = process.env.MEMMY_MEMORY_TOKEN ?? "cg276686433";
+const TEST_SOURCE = `deepseek_harness_test_${process.pid}`;
+const TEST_SESSION_ID = `bridge-test-session-${process.pid}`;
+const SIGNAL_SESSION_ID = `signal-test-${process.pid}`;
 
 function spawnBridge(env: Record<string, string> = {}): { child: ChildProcess; rpc: (method: string, params: Record<string, unknown>) => Promise<unknown>; close: () => void } {
   const child = spawn("node", [BRIDGE], {
-    env: { ...process.env, NODE_PATH, MEMMY_TOKEN: TOKEN, ...env },
-    stdio: ["pipe", "pipe", "inherit"],
+    env: { ...process.env, NODE_PATH, MEMMY_SOURCE: TEST_SOURCE, MEMMY_USER_ID: `test-${process.pid}`, MEMMY_TOKEN: TOKEN, ...env },
   });
   let nextId = 1;
   const pending = new Map<number, (v: unknown) => void>();
@@ -66,21 +68,20 @@ describe("memmy MCP bridge", () => {
     const text = res.content[0]?.text ?? "";
     expect(text).toContain('"ok": true');
   });
-
   it("session open returns a session id", async () => {
-    const res = await bridge.rpc("tools/call", { name: "memmy_session_open", arguments: { externalSessionId: "bridge-test-session" } }) as { content: Array<{ text: string }> };
+    const res = await bridge.rpc("tools/call", { name: "memmy_session_open", arguments: { externalSessionId: TEST_SESSION_ID } }) as { content: Array<{ text: string }> };
     expect(res.content[0]?.text ?? "").toMatch(/sessionId=session_/);
   });
 
   it("turn start returns turnId with injected context", async () => {
-    const res = await bridge.rpc("tools/call", { name: "memmy_turn_start", arguments: { externalSessionId: "bridge-test-session", externalTurnId: "1", query: "记忆检索测试" } }) as { content: Array<{ text: string }> };
+    const res = await bridge.rpc("tools/call", { name: "memmy_turn_start", arguments: { externalSessionId: TEST_SESSION_ID, externalTurnId: "1", query: "记忆检索测试" } }) as { content: Array<{ text: string }> };
     const text = res.content[0]?.text ?? "";
-    expect(text).toContain("turnId=deepseek_harness:bridge-test-session:turn:1");
+    expect(text).toContain(`turnId=${TEST_SOURCE}:${TEST_SESSION_ID}:turn:1`);
     expect(text).toContain("injectedContext=");
   });
 
   it("turn complete succeeds", async () => {
-    const res = await bridge.rpc("tools/call", { name: "memmy_turn_complete", arguments: { externalSessionId: "bridge-test-session", externalTurnId: "1", query: "记忆检索测试", answer: "测试回答内容" } }) as { content: Array<{ text: string }> };
+    const res = await bridge.rpc("tools/call", { name: "memmy_turn_complete", arguments: { externalSessionId: TEST_SESSION_ID, externalTurnId: "1", query: "记忆检索测试", answer: "测试回答内容" } }) as { content: Array<{ text: string }> };
     expect(res.content[0]?.text ?? "").toContain("turnId");
   });
 
@@ -93,8 +94,6 @@ describe("memmy MCP bridge", () => {
     const bad = spawnBridge({ MEMMY_TOKEN: "wrong-token-xyz" });
     try {
       await bad.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } });
-      const res = await bad.rpc("tools/call", { name: "memmy_health", arguments: {} }) as { isError?: boolean; content?: Array<{ text: string }> };
-      // health is anonymous; use search which needs auth
       const search = await bad.rpc("tools/call", { name: "memmy_search", arguments: { query: "x", limit: 1 } }) as { isError?: boolean; content?: Array<{ text: string }> };
       expect(search.isError).toBe(true);
     } finally {
@@ -112,10 +111,9 @@ describe("memmy MCP bridge - signal close", () => {
   it("closes session on SIGTERM", async () => {
     const bridge = spawnBridge();
     await bridge.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } });
-    await bridge.rpc("tools/call", { name: "memmy_session_open", arguments: { externalSessionId: "signal-test" } });
+    await bridge.rpc("tools/call", { name: "memmy_session_open", arguments: { externalSessionId: SIGNAL_SESSION_ID } });
     bridge.child.kill("SIGTERM");
     await new Promise((r) => setTimeout(r, 800));
-    // process should have exited
     expect(bridge.child.exitCode).not.toBe(null);
     bridge.close();
   });

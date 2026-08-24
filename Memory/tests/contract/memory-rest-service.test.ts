@@ -1694,6 +1694,48 @@ describe("MemoryService / REST contract", () => {
     });
     db.close();
   });
+  it("serves the DSH claim lifecycle over REST", async () => {
+    const { service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const base = `http://127.0.0.1:${address.port}/api/v1/dsh/claims`;
+      const headers = { "content-type": "application/json" };
+      const acquired = await fetch(base, { method: "POST", headers, body: JSON.stringify({ sessionId: "dsh-rest-1", channel: "realtime", owner: "plugin-1" }) });
+      expect(acquired.status).toBe(200);
+      expect((await acquired.json() as { outcome: string }).outcome).toBe("acquired");
+      const heartbeat = await fetch(`${base}/dsh-rest-1/heartbeat`, { method: "POST", headers, body: JSON.stringify({ owner: "plugin-1" }) });
+      expect((await heartbeat.json() as { renewed: boolean }).renewed).toBe(true);
+      const released = await fetch(`${base}/dsh-rest-1`, { method: "DELETE", headers, body: JSON.stringify({ owner: "plugin-1" }) });
+      expect((await released.json() as { released: boolean }).released).toBe(true);
+    });
+  });
+  it("runs bounded DSH history import over REST", async () => {
+    const { service } = createTestService();
+    let captured: unknown;
+    service.importDshHistory = async (options) => {
+      captured = options;
+      return { sessionsSeen: 1, sessionsImported: 1, sessionsSkipped: 0, turnsImported: 1, memoriesWritten: 1, errors: [] };
+    };
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/v1/dsh/import`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ root: "/tmp/dsh", maxSessionsPerRun: 2, maxTurnsPerSession: 3, maxSessionBytes: 4096, maxSessionTokens: 1024 })
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ sessionsImported: 1, memoriesWritten: 1 });
+      expect(captured).toEqual({ root: "/tmp/dsh", maxSessionsPerRun: 2, maxTurnsPerSession: 3, maxSessionBytes: 4096, maxSessionTokens: 1024 });
+    });
+  });
+
 });
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
