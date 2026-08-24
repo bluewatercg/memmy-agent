@@ -26,6 +26,7 @@ import {
   memoryHasImportPipeline,
   updateImportPipelineStatus
 } from "../import/import-job-processor.js";
+import { extractProjectEvidence } from "./project-evidence.js";
 import { summarizeTurn as sessionSummarizeTurn } from "../session/session-turn-service.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 
@@ -39,24 +40,26 @@ export interface SpanPipelineDeps {
   llm: LlmClient;
   skillLlm: LlmClient;
   traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null;
+  isInactiveEvolutionMemory(memory: MemoryRow): boolean;
   namespaceIdFromMemory(memory: MemoryRow): string;
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   scheduleEmbeddingAfterTextUpdate(input: ScheduleEmbeddingAfterTextUpdateInput): void;
   enqueueEpisodeRewardAfterReflection(episode: EpisodeRecord, at: string, trigger: string): EvolutionJobRecord[];
 }
-
+ 
 export class SpanPipeline {
   constructor(private readonly deps: SpanPipelineDeps) {}
 
   async reflectTrace(job: EvolutionJobRecord): Promise<void> {
     const memory = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
-    if (!memory || memory.memoryLayer !== "L1") {
+    if (!memory || memory.memoryLayer !== "L1" || this.deps.isInactiveEvolutionMemory(memory)) {
       return;
     }
     const trace = this.deps.traceMeta(memory);
     if (!trace || traceReflectionWasScored(memory)) {
       return;
     }
+
     const episodeId = job.episodeId ?? trace.episodeId;
     const episode = episodeId ? this.deps.repos.runtime.getEpisode(episodeId) : undefined;
     if (episodeId && (!episode || episode.status !== "closed")) {
@@ -766,6 +769,15 @@ function updateTraceReflection(memory: MemoryRow, input: {
     summary_deferred_until_reflection: _summaryDeferredUntilReflection,
     ...settledTrace
   } = internalTrace;
+  const evidence = extractProjectEvidence({
+    id: memory.id,
+    userText: trace.userText,
+    agentText: trace.agentText,
+    reflection: input.reflection,
+    toolCalls: trace.toolCalls,
+    tags: input.tags,
+    value: trace.value
+  });
   const nextTrace = {
     ...settledTrace,
     summary: input.summary,
@@ -774,7 +786,8 @@ function updateTraceReflection(memory: MemoryRow, input: {
     usable: input.usable,
     reflection_reason: input.reason,
     reflection_source: input.source ?? "synth",
-    reflection_scored_at: input.updatedAt
+    reflection_scored_at: input.updatedAt,
+    evidence_candidate: evidence
   };
   return {
     ...memory,

@@ -277,6 +277,11 @@ describe("MemoryService / evolution / reflection", () => {
           usable: boolean;
           reflection: string;
           reflection_scored_at?: string;
+          evidence_candidate?: {
+            candidateType: string;
+            activation: string;
+            evidenceIds: string[];
+          };
         };
       };
     }).internal_info.trace;
@@ -284,6 +289,11 @@ describe("MemoryService / evolution / reflection", () => {
     expect(afterTrace.alpha).toBe(0);
     expect(afterTrace.reflection).toBe("IRRELEVANT");
     expect(afterTrace.reflection_scored_at).toBeTruthy();
+    expect(afterTrace.evidence_candidate).toMatchObject({
+      candidateType: "pure_process",
+      activation: "rejected",
+      evidenceIds: [complete.l1MemoryId]
+    });
     db.close();
   });
 

@@ -41,7 +41,7 @@ export interface WorldModelPipelineDeps {
   traceMeta(memory: MemoryRow | undefined | null): TraceMeta | null;
   buildMemory(input: Record<string, unknown>): MemoryRow;
   upsertEvolutionMemory(memory: MemoryRow): { memory: MemoryRow; created: boolean; previous?: MemoryRow };
-  isArchivedEvolutionMemory(memory: MemoryRow): boolean;
+  isInactiveEvolutionMemory(memory: MemoryRow): boolean;
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   namespaceIdFromMemory(memory: MemoryRow): string;
 }
@@ -254,7 +254,7 @@ private l3AbstractionSourceForJob(job: EvolutionJobRecord): MemoryRow | undefine
       ? job.payload.policyId
       : undefined;
     const seedPolicy = seedPolicyId ? this.deps.repos.memories.get(seedPolicyId) : undefined;
-    if (seedPolicy && seedPolicy.memoryLayer === "L2") {
+    if (seedPolicy && seedPolicy.memoryLayer === "L2" && !this.deps.isInactiveEvolutionMemory(seedPolicy)) {
       return seedPolicy;
     }
     const payloadSourceMemoryId = typeof job.payload.sourceMemoryId === "string"
@@ -263,10 +263,11 @@ private l3AbstractionSourceForJob(job: EvolutionJobRecord): MemoryRow | undefine
       ? job.payload.l1MemoryId
       : undefined;
     const payloadSource = payloadSourceMemoryId ? this.deps.repos.memories.get(payloadSourceMemoryId) : undefined;
-    if (payloadSource) {
+    if (payloadSource && !this.deps.isInactiveEvolutionMemory(payloadSource)) {
       return payloadSource;
     }
-    return job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+    const target = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+    return target && !this.deps.isInactiveEvolutionMemory(target) ? target : undefined;
   }
 
 private findWorldModelMergeTarget(
@@ -275,7 +276,7 @@ private findWorldModelMergeTarget(
     const exact = this.deps.repos.memories.getByKey("L3", draft.key);
     if (
       exact &&
-      !this.deps.isArchivedEvolutionMemory(exact)
+      !this.deps.isInactiveEvolutionMemory(exact)
     ) {
       return exact;
     }

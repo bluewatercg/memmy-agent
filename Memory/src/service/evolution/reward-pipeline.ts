@@ -50,6 +50,7 @@ export interface RewardPipelineDeps {
   nowIso(): string;
   newId(prefix: string): string;
   traceMeta(memory: MemoryRow | null | undefined): TraceMeta | null;
+  isInactiveEvolutionMemory(memory: MemoryRow): boolean;
   namespaceIdFromMemory(memory: MemoryRow): string;
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   finalizeClosedEpisode(episode: EpisodeRecord, at: string, trigger: "episode_rewarded"): EvolutionJobRecord[];
@@ -399,10 +400,12 @@ export class RewardPipeline {
 
   rewardSourceForJob(job: EvolutionJobRecord): { source: MemoryRow; trace: TraceMeta } | undefined {
     const direct = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
+    if (direct && this.deps.isInactiveEvolutionMemory(direct)) return undefined;
     const directTrace = direct ? this.deps.traceMeta(direct) : null;
     if (direct && directTrace) return { source: direct, trace: directTrace };
     const payloadL1MemoryId = typeof job.payload.l1MemoryId === "string" ? job.payload.l1MemoryId : undefined;
     const payloadMemory = payloadL1MemoryId ? this.deps.repos.memories.get(payloadL1MemoryId) : undefined;
+    if (payloadMemory && this.deps.isInactiveEvolutionMemory(payloadMemory)) return undefined;
     const payloadTrace = payloadMemory ? this.deps.traceMeta(payloadMemory) : null;
     if (payloadMemory && payloadTrace) return { source: payloadMemory, trace: payloadTrace };
     if (!job.episodeId) return undefined;

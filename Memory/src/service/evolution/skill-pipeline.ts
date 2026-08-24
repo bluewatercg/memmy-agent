@@ -52,7 +52,7 @@ export interface SkillPipelineDeps {
  buildMemory(input:Record<string,unknown>):MemoryRow;
  upsertEvolutionMemory(memory:MemoryRow):{memory:MemoryRow;created:boolean;previous?:MemoryRow};
  upsertSkillAssetCandidate(input:AssetCandidateInput,version:number):void;
- isArchivedEvolutionMemory(memory:MemoryRow):boolean;
+ isInactiveEvolutionMemory(memory:MemoryRow):boolean;
  enqueueJob(input:EnqueueJobInput):EvolutionJobRecord;
  namespaceIdFromMemory(memory:MemoryRow):string;
 }
@@ -377,6 +377,7 @@ private gatherSkillEvidence(policy: PolicyMeta): TraceMeta[] {
       for (const trace of candidates) byId.set(trace.id, trace);
     }
     for (const memory of this.deps.repos.memories.getMany(policy.sourceTraceIds)) {
+      if (this.deps.isInactiveEvolutionMemory(memory)) continue;
       const trace = this.deps.traceMeta(memory);
       if (trace && (!trace.episodeId || !failureEpisodeIds.has(trace.episodeId))) byId.set(trace.id, trace);
     }

@@ -203,6 +203,42 @@ describe("MemoryService / evolution / reward", () => {
     expect(typeof rewardPayload.runAfter).toBe("string");
     db.close();
   });
+  it("does not reflect an archived L1 memory from a queued job", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-archived-reflection"
+      }
+    });
+    const complete = service.completeTurn("turn-archived-reflection", {
+      sessionId: session.sessionId,
+      query: "archive this trace before reflection runs",
+      answer: "The trace is queued for reflection."
+    });
+    service.closeSession(session.sessionId);
+    service.archiveMemory(complete.l1MemoryId, { reason: "user removed trace" });
+
+    await service.runWorkerOnce(20);
+
+    const memory = db.db.prepare(
+      `SELECT status, properties_json
+       FROM memories
+       WHERE id = ?`
+    ).get(complete.l1MemoryId) as { status: string; properties_json: string };
+    expect(memory.status).toBe("archived");
+    expect(JSON.parse(memory.properties_json).internal_info.trace.reflection).toBeNull();
+
+    const job = db.db.prepare(
+      `SELECT status, last_error
+       FROM evolution_jobs
+       WHERE job_type = 'reflection'
+         AND target_memory_id = ?`
+    ).get(complete.l1MemoryId) as { status: string; last_error: string | null };
+    expect(job).toMatchObject({ status: "succeeded", last_error: null });
+    db.close();
+  });
 
   it("still reflects unscored L1 memories when an episode already has reward", async () => {
     const calls: Array<{

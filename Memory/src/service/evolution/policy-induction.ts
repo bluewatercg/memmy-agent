@@ -7,7 +7,6 @@ import {
   packL2InductionTraces,
   policyMetaFromMemory,
   signatureFromTrace,
-  skillMetaFromMemory,
   traceMetaFromMemory,
   tracePolicySimilarity
 } from "../../algorithm/plugin-algorithms.js";
@@ -20,6 +19,7 @@ import { isRecord } from "../../utils/json.js";
 import { stableHash } from "../../utils/id.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { logEvolutionDecision } from "./evolution-logging.js";
+import { isInactiveEvolutionMemory } from "./evolution-memory-lifecycle.js";
 import { extractProjectEvidence } from "./project-evidence.js";
 
 export type PolicyDraft = ReturnType<typeof buildPolicyDraft>;
@@ -239,7 +239,7 @@ export class PolicyInductionEngine {
 
       const policyKey = `policy:${stableHash(signature).slice(0, 16)}`;
       const existingPolicyMemory = this.deps.repos.memories.getByKey("L2", policyKey);
-      const existingPolicy = existingPolicyMemory && !this.isArchivedEvolutionMemory(existingPolicyMemory)
+      const existingPolicy = existingPolicyMemory && !isInactiveEvolutionMemory(existingPolicyMemory)
         ? policyMetaFromMemory(existingPolicyMemory)
         : null;
 
@@ -420,19 +420,19 @@ export class PolicyInductionEngine {
       ? job.payload.l1MemoryId
       : undefined;
     const payloadSource = payloadSourceMemoryId ? this.deps.repos.memories.get(payloadSourceMemoryId) : undefined;
-    if (payloadSource && this.deps.traceMeta(payloadSource)) {
+    if (payloadSource && !isInactiveEvolutionMemory(payloadSource) && this.deps.traceMeta(payloadSource)) {
       return payloadSource;
     }
     const legacyTarget = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
-    if (legacyTarget && this.deps.traceMeta(legacyTarget)) {
+    if (legacyTarget && !isInactiveEvolutionMemory(legacyTarget) && this.deps.traceMeta(legacyTarget)) {
       return legacyTarget;
     }
-    return payloadSource ?? legacyTarget;
+    return undefined;
   }
 
   associateL2(job: EvolutionJobRecord): void {
     const source = job.targetMemoryId ? this.deps.repos.memories.get(job.targetMemoryId) : undefined;
-    if (!source) return;
+    if (!source || isInactiveEvolutionMemory(source)) return;
     const trace = this.deps.traceMeta(source);
     if (!trace || !this.isTraceEligibleForL2(trace)) return;
     const signature = signatureFromTrace(trace);
@@ -762,7 +762,9 @@ export class PolicyInductionEngine {
       tags: trace.tags,
       value: trace.value
     });
-    return evidence.eligible && trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
+    const reusableCandidate = evidence.candidateType === "policy" || evidence.candidateType === "avoidance";
+    return reusableCandidate && evidence.risk !== "high" && evidence.activation !== "rejected" &&
+      trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
       Boolean(trace.vecSummary ?? trace.vecAction);
   }
 
@@ -787,16 +789,6 @@ export class PolicyInductionEngine {
     return new Date(Date.parse(at) + ttlMs).toISOString();
   }
 
-  private isArchivedEvolutionMemory(memory: MemoryRow): boolean {
-    if (memory.status === "archived") return true;
-    if (memory.memoryLayer === "L2") {
-      return policyMetaFromMemory(memory)?.status === "archived";
-    }
-    if (memory.memoryLayer === "Skill") {
-      return skillMetaFromMemory(memory)?.status === "archived";
-    }
-    return false;
-  }
 }
 
 export function updatePolicyStats(memory: MemoryRow, input: {

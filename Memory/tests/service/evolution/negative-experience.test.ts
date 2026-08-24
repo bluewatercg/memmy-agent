@@ -602,4 +602,51 @@ describe("MemoryService / evolution / negative experience", () => {
     db.close();
   });
 
+  it("does not materialize queued negative experience from an archived L1 memory", async () => {
+    const { db, service } = createTestService({
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          capture: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.capture,
+            embedAfterCapture: false,
+            synthReflection: false
+          }
+        }
+      }
+    });
+    const namespace = {
+      source: "codex",
+      profileId: "jiang",
+      userId: "archived-negative-experience-user"
+    };
+    const session = service.openSession({ namespace });
+    const turn = service.completeTurn("archived-negative-experience-turn", {
+      sessionId: session.sessionId,
+      episodeId: "archived-negative-experience-episode",
+      query: "Configure TLS on the correct port.",
+      answer: "Configured the wrong port."
+    });
+    await service.feedback({
+      sessionId: session.sessionId,
+      episodeId: turn.episodeId,
+      l1MemoryId: turn.l1MemoryId,
+      channel: "explicit",
+      polarity: "negative",
+      magnitude: 1,
+      rationale: "The service used the wrong port."
+    });
+    await service.runWorkerOnce(50);
+    service.archiveMemory(turn.l1MemoryId, { reason: "user removed trace" });
+    await service.runWorkerOnce(50);
+
+    expect(service.panelItems({ namespace, layer: "L2" }).items).toHaveLength(0);
+    const negativeJob = db.db.prepare(
+      `SELECT status, last_error FROM evolution_jobs WHERE job_type = 'negative_experience' AND episode_id = ?`
+    ).get(turn.episodeId) as { status: string; last_error: string | null };
+    expect(negativeJob).toMatchObject({ status: "succeeded", last_error: null });
+    db.close();
+  });
+
 });

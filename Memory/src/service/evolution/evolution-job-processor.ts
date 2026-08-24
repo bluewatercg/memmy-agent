@@ -26,6 +26,7 @@ import {
   projectIdFromMemory
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
+import { isInactiveEvolutionMemory } from "./evolution-memory-lifecycle.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { AssetRewardService } from "./asset-reward-service.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
@@ -110,7 +111,7 @@ export class EvolutionJobProcessor {
       upsertSkillAssetCandidate: (input, version) => {
         this.assets.upsertCandidateVersion(input, version);
       },
-      isArchivedEvolutionMemory: this.isArchivedEvolutionMemory.bind(this),
+      isInactiveEvolutionMemory,
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory
     });
@@ -136,7 +137,7 @@ export class EvolutionJobProcessor {
       traceMeta: deps.traceMeta,
       buildMemory: deps.buildMemory,
       upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
-      isArchivedEvolutionMemory: this.isArchivedEvolutionMemory.bind(this),
+      isInactiveEvolutionMemory,
       enqueueJob: deps.enqueueJob,
       namespaceIdFromMemory: deps.namespaceIdFromMemory
     });
@@ -146,6 +147,7 @@ export class EvolutionJobProcessor {
       get llm() { return owner.deps.llm; },
       get skillLlm() { return owner.deps.skillLlm; },
       traceMeta: deps.traceMeta,
+      isInactiveEvolutionMemory,
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       enqueueJob: deps.enqueueJob,
       enqueueEpisodeRewardAfterReflection: deps.enqueueEpisodeRewardAfterReflection,
@@ -166,6 +168,7 @@ export class EvolutionJobProcessor {
       nowIso,
       newId,
       traceMeta: deps.traceMeta,
+      isInactiveEvolutionMemory,
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       enqueueJob: deps.enqueueJob,
       finalizeClosedEpisode: deps.finalizeClosedEpisode,
@@ -189,7 +192,8 @@ export class EvolutionJobProcessor {
       buildMemory: deps.buildMemory,
       upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
       enqueueJob: deps.enqueueJob,
-      namespaceIdFromMemory: deps.namespaceIdFromMemory
+      namespaceIdFromMemory: deps.namespaceIdFromMemory,
+      isInactiveEvolutionMemory
     });
   }
 
@@ -303,7 +307,7 @@ export class EvolutionJobProcessor {
     const previous = memory.memoryKey
       ? this.deps.repos.memories.getByKey(memory.memoryLayer, memory.memoryKey)
       : undefined;
-    if (previous && this.isArchivedEvolutionMemory(previous)) {
+    if (previous && isInactiveEvolutionMemory(previous)) {
       return {
         memory: this.deps.repos.memories.insert(memory),
         created: true
@@ -312,16 +316,6 @@ export class EvolutionJobProcessor {
     return this.deps.repos.memories.upsertByKey(memory);
   }
 
-  private isArchivedEvolutionMemory(memory: MemoryRow): boolean {
-    if (memory.status === "archived") return true;
-    if (memory.memoryLayer === "L2") {
-      return policyMetaFromMemory(memory)?.status === "archived";
-    }
-    if (memory.memoryLayer === "Skill") {
-      return skillMetaFromMemory(memory)?.status === "archived";
-    }
-    return false;
-  }
 }
 
 export type { DecisionRepairSummary };

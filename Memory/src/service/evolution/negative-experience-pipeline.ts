@@ -55,6 +55,7 @@ export interface NegativeExperiencePipelineDeps {
   };
   enqueueJob(input: EnqueueJobInput): EvolutionJobRecord;
   namespaceIdFromMemory(memory: MemoryRow): string;
+  isInactiveEvolutionMemory(memory: MemoryRow): boolean;
 }
 
 export class NegativeExperiencePipeline {
@@ -248,14 +249,15 @@ export class NegativeExperiencePipeline {
       ? this.deps.repos.runtime.getEpisode(job.episodeId)
       : undefined;
     if (!source || !episode || episode.userId !== job.userId) return undefined;
+    const sourceMemory = episode.l1MemoryIds
+      .map((id) => this.deps.repos.memories.get(id))
+      .find((memory): memory is MemoryRow => Boolean(memory));
+    if (sourceMemory && this.deps.isInactiveEvolutionMemory(sourceMemory)) return undefined;
 
     const feedbackId = text(job.payload.feedbackId);
     const repairId = text(job.payload.repairId);
     const feedback = feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined;
     const repair = repairId ? this.deps.repos.runtime.getDecisionRepair(repairId) : undefined;
-    const sourceMemory = episode.l1MemoryIds
-      .map((id) => this.deps.repos.memories.get(id))
-      .find((memory): memory is MemoryRow => Boolean(memory));
     const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id);
     const trigger = text(job.payload.triggerCondition)
       ?? rawTurns.find((turn) => text(turn.userText))?.userText?.trim()
