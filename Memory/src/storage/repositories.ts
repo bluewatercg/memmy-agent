@@ -4742,13 +4742,21 @@ export class AgentLoadoutRepository {
   }
 }
 
+function sameAssetRecallEvent(a: AssetRecallEventRecord, b: AssetRecallEventRecord): boolean {
+  const comparable = (event: AssetRecallEventRecord) => {
+    const { id: _id, createdAt: _createdAt, ...rest } = event;
+    return rest;
+  };
+  return stableHash(comparable(a)) === stableHash(comparable(b));
+}
+
 export class AssetRecallEventRepository {
   constructor(private readonly db: Database.Database) {}
 
   append(event: AssetRecallEventRecord): AssetRecallEventRecord {
     const existing = this.getByIdempotencyKey(event);
     if (existing) {
-      if (stableHash({ ...existing, id: event.id }) === stableHash(event)) return existing;
+      if (sameAssetRecallEvent(existing, event)) return existing;
       throw new AssetRecallEventIdempotencyConflictError(
         event.namespaceId, event.episodeId, event.assetId, event.assetVersion, event.mode, event.eventKey
       );
