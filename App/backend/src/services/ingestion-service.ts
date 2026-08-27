@@ -177,7 +177,7 @@ async function processConversation(
 
     const workspacePath = firstWorkspacePath(turn.messages);
     const request = {
-      requestId: createTurnRequestId(ctx.sourceId, turn),
+      requestId: createTurnRequestId(ctx.sourceId, turn, workspacePath),
       adapterId: `agent-source:${ctx.sourceId}`,
       content: renderMessagesToMarkdown(turn.messages),
       layer: "L1",
@@ -223,6 +223,19 @@ async function processConversation(
       }
       emitIngestionProgress(ctx, stats);
     } catch (error) {
+      if (isIdempotencyConflict(error)) {
+        // The server already recorded this turn's idempotency key under a
+        // different request body shape (e.g. imports made before the
+        // namespace field existed). The turn is stored, so treat it as
+        // ingested instead of failing and replaying the conflict forever.
+        stats.deduped += turn.messages.length;
+        stats.dedupedMemories += 1;
+        for (const dedupKey of dedupKeys) {
+          options.agentSourceRepository.markSeen(dedupKey, ctx.sourceId);
+        }
+        emitIngestionProgress(ctx, stats);
+        continue;
+      }
       failed = true;
       stats.failed += turn.messages.length;
       stats.failedMemories += 1;
@@ -332,14 +345,32 @@ function createDedupKey(sourceId: string, messageId: string): string {
   return createHash("sha256").update(`${sourceId}::${messageId}`).digest("hex");
 }
 
-function createTurnRequestId(sourceId: string, turn: ImportedTurn): string {
+/**
+ * Creates a deterministic request id for a turn.
+ *
+ * Includes every body field that identifies the stored memory (content,
+ * created time and the workspace-scoped namespace) so a body-shape change
+ * produces a new key instead of colliding with an old idempotency record.
+ */
+function createTurnRequestId(sourceId: string, turn: ImportedTurn, workspacePath: string | null): string {
   return createHash("sha256")
     .update([
       stableTurnIdentity(sourceId, turn),
       turnCreatedAt(turn),
-      renderMessagesToMarkdown(turn.messages)
+      renderMessagesToMarkdown(turn.messages),
+      workspacePath ?? ""
     ].join("\u0000"))
     .digest("hex");
+}
+
+/** Detects the memory layer's "idempotency key reused" 409 conflict. */
+function isIdempotencyConflict(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === "object" &&
+      (error as { code?: unknown }).code === "conflict" &&
+      (error as { status?: unknown }).status === 409
+  );
 }
 
 function createStableTurnId(sourceId: string, turn: ImportedTurn): string {

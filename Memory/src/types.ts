@@ -749,6 +749,8 @@ export interface MemoryAddRequest extends RequestEnvelope {
   provenance?: Partial<MemoryProvenance>;
   supersedesMemoryId?: string;
   supersessionReason?: string;
+  /** Escape hatch for semantic-dedup merge-tier blocks: why a parallel version must be created. */
+  allowCreateReason?: string;
 }
 
 export interface FeedbackTarget {

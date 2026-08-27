@@ -460,6 +460,83 @@ describe("ingestion service", () => {
     });
   });
 
+  it("treats an idempotency conflict as already-ingested instead of failing the turn", async () => {
+    const markSeen = vi.fn(() => true);
+    const service = createService(
+      {
+        async addMemory() {
+          throw Object.assign(new Error("idempotency key reused with different request body"), {
+            code: "conflict",
+            status: 409
+          });
+        }
+      },
+      { hasSeen: () => false, markSeen }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2), createMessage("conv-a", 3)]),
+      { sourceId: "cursor" }
+    );
+
+    expect(stats).toMatchObject({
+      attempted: 3,
+      written: 0,
+      deduped: 3,
+      failed: 0,
+      writtenMemories: 0,
+      dedupedMemories: 1,
+      failedMemories: 0,
+      errors: [],
+      failedConversationIds: [],
+      incompleteConversationIds: ["conv-a"]
+    });
+    expect(markSeen).toHaveBeenCalledTimes(2);
+  });
+
+  it("derives a different request id when the workspace path differs", async () => {
+    const added: Array<Record<string, unknown>> = [];
+    const service = createService({
+      async addMemory(input) {
+        added.push(input as Record<string, unknown>);
+        return {
+          id: `memory-${added.length}`,
+          kind: "trace",
+          memoryLayer: input.layer ?? "L1",
+          status: "activated",
+          title: input.title ?? "Imported conversation",
+          summary: input.content,
+          tags: input.tags ?? [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
+    });
+
+    await service.ingest(
+      toAsyncIterable([
+        createMessage("conv-a", 1),
+        createMessage("conv-a", 2),
+        createMessage("conv-a", 3)
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    const withWorkspace = [
+      createMessage("conv-b", 1),
+      createMessage("conv-b", 2),
+      createMessage("conv-b", 3)
+    ].map((message) => ({ ...message, workspacePath: "/repo/one" }));
+    await service.ingest(toAsyncIterable(withWorkspace), { sourceId: "cursor" });
+
+    const [unscoped, scoped] = added;
+    expect(unscoped.requestId).toMatch(/^[a-f0-9]{64}$/);
+    expect(scoped.requestId).toMatch(/^[a-f0-9]{64}$/);
+    expect(unscoped.requestId).not.toEqual(scoped.requestId);
+    expect(scoped.namespace).toEqual({ source: "cursor", profileId: "default", workspacePath: "/repo/one" });
+    expect(unscoped.namespace).toBeUndefined();
+  });
+
   it("does not import user-only or assistant-only turns as memories", async () => {
     const calls: string[] = [];
     const service = createService({

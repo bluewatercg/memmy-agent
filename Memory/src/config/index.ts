@@ -78,6 +78,27 @@ export interface EmbeddingConfig {
   normalize: boolean;
 }
 
+export type SemanticDedupLayer = "L1" | "L2" | "L3" | "Skill";
+
+/**
+ * Write-path semantic dedup (DreamCycle-style three-tier verdict).
+ * merge ≥ mergeThreshold → block unless request carries allowCreateReason;
+ * warn ≥ warnThreshold → allow but annotate; otherwise distinct.
+ * Embedding unavailable → tier "unknown": never blocks, never falls back
+ * to lexical comparison.
+ */
+export interface SemanticDedupConfig {
+  enabled: boolean;
+  /** Cosine similarity at or above which a duplicate blocks the write (enforced layers only). */
+  mergeThreshold: number;
+  /** Cosine similarity at or above which a warning annotation is attached. */
+  warnThreshold: number;
+  /** Max nearest-neighbour candidates fetched per check. */
+  maxCandidates: number;
+  /** Layers where the merge tier actually rejects the write; other layers observe-only. */
+  blockLayers: SemanticDedupLayer[];
+}
+
 export interface StorageConfig {
   mode: StorageModeName;
   backend: StorageBackendName;
@@ -202,6 +223,7 @@ export interface AlgorithmConfig {
     followUpMode: "merge_follow_ups" | "episode_per_turn";
     mergeMaxGapMs: number;
   };
+  semanticDedup: SemanticDedupConfig;
   retrieval: {
     tier1TopK: number;
     tier2TopK: number;
@@ -448,6 +470,15 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     topicDecisions: {
       enabled: false,
       models: []
+    },
+    semanticDedup: {
+      enabled: true,
+      mergeThreshold: 0.86,
+      warnThreshold: 0.72,
+      maxCandidates: 5,
+      // L1 turns are high-volume session data with legitimate near-repeats;
+      // enforce only on durable layers, observe on L1 until thresholds are calibrated.
+      blockLayers: ["L2", "L3", "Skill"]
     }
   }
 };
@@ -559,6 +590,11 @@ function configFromEnv(): Record<string, unknown> {
       topicDecisions: compactRecord({
         enabled: booleanEnv("MEMMY_TOPIC_DECISIONS_ENABLED"),
         models: process.env.MEMMY_TOPIC_DECISION_MODELS
+      }),
+      semanticDedup: compactRecord({
+        enabled: booleanEnv("MEMMY_SEMANTIC_DEDUP_ENABLED"),
+        mergeThreshold: numberEnv("MEMMY_SEMANTIC_DEDUP_MERGE_THRESHOLD"),
+        warnThreshold: numberEnv("MEMMY_SEMANTIC_DEDUP_WARN_THRESHOLD")
       })
     })
   });
@@ -872,7 +908,23 @@ function normalizeAlgorithm(input: Record<string, unknown>): AlgorithmConfig {
         DEFAULT_MEMMY_CONFIG.algorithm.retrieval.readOnlyInjectionProfile
       )
     },
-    topicDecisions: normalizeTopicDecisions(asRecord(input.topicDecisions))
+    topicDecisions: normalizeTopicDecisions(asRecord(input.topicDecisions)),
+    semanticDedup: normalizeSemanticDedup(asRecord(input.semanticDedup))
+  };
+}
+
+function normalizeSemanticDedup(input: Record<string, unknown>): SemanticDedupConfig {
+  const defaults = DEFAULT_MEMMY_CONFIG.algorithm.semanticDedup;
+  const blockLayers = Array.isArray(input.blockLayers)
+    ? input.blockLayers.filter((value): value is SemanticDedupLayer =>
+      value === "L1" || value === "L2" || value === "L3" || value === "Skill")
+    : defaults.blockLayers;
+  return {
+    enabled: booleanValue(input.enabled, defaults.enabled),
+    mergeThreshold: numberValue(input.mergeThreshold, defaults.mergeThreshold),
+    warnThreshold: numberValue(input.warnThreshold, defaults.warnThreshold),
+    maxCandidates: numberValue(input.maxCandidates, defaults.maxCandidates),
+    blockLayers
   };
 }
 
