@@ -18,7 +18,7 @@ describe("RuntimeApp bootstrap loading", () => {
     const source = readFileSync(resolve(__dirname, "../..", "app.tsx"), "utf8");
 
     expect(source).toContain("const guidanceCompleted = readGuidanceCompleted(");
-    expect(source).toContain("accountSession,\n          guidanceCompleted");
+    expect(source).toContain("accountSession,\n          guidanceCompleted,\n          modelConfig");
   });
 
   it("handles existing main-window route targets without reloading the renderer", () => {
@@ -51,7 +51,8 @@ describe("RuntimeApp bootstrap loading", () => {
     expect(appSource).toContain("<AgentRuntimeBridge taskStateCoordinator={taskStateCoordinator ?? undefined}>");
     expect(appSource.indexOf("<UpdateCoordinatorProvider>")).toBeLessThan(appSource.indexOf("<AppRouter onRetry={retry} />"));
     expect(routerSource).toContain("<GlobalUpdateDialog");
-    expect(routerSource).toContain("isPetWindowContext\n          || Boolean(petGuideRequest)\n          || tokenModalOpen");
+    expect(routerSource).toContain("isPetWindowContext\n          || Boolean(petGuideRequest)");
+    expect(routerSource).not.toContain("tokenModalOpen");
     expect(routerSource).toContain('|| workspaceGuidanceStep === "product_tour"');
     expect(routerSource).toContain('|| workspaceGuidanceStep === "nickname"');
   });

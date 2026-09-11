@@ -24,6 +24,7 @@ import {
   Search,
   Terminal,
   Trash2,
+  Undo2,
   Wand2,
   X,
 } from "lucide-react";
@@ -44,6 +45,8 @@ import { useTranslation } from "../i18n/use-translation.js";
 import type { MessageKey, MessageValues, ResolvedLanguage } from "../i18n/messages.js";
 import { WINDOW_CONTROLS_OVERLAY_SAFE_TOP_STYLE } from "../theme/window-controls-overlay.js";
 import type { AgentChatMediaAttachment, AgentChatMessage, AgentCompactionStatus, AgentRetryWaitStatus } from "../state/agent-chat-slice.js";
+import type { RecallEvidenceOutput, RecallHit } from "@memmy/local-api-contracts";
+import type { MemoryRuntimeClient } from "../api/memory-runtime-client.js";
 import {
   formatToolCallTrace,
   summarizeToolCall,
@@ -73,7 +76,7 @@ interface AgentThreadMessagesProps {
   historyVersion?: number;
   isSending?: boolean;
   sanitizePlatformApiErrors?: boolean;
-  accountMode?: boolean;
+  memoryRuntimeClient?: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory"> | null;
 }
 
 export type AgentDisplayUnit =
@@ -134,6 +137,10 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
     [props.chatScopeKey, props.messages, props.retryWaitStatus]
   );
   const finalAssistantAnswerIndex = useMemo(() => findFinalAssistantAnswerUnitIndex(units, { isSending: props.isSending }), [props.isSending, units]);
+  const recallEvidenceAnchors = useMemo(
+    () => findRecallEvidenceUserAnchors(units, { isSending: props.isSending }),
+    [props.isSending, units]
+  );
   const [manualOpenByActivityKey, setManualOpenByActivityKey] = useState<Record<string, boolean | undefined>>({});
   const previousRunningByActivityKey = useRef<Record<string, boolean>>({});
   const activityRunningByKey = useMemo(() => {
@@ -215,7 +222,8 @@ export const AgentThreadMessages = memo(function AgentThreadMessages(props: Agen
               deferContentRender={shouldDeferAgentMessageContent(unit, index, units.length)}
               deferredRevealDelayMs={deferredAgentMessageRevealDelay(index, units.length)}
               sanitizePlatformApiErrors={props.sanitizePlatformApiErrors === true}
-              accountMode={props.accountMode === true}
+              memoryRuntimeClient={props.memoryRuntimeClient}
+              recallEvidenceTurnId={recallEvidenceAnchors.get(index)}
             />
             {unit.message.id === props.afterMessageId ? props.afterMessageContent : null}
           </Fragment>
@@ -239,7 +247,7 @@ function areAgentThreadMessagesPropsEqual(previous: AgentThreadMessagesProps, ne
     && previous.isSending === next.isSending
     && previous.retryWaitStatus === next.retryWaitStatus
     && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
-    && previous.accountMode === next.accountMode;
+    && previous.memoryRuntimeClient === next.memoryRuntimeClient;
 }
 
 export function buildAgentDisplayUnits(messages: AgentChatMessage[], options: { chatScopeKey: string; retryWaitStatus?: AgentRetryWaitStatus | null }): AgentDisplayUnit[] {
@@ -386,6 +394,36 @@ function findLastUserUnitIndex(units: AgentDisplayUnit[]): number {
   return -1;
 }
 
+function findRecallEvidenceUserAnchors(
+  units: AgentDisplayUnit[],
+  options: { isSending?: boolean }
+): Map<number, string> {
+  const anchors = new Map<number, string>();
+  const lastUserUnitIndex = findLastUserUnitIndex(units);
+  let userUnitIndex = -1;
+  for (let index = 0; index < units.length; index += 1) {
+    const unit = units[index];
+    if (unit?.type !== "single") continue;
+    if (unit.message.role === "user") {
+      userUnitIndex = index;
+      continue;
+    }
+    if (
+      userUnitIndex < 0 ||
+      unit.message.role !== "assistant" ||
+      unit.message.kind === "trace" ||
+      unit.message.kind === "narration" ||
+      unit.message.kind === "context_compaction" ||
+      unit.message.content.trim().length === 0 ||
+      (options.isSending && userUnitIndex === lastUserUnitIndex)
+    ) continue;
+    const userUnit = units[userUnitIndex];
+    const turnId = unit.message.turnId ?? (userUnit?.type === "single" ? userUnit.message.turnId : undefined);
+    if (turnId) anchors.set(userUnitIndex, turnId);
+  }
+  return anchors;
+}
+
 interface SingleMessageProps {
   message: AgentChatMessage;
   artifactClient?: AgentArtifactClient | null;
@@ -396,7 +434,8 @@ interface SingleMessageProps {
   deferContentRender?: boolean;
   deferredRevealDelayMs?: number;
   sanitizePlatformApiErrors?: boolean;
-  accountMode?: boolean;
+  memoryRuntimeClient?: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory"> | null;
+  recallEvidenceTurnId?: string;
 }
 
 const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
@@ -409,18 +448,25 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
   if (message.role === "user") {
     const hasContent = message.content.trim().length > 0;
     const timestamp = messageTimestamp(message.createdAt, language, t);
+    const copyAction = <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />;
     return (
       <div className="agent-user-turn flex min-w-0 justify-end">
-        <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-2">
+        <div className="flex min-w-0 max-w-[75%] flex-col items-end gap-2 w-full">
           {message.media?.length ? (
             <UserMediaPreviewGrid media={message.media} artifactClient={props.artifactClient} />
           ) : null}
           {hasContent ? (
-            <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user max-w-full min-w-0">
+            <div className="agent-chat-bubble-frame agent-chat-bubble-frame--user w-full max-w-full min-w-0">
               <div className="agent-chat-bubble agent-chat-bubble--user max-w-full min-w-0 overflow-hidden px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
                 {message.content}
               </div>
-              <MessageBubbleCopyButton text={message.content} align="right" timestamp={timestamp} />
+              {props.recallEvidenceTurnId && props.memoryRuntimeClient ? (
+                <TurnRecallEvidence
+                  turnId={props.recallEvidenceTurnId}
+                  client={props.memoryRuntimeClient}
+                  trailingAction={copyAction}
+                />
+              ) : copyAction}
             </div>
           ) : null}
         </div>
@@ -457,7 +503,6 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
       <div className="flex min-w-0 justify-start">
         <AgentModelErrorNotice
           content={message.content}
-          accountMode={props.accountMode === true}
           modelError={message.modelError}
         />
       </div>
@@ -507,6 +552,268 @@ const SingleMessage = memo(function SingleMessage(props: SingleMessageProps) {
   );
 }, areSingleMessagePropsEqual);
 
+type RecallMember = NonNullable<RecallHit["members"]>[number];
+
+function TurnRecallEvidence(props: {
+  turnId: string;
+  client: Pick<MemoryRuntimeClient, "recallEvidence" | "deleteMemory">;
+  trailingAction?: ReactNode;
+}) {
+  const { language, t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [evidence, setEvidence] = useState<RecallEvidenceOutput | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [deleteError, setDeleteError] = useState(false);
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => new Set());
+  const [pendingDeleteHitIds, setPendingDeleteHitIds] = useState<Set<string>>(() => new Set());
+  const [committingDeleteHitIds, setCommittingDeleteHitIds] = useState<Set<string>>(() => new Set());
+  const pendingDeleteMembersRef = useRef(new Map<string, RecallMember[]>());
+  const mountedRef = useRef(true);
+  const lifecycleGenerationRef = useRef(0);
+
+  useEffect(() => {
+    const generation = lifecycleGenerationRef.current + 1;
+    lifecycleGenerationRef.current = generation;
+    mountedRef.current = true;
+    return () => {
+      if (lifecycleGenerationRef.current === generation) mountedRef.current = false;
+      const members = uniqueRecallMembers([...pendingDeleteMembersRef.current.values()].flat());
+      pendingDeleteMembersRef.current.clear();
+      if (members.length > 0) {
+        void Promise.allSettled(members.map((member) => props.client.deleteMemory(member.id)));
+      }
+    };
+  }, [props.client, props.turnId]);
+
+  const commitDelete = async (entries: Array<[string, RecallMember[]]>) => {
+    const generation = lifecycleGenerationRef.current;
+    const hitIds = entries.map(([hitId]) => hitId);
+    const uniqueMembers = uniqueRecallMembers(entries.flatMap(([, members]) => members));
+    const results = await Promise.allSettled(
+      uniqueMembers.map((member) => props.client.deleteMemory(member.id))
+    );
+    if (!mountedRef.current || lifecycleGenerationRef.current !== generation) return;
+    const deletedMemberIds = uniqueMembers
+      .filter((_, index) => {
+        const result = results[index];
+        return result?.status === "fulfilled"
+          || (result?.status === "rejected" && isAlreadyDeletedError(result.reason));
+      })
+      .map((member) => member.id);
+    setDeletedIds((current) => new Set([...current, ...deletedMemberIds]));
+    setCommittingDeleteHitIds((current) => {
+      const next = new Set(current);
+      hitIds.forEach((hitId) => next.delete(hitId));
+      return next;
+    });
+    setDeleteError(results.some((result) =>
+      result.status === "rejected" && !isAlreadyDeletedError(result.reason)
+    ));
+  };
+
+  const flushPendingDeletes = () => {
+    const entries = [...pendingDeleteMembersRef.current.entries()];
+    if (entries.length === 0) return;
+    pendingDeleteMembersRef.current.clear();
+    setPendingDeleteHitIds(new Set());
+    setCommittingDeleteHitIds((current) => new Set([
+      ...current,
+      ...entries.map(([hitId]) => hitId)
+    ]));
+    void commitDelete(entries);
+  };
+
+  const toggle = async () => {
+    if (open) {
+      setOpen(false);
+      flushPendingDeletes();
+      return;
+    }
+    setOpen(true);
+    if (evidence || loading) return;
+    setLoading(true);
+    setLoadError(false);
+    try {
+      setEvidence(await props.client.recallEvidence(props.turnId));
+    } catch {
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stageDelete = (hit: RecallHit) => {
+    if (pendingDeleteMembersRef.current.has(hit.id)) return;
+    const members = recallMembers(hit).filter((member) => !deletedIds.has(member.id));
+    if (members.length === 0) return;
+    setDeleteError(false);
+    pendingDeleteMembersRef.current.set(hit.id, members);
+    setPendingDeleteHitIds((current) => new Set([...current, hit.id]));
+  };
+
+  const undoDelete = (hitId: string) => {
+    if (!pendingDeleteMembersRef.current.delete(hitId)) return;
+    setPendingDeleteHitIds((current) => {
+      const next = new Set(current);
+      next.delete(hitId);
+      return next;
+    });
+  };
+
+  return (
+    <div className="w-full text-xs text-text-ink/55">
+      <div className="flex min-h-6 items-center justify-end gap-1">
+        <button
+          type="button"
+          onClick={() => void toggle()}
+          onPointerUp={(event) => event.currentTarget.blur()}
+          aria-expanded={open}
+          className="agent-memory-evidence-toggle inline-flex h-6 items-center gap-1 rounded-md px-1.5 leading-none transition-colors hover:bg-black/5 hover:text-text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-black/10"
+        >
+          <ListTree size={13} aria-hidden="true" />
+          {open ? t("home.memoryEvidence.hide") : t("home.memoryEvidence.show")}
+        </button>
+        {props.trailingAction}
+      </div>
+      {open ? (
+        <div className="mt-2 ml-auto w-full max-w-3xl space-y-2 text-left">
+          {loading ? (
+            <p className="rounded-xl border border-border-stone/50 bg-background-paper/90 px-3.5 py-3">
+              {t("home.memoryEvidence.loading")}
+            </p>
+          ) : null}
+          {loadError ? (
+            <p className="rounded-xl border border-red-200/70 bg-red-50/70 px-3.5 py-3 text-red-600">
+              {t("home.memoryEvidence.unavailable")}
+            </p>
+          ) : null}
+          {deleteError ? (
+            <p className="rounded-xl border border-red-200/70 bg-red-50/70 px-3.5 py-3 text-red-600">
+              {t("home.memoryEvidence.deleteFailed")}
+            </p>
+          ) : null}
+          {!loading && !loadError && evidence?.hits.length === 0 ? (
+            <p className="rounded-xl border border-border-stone/50 bg-background-paper/90 px-3.5 py-3">
+              {t("home.memoryEvidence.empty")}
+            </p>
+          ) : null}
+          {evidence?.hits.map((hit) => {
+            const members = recallMembers(hit);
+            const deleted = members.length > 0 && members.every((member) => deletedIds.has(member.id));
+            const pendingDelete = pendingDeleteHitIds.has(hit.id);
+            if (committingDeleteHitIds.has(hit.id) || deleted) return null;
+            const layers = recallHitLayers(hit, members);
+            const updatedAt = hit.updatedAt ?? members[0]?.updatedAt;
+            const traceId = recallHitTraceId(hit, members);
+            return (
+              <article
+                key={`${hit.sourceTurnId ?? hit.id}:${hit.id}`}
+                className="rounded-lg bg-canvas-oat/35 px-3 py-2.5"
+              >
+                <div data-memory-evidence-header className="flex h-6 min-w-0 items-center gap-2 leading-none">
+                  <div className="flex min-w-0 flex-1 items-center gap-2 leading-none">
+                    <p className="min-w-0 truncate font-mono text-[11px] font-medium leading-none text-text-ink/70" title={traceId}>
+                      {traceId}
+                    </p>
+                    {layers.map((layer) => (
+                      <span key={layer} className="inline-flex h-5 shrink-0 items-center rounded-full bg-background-paper/80 px-1.5 text-[10px] font-medium leading-none text-text-ink/50">
+                        {recallLayerLabel(layer, t)}
+                      </span>
+                    ))}
+                    <span className="inline-flex h-5 shrink-0 items-center text-[10px] leading-none tabular-nums text-text-ink/45">
+                      {t("home.memoryEvidence.recallScore", { score: hit.score.toFixed(2) })}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => pendingDelete ? undoDelete(hit.id) : stageDelete(hit)}
+                    aria-label={pendingDelete ? t("home.memoryEvidence.undo") : t("home.memoryEvidence.delete")}
+                    className={`${pendingDelete ? "agent-memory-evidence-undo" : "agent-memory-evidence-delete"} ml-auto inline-flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-text-ink/45`}
+                  >
+                    {pendingDelete ? <Undo2 size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}
+                    <span className="leading-none">
+                      {pendingDelete ? t("home.memoryEvidence.undo") : t("home.memoryEvidence.delete")}
+                    </span>
+                  </button>
+                </div>
+                {hit.sourceAgentId ? (
+                  <p className="mt-2 truncate text-[10px] text-text-ink/40" title={[hit.sourceAgentId, hit.sourceSkillId].filter(Boolean).join(" / ")}>
+                    {t("home.memoryEvidence.sourceSkill")}: {hit.sourceAgentId}
+                    {hit.sourceSkillId ? ` / ${hit.sourceSkillId}` : ""}
+                    {hit.sourceSkillVersion ? ` @ ${hit.sourceSkillVersion}` : ""}
+                  </p>
+                ) : null}
+                <p className="mt-2 whitespace-pre-wrap break-words text-[13px] leading-[1.6] text-text-ink/70">
+                  {hit.snippet}
+                </p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[10px] text-text-ink/40">
+                  {hit.sourceTurnId ? <span>{t("home.memoryEvidence.sourceConversation")}</span> : null}
+                  {updatedAt ? (
+                    <span>{t("home.memoryEvidence.updatedAt")} {formatRecallMemberTime(updatedAt, language)}</span>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function recallMembers(hit: RecallHit): RecallMember[] {
+  if (hit.members?.length) return hit.members;
+  const createdAt = hit.createdAt ?? hit.updatedAt;
+  const updatedAt = hit.updatedAt ?? hit.createdAt;
+  if (!createdAt || !updatedAt) return [];
+  return [{
+    id: hit.id,
+    kind: hit.kind,
+    memoryLayer: hit.memoryLayer,
+    status: hit.status,
+    content: hit.snippet,
+    createdAt,
+    updatedAt,
+    retrievalRoute: hit.memoryLayer === "UserMemory"
+      ? "user_memory"
+      : hit.memoryLayer === "L1"
+        ? "l1"
+        : "agent_memory"
+  }];
+}
+
+function uniqueRecallMembers(members: RecallMember[]): RecallMember[] {
+  return [...new Map(members.map((member) => [member.id, member])).values()];
+}
+
+function isAlreadyDeletedError(error: unknown): boolean {
+  return isRecord(error) && error.status === 404;
+}
+
+function recallHitTraceId(hit: RecallHit, members: RecallMember[]): string {
+  return members.find((member) => member.memoryLayer === "L1")?.id
+    ?? members[0]?.id
+    ?? hit.id;
+}
+
+function recallHitLayers(hit: RecallHit, members: RecallMember[]): RecallHit["memoryLayer"][] {
+  return [...new Set(members.length > 0
+    ? members.map((member) => member.memoryLayer)
+    : [hit.memoryLayer])];
+}
+
+function recallLayerLabel(layer: RecallHit["memoryLayer"], t: (key: MessageKey) => string): string {
+  if (layer === "UserMemory") return t("home.memoryEvidence.layer.userMemory");
+  if (layer === "L1") return t("home.memoryEvidence.layer.l1");
+  return t("home.memoryEvidence.layer.agentMemory");
+}
+
+function formatRecallMemberTime(value: string, language: ResolvedLanguage): string {
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed.toLocaleString(language) : value;
+}
+
 function contextCompactionFallbackText(status: AgentCompactionStatus): string {
   if (status === "running") return "Summarizing chat context";
   if (status === "error") return "Context summary failed";
@@ -553,12 +860,10 @@ function RetryWaitStatusLine(props: { status: AgentRetryWaitStatus }) {
 
 function AgentModelErrorNotice(props: {
   content: string;
-  accountMode?: boolean;
   modelError?: AgentChatMessage["modelError"];
 }) {
   const { t } = useTranslation();
   const { title, detail } = formatAgentModelError(props.content, t, {
-    accountMode: props.accountMode === true,
     modelError: props.modelError
   });
 
@@ -652,10 +957,11 @@ function areSingleMessagePropsEqual(previous: SingleMessageProps, next: SingleMe
     && previous.unitIndex === next.unitIndex
     && previous.isFinalAssistantAnswer === next.isFinalAssistantAnswer
     && previous.forceMessageActions === next.forceMessageActions
+    && previous.memoryRuntimeClient === next.memoryRuntimeClient
+    && previous.recallEvidenceTurnId === next.recallEvidenceTurnId
     && previous.deferContentRender === next.deferContentRender
     && previous.deferredRevealDelayMs === next.deferredRevealDelayMs
-    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors
-    && previous.accountMode === next.accountMode;
+    && previous.sanitizePlatformApiErrors === next.sanitizePlatformApiErrors;
 }
 
 export function resolveAgentMessageDisplayContent(message: AgentChatMessage, input: { sanitizePlatformApiErrors: boolean; fallback: string }): string {
@@ -2068,11 +2374,18 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
   const status = props.edit.status ?? "editing";
   const isError = status === "error";
   const isDone = status === "done";
-  const labelKey = isError ? "agent.activity.failed" : isDone ? "agent.activity.edited" : "agent.activity.editing";
+  const isUnchanged = isDone && props.edit.unchanged === true;
+  const labelKey = isError
+    ? "agent.activity.failed"
+    : isUnchanged
+      ? "agent.activity.unchanged"
+      : isDone
+        ? "agent.activity.edited"
+        : "agent.activity.editing";
   const target = props.edit.path || "pending file edit";
   const added = props.edit.added ?? 0;
   const deleted = props.edit.deleted ?? 0;
-  const hasDiff = !props.edit.binary && (added > 0 || deleted > 0);
+  const hasDiff = !isUnchanged && !props.edit.binary && (added > 0 || deleted > 0);
   return (
     <div className={`agent-activity-timeline-item agent-activity-timeline-item--file-edit agent-activity-timeline-item--edit${isError ? " agent-activity-timeline-item--error" : ""}`}>
       <Pencil size={13} aria-hidden="true" className="agent-activity-timeline-item__icon" />
@@ -2087,7 +2400,9 @@ function FileEditLine(props: { edit: AgentFileEdit; t: Translate }) {
           ) : null}
           {props.edit.binary ? <span className="ml-2 text-text-ink/40">binary</span> : null}
         </p>
-        <p className="agent-activity-timeline__status sr-only">{status} · {props.edit.binary ? "binary" : `+${added} / -${deleted}`}</p>
+        <p className="agent-activity-timeline__status sr-only">
+          {isUnchanged ? "unchanged" : `${status} · ${props.edit.binary ? "binary" : `+${added} / -${deleted}`}`}
+        </p>
         {props.edit.error && <p className="agent-activity-timeline-item__error">{props.edit.error}</p>}
       </div>
     </div>
@@ -2225,13 +2540,15 @@ function toolEventName(event: AgentToolProgressEvent): string {
 
 function toolGroupLabel(items: ActivityRenderItem[], t: Translate): { text: string; added: number; deleted: number } {
   let edited = 0;
+  let unchanged = 0;
   let addedTotal = 0;
   let deletedTotal = 0;
   let explored = 0;
   let other = 0;
   for (const item of items) {
     if (item.type === "fileEdit") {
-      edited += 1;
+      if (item.edit.unchanged === true) unchanged += 1;
+      else edited += 1;
       addedTotal += item.edit.added ?? 0;
       deletedTotal += item.edit.deleted ?? 0;
       continue;
@@ -2249,7 +2566,10 @@ function toolGroupLabel(items: ActivityRenderItem[], t: Translate): { text: stri
   // Category labels only when the whole group IS that category — a mixed
   // group labeled "Explored 1 item" while holding 2 rows misreports the count.
   // Mixed groups always fall back to the total step tally.
-  const total = edited + explored + other;
+  const total = edited + unchanged + explored + other;
+  if (unchanged > 0 && unchanged === total) {
+    return { text: t("agent.activity.group.unchanged"), added: addedTotal, deleted: deletedTotal };
+  }
   if (edited > 0 && edited === total) {
     const text = edited === 1 ? t("agent.activity.group.editedOne") : t("agent.activity.group.edited", { count: edited });
     return { text, added: addedTotal, deleted: deletedTotal };

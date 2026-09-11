@@ -5,7 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { INSTALLATION_SCAN_SCOPE_UUID } from "../../installation-scan-scope.js";
 import { LOCAL_BYOK_ACCOUNT_UUID } from "../account-context.js";
-import { createAppStateStore, runMigrations } from "../index.js";
+import { createAppStateStore, runMigrations, type AppStateStore } from "../index.js";
 import { captureLegacyAppState } from "../legacy-state-migration.js";
 import { createSqliteSecretStore } from "../secret-store.js";
 
@@ -17,6 +17,93 @@ afterEach(() => {
     tempDir = undefined;
   }
 });
+
+function readHistoricalModelConfig(store: AppStateStore): Record<string, unknown> {
+  const row = store.db.prepare(
+    "SELECT * FROM account_model_config WHERE uuid = ?"
+  ).get(LOCAL_BYOK_ACCOUNT_UUID) as Record<string, unknown> | undefined;
+  if (!row) throw new Error("historical local BYOK model row is missing");
+  const secret = (ref: unknown) => typeof ref === "string" ? store.secretStore.get(ref) : null;
+  const primaryKey = secret(row.api_key_ref);
+  const embeddingKey = secret(row.embedding_api_key_ref);
+  const memoryKey = secret(row.memory_api_key_ref) ?? primaryKey;
+  const skillKey = secret(row.skill_api_key_ref) ?? primaryKey;
+  const asrKey = secret(row.asr_api_key_ref);
+  const imageKey = secret(row.image_api_key_ref);
+  const masked = (value: string | null) => value ? "••••" : "";
+  return {
+    provider: row.provider,
+    baseUrl: row.base_url,
+    modelId: row.model_id,
+    hasApiKey: Boolean(primaryKey),
+    apiKeyMasked: masked(primaryKey),
+    embedding: row.embedding_mode === "custom"
+      ? {
+          mode: "custom",
+          baseUrl: row.embedding_base_url,
+          modelId: row.embedding_model_id,
+          hasApiKey: Boolean(embeddingKey),
+          apiKeyMasked: masked(embeddingKey)
+        }
+      : { mode: "local", baseUrl: null, modelId: null, hasApiKey: false, apiKeyMasked: "" },
+    memmyMemory: {
+      summary: {
+        provider: row.memory_provider ?? row.provider,
+        baseUrl: row.memory_base_url ?? row.base_url,
+        modelId: row.memory_model_id ?? row.model_id,
+        hasApiKey: Boolean(memoryKey),
+        apiKeyMasked: masked(memoryKey)
+      },
+      evolution: {
+        provider: row.skill_provider ?? row.provider,
+        baseUrl: row.skill_base_url ?? row.base_url,
+        modelId: row.skill_model_id ?? row.model_id,
+        hasApiKey: Boolean(skillKey),
+        apiKeyMasked: masked(skillKey)
+      }
+    },
+    asr: {
+      provider: row.asr_provider,
+      baseUrl: row.asr_base_url,
+      modelId: row.asr_model_id,
+      hasApiKey: Boolean(asrKey),
+      apiKeyMasked: masked(asrKey)
+    },
+    imageGen: row.image_provider && row.image_base_url && row.image_model_id
+      ? {
+          provider: row.image_provider,
+          baseUrl: row.image_base_url,
+          modelId: row.image_model_id,
+          hasApiKey: Boolean(imageKey),
+          apiKeyMasked: masked(imageKey)
+        }
+      : null,
+    updatedAt: row.updated_at
+  };
+}
+
+function readHistoricalModelSecret(
+  store: AppStateStore,
+  target: "primary" | "embedding"
+): string | null {
+  const column = target === "primary" ? "api_key_ref" : "embedding_api_key_ref";
+  const row = store.db.prepare(
+    `SELECT ${column} AS ref FROM account_model_config WHERE uuid = ?`
+  ).get(LOCAL_BYOK_ACCOUNT_UUID) as { ref?: string | null } | undefined;
+  return row?.ref ? store.secretStore.get(row.ref) : null;
+}
+
+function ensureHistoricalModelRow(db: DatabaseSync): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    "INSERT OR IGNORE INTO cloud_accounts (uuid, created_at, updated_at) VALUES (?, ?, ?)"
+  ).run(LOCAL_BYOK_ACCOUNT_UUID, now, now);
+  db.prepare(
+    `INSERT OR IGNORE INTO account_model_config (
+       uuid, provider, base_url, model_id, embedding_mode, created_at, updated_at
+     ) VALUES (?, 'openai_compatible', 'https://api.openai.com/v1', '', 'local', ?, ?)`
+  ).run(LOCAL_BYOK_ACCOUNT_UUID, now, now);
+}
 
 describe("app state store migrations", () => {
   it("creates initial tables and seed rows idempotently", () => {
@@ -37,13 +124,15 @@ describe("app state store migrations", () => {
     expect(onboarding).toMatchObject({
       completed: false,
       currentStep: "scan_permission_required",
-      scanPermission: "unset"
+      scanPermission: "unset",
+      firstEncounterReportStatus: "pending"
     });
     expect(settings.userMode).toBe("unset");
     expect(settings.menuBarIconEnabled).toBe(true);
+    expect(settings.stopMemoryServiceOnExit).toBe(false);
     expect(agentSources).toEqual([]);
-    expect(firstMigrationCount).toBe(29);
-    expect(secondMigrationCount).toBe(29);
+    expect(firstMigrationCount).toBe(33);
+    expect(secondMigrationCount).toBe(33);
   });
 
   it("preserves the authenticated account when upgrading the legacy 0007 database", () => {
@@ -296,7 +385,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -338,10 +427,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -373,16 +462,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -433,7 +522,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -742,7 +831,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -784,10 +873,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -819,16 +908,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -879,7 +968,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -1188,7 +1277,7 @@ describe("app state store migrations", () => {
     const upgradedSettings = upgradedStore.repositories.bootstrap.getAppSettings();
     const upgradedOnboarding = upgradedStore.repositories.bootstrap.getOnboardingState();
     const upgradedPrivacy = upgradedStore.repositories.bootstrap.getPrivacySettings();
-    const upgradedModel = upgradedStore.repositories.modelConfig.get();
+    const upgradedModel = readHistoricalModelConfig(upgradedStore);
     const upgradedActiveUuid = upgradedStore.db
       .prepare("SELECT active_uuid FROM app_settings WHERE id = 'default'")
       .get() as { active_uuid: string | null };
@@ -1230,10 +1319,10 @@ describe("app state store migrations", () => {
         hasApiKey: true
       }
     });
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(upgradedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(upgradedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     expect(upgradedModelRow).toEqual({
@@ -1265,16 +1354,16 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(reopenedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(reopenedStore)).toMatchObject({
       provider: "deepseek",
       modelId: "deepseek-chat",
       hasApiKey: true,
       embedding: { mode: "custom", modelId: "legacy-embedding", hasApiKey: true }
     });
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("primary")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "primary")).toBe(
       "primary-fixture-value"
     );
-    expect(reopenedStore.repositories.modelConfig.getTestApiKey?.("embedding")).toBe(
+    expect(readHistoricalModelSecret(reopenedStore, "embedding")).toBe(
       "embedding-fixture-value"
     );
     reopenedStore.close();
@@ -1325,7 +1414,7 @@ describe("app state store migrations", () => {
       allowMemoryImprovementUpload: true,
       localOnlyMode: true
     });
-    expect(upgradedStore.repositories.modelConfig.get()).toMatchObject({
+    expect(readHistoricalModelConfig(upgradedStore)).toMatchObject({
       provider: "deepseek",
       baseUrl: "https://legacy-logged-out.example/v1",
       modelId: "deepseek-chat"
@@ -1484,6 +1573,86 @@ describe("app state store migrations", () => {
     expect(onboarding.scanPermission).toBe("scan_and_write_skill");
     expect(installationRow.scan_permission).toBe("scan_and_write_skill");
     expect(accountRow.scan_permission).toBe("unset");
+  });
+
+  it("moves account-scoped agent scan state into the installation scope", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const initialStore = createAppStateStore({ databasePath });
+
+    initialStore.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_sources (
+        uuid, source_id, display_name, data_path, builtin, status,
+        last_scanned_at, sync_recipe_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "Codex",
+      "/Users/test/.codex/sessions",
+      1,
+      "skill_installed",
+      "2026-08-01T10:00:00.000Z",
+      null,
+      "2026-07-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare(`
+      INSERT INTO account_ingestion_seen (uuid, dedup_key, source_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run("cloud-account-a", "codex-message-1", "codex", "2026-08-01T10:01:00.000Z");
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_source_watermarks (
+        uuid, source_id, mode, baseline_at, latest_seen_created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "incremental",
+      "2026-07-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare(`
+      INSERT INTO account_agent_source_conversation_checkpoints (
+        uuid, source_id, conversation_id, last_message_id, last_created_at, content_hash, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "cloud-account-a",
+      "codex",
+      "conversation-1",
+      "message-1",
+      "2026-08-01T10:00:00.000Z",
+      "hash-1",
+      "2026-08-01T10:00:00.000Z"
+    );
+    initialStore.db.prepare("DELETE FROM _migrations WHERE name = ?").run("0028-installation-agent-source-state.sql");
+    initialStore.close();
+
+    const migratedStore = createAppStateStore({ databasePath });
+    expect(migratedStore.db.prepare(
+      "SELECT display_name, last_scanned_at FROM account_agent_sources WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({
+      display_name: "Codex",
+      last_scanned_at: "2026-08-01T10:00:00.000Z"
+    });
+    expect(migratedStore.db.prepare(
+      "SELECT dedup_key FROM account_ingestion_seen WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({ dedup_key: "codex-message-1" });
+    expect(migratedStore.db.prepare(
+      "SELECT latest_seen_created_at FROM account_agent_source_watermarks WHERE uuid = ? AND source_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex")).toEqual({ latest_seen_created_at: "2026-08-01T10:00:00.000Z" });
+    expect(migratedStore.db.prepare(
+      "SELECT content_hash FROM account_agent_source_conversation_checkpoints WHERE uuid = ? AND source_id = ? AND conversation_id = ?"
+    ).get(INSTALLATION_SCAN_SCOPE_UUID, "codex", "conversation-1")).toEqual({ content_hash: "hash-1" });
+    expect(migratedStore.db.prepare(
+      "SELECT COUNT(*) AS count FROM account_agent_sources WHERE uuid = ?"
+    ).get("cloud-account-a")).toEqual({ count: 0 });
+    migratedStore.close();
   });
 
   it("prefers the BYOK permission over a stale active account during migration", () => {
@@ -1722,7 +1891,8 @@ describe("app state store migrations", () => {
       "auto_scan_known_agents",
       "watch_file_changes",
       "auto_inject_skill",
-      "installation_id"
+      "installation_id",
+      "stop_memory_service_on_exit"
     ]);
     expect(settings).toMatchObject({
       defaultLaunchMode: "last",
@@ -1731,7 +1901,8 @@ describe("app state store migrations", () => {
       skinId: "default",
       taskDoneNotificationEnabled: true,
       notificationSoundEnabled: true,
-      menuBarIconEnabled: true
+      menuBarIconEnabled: true,
+      stopMemoryServiceOnExit: false
     });
     expect(cloudAccountColumns).toEqual([
       "uuid",
@@ -1792,11 +1963,16 @@ describe("app state store migrations", () => {
       "cache_creation_input_tokens",
       "metadata_json",
       "usage_json",
-      "created_at"
+      "created_at",
+      "preset_id",
+      "provider",
+      "model",
+      "capability"
     ]);
     expect(byokTokenUsageIndexes).toEqual(expect.arrayContaining([
       "idx_byok_token_usage_events_created",
       "idx_byok_token_usage_events_kind_created",
+      "idx_byok_token_usage_events_model",
       "idx_byok_token_usage_events_source_created"
     ]));
     expect(idempotencyColumns).toContain("uuid");
@@ -1848,7 +2024,7 @@ describe("app state store migrations", () => {
     const currentRef = "legacy:model-api-key";
     const targetRef = `account:${uuid}:model-api-key`;
 
-    initialStore.repositories.modelConfig.get();
+    ensureHistoricalModelRow(initialStore.db);
     initialStore.secretStore.set(currentRef, "sk-current-secret", { uuid, purpose: "model_api_key" });
     initialStore.secretStore.set(targetRef, "sk-stale-secret", { uuid, purpose: "model_api_key" });
     initialStore.db.prepare("UPDATE account_model_config SET api_key_ref = ? WHERE uuid = ?").run(currentRef, uuid);
@@ -2123,6 +2299,49 @@ describe("bootstrap repository writes", () => {
     });
     expect(accountAPrivacy).toMatchObject({ localOnlyMode: true, allowMemoryImprovementUpload: false });
     expect(accountATokenUsage).toMatchObject({ planName: "Account A Plan", remainingTokens: 60 });
+  });
+
+  it("shares the first encounter report state across accounts, BYOK, and database reopen", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const databasePath = join(tempDir, "app.sqlite");
+    const first = createAppStateStore({ databasePath });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-a", "a@example.com", "Account A"),
+      uuid: "cloud-account-a"
+    });
+    first.repositories.bootstrap.updateOnboarding({ firstEncounterReportStatus: "shown" });
+
+    first.repositories.accountSession.upsert({
+      profile: accountProfile("user-b", "b@example.com", "Account B"),
+      uuid: "cloud-account-b"
+    });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+
+    first.repositories.bootstrap.updateAppSettings({ userMode: "byok" });
+    expect(first.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    first.close();
+
+    const reopened = createAppStateStore({ databasePath });
+    expect(reopened.repositories.bootstrap.getOnboardingState().firstEncounterReportStatus).toBe("shown");
+    reopened.close();
+  });
+
+  it("keeps a denied first encounter report skipped after scan permission changes", () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-app-state-"));
+    const store = createAppStateStore({ databasePath: join(tempDir, "app.sqlite") });
+
+    store.repositories.bootstrap.updateOnboarding({
+      scanPermission: "none",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.repositories.bootstrap.updateOnboarding({ scanPermission: "scan_only" });
+
+    expect(store.repositories.bootstrap.getOnboardingState()).toMatchObject({
+      scanPermission: "scan_only",
+      firstEncounterReportStatus: "skipped"
+    });
+    store.close();
   });
 });
 

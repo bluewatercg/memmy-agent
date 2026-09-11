@@ -23,6 +23,7 @@ import type {
   EmbeddingJobProcessor,
   PreparedEmbeddingJob
 } from "../embedding/embedding-job-processor.js";
+import type { PolicyEvidencePreflightReport } from "../evolution/evolution-job-processor.js";
 import {
   embeddingTextForMemory,
   embeddingRetryBackoffMs,
@@ -79,6 +80,8 @@ export interface WorkerStartupReconciliation {
   requeuedJobs: number;
   requeuedEmbeddingRetries: number;
   restartedFailedProcessing: number;
+  reconciledOrphanPolicies: number;
+  policyEvidencePreflight: PolicyEvidencePreflightReport;
   enqueuedImportSummaries: number;
   enqueuedEmbeddingRepairs: number;
   enqueuedRetrievalReindexes: number;
@@ -112,6 +115,8 @@ export interface WorkerRunnerDeps {
   namespaceIdFromMemory: (memory: MemoryRow) => string;
   runWorkerNoWrite: (request: RequestEnvelope) => Promise<WorkerRunSummary>;
   restartFailedProcessing: (at: string, limit: number) => number;
+  previewPolicyEvidenceReconciliation: (limit: number) => PolicyEvidencePreflightReport;
+  reconcileOrphanedPolicies: (at: string, limit: number) => number;
   enqueueJob: (input: EnqueueJobInput) => EvolutionJobRecord;
   enqueueEmbeddingRetry: (
     memory: MemoryRow,
@@ -156,6 +161,8 @@ export class WorkerRunner {
         requeuedJobs: 0,
         requeuedEmbeddingRetries: 0,
         restartedFailedProcessing: 0,
+        reconciledOrphanPolicies: 0,
+        policyEvidencePreflight: emptyPolicyEvidencePreflight(),
         enqueuedImportSummaries: 0,
         enqueuedEmbeddingRepairs: 0,
         enqueuedRetrievalReindexes: 0
@@ -174,6 +181,8 @@ export class WorkerRunner {
       this.deps.appendEmbeddingRetryChange(after, "queued", before);
     }
     const restartedFailedProcessing = this.deps.restartFailedProcessing(at, limit);
+    const policyEvidencePreflight = this.deps.previewPolicyEvidenceReconciliation(limit);
+    const reconciledOrphanPolicies = this.deps.reconcileOrphanedPolicies(at, limit);
 
     let enqueuedImportSummaries = 0;
     let enqueuedEmbeddingRepairs = 0;
@@ -294,6 +303,8 @@ export class WorkerRunner {
       requeuedJobs: interruptedJobs.length + failedJobs.length,
       requeuedEmbeddingRetries: embeddingRetries.length,
       restartedFailedProcessing,
+      reconciledOrphanPolicies,
+      policyEvidencePreflight,
       enqueuedImportSummaries,
       enqueuedEmbeddingRepairs,
       enqueuedRetrievalReindexes
@@ -428,17 +439,38 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
+        const classification = classifyProcessingError(error);
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
+          for (const item of batch) results.push(await this.runLeasedEmbeddingItem(item));
+          continue;
+        }
         for (const item of batch) {
-          if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
-            results.push(this.failLeasedWorkerJob(item.job, error));
-          } else {
-            results.push(this.completeLeasedWorkerJob(item.job));
-          }
+          results.push(this.finishFailedEmbeddingItem(item, error));
         }
       }
     }
 
     return results;
+  }
+
+  async runLeasedEmbeddingItem(item: PreparedEmbeddingJob): Promise<WorkerJobRunResult> {
+    try {
+      const vector = await this.deps.embedder.embedOne(item.text || "(empty)", item.role);
+      this.deps.embeddingJobs.applyEmbeddingVector(item, vector);
+      return this.completeLeasedWorkerJob(item.job);
+    } catch (error) {
+      return this.finishFailedEmbeddingItem(item, error);
+    }
+  }
+
+  finishFailedEmbeddingItem(item: PreparedEmbeddingJob, error: unknown): WorkerJobRunResult {
+    if (classifyProcessingError(error).retryAction !== "retry") {
+      return this.failLeasedWorkerJob(item.job, error);
+    }
+    if (!this.deps.embeddingJobs.enqueueEmbeddingRetryAfterFailure(item, error)) {
+      return this.failLeasedWorkerJob(item.job, error);
+    }
+    return this.completeLeasedWorkerJob(item.job);
   }
 
   completeLeasedWorkerJob(job: EvolutionJobRecord): WorkerJobRunResult {
@@ -461,7 +493,14 @@ export class WorkerRunner {
     const errorMessage = processingStageForJob(job.jobType)
       ? sanitizeProcessingError(error)
       : error instanceof Error ? error.message : String(error);
-    const failedJob = this.deps.repos.runtime.failJob(job.id, errorMessage) ?? {
+    const stage = processingStageForJob(job.jobType);
+    const forceDeadLetter = Boolean(stage && classifyProcessingError(error).retryAction !== "retry");
+    const failedJob = this.deps.repos.runtime.failJob(
+      job.id,
+      errorMessage,
+      this.deps.nowIso(),
+      forceDeadLetter
+    ) ?? {
       ...job,
       status: "failed" as const,
       leasedUntil: null,
@@ -513,6 +552,20 @@ export class WorkerRunner {
     const message = sanitizeProcessingError(error);
     const terminal = job.status === "dead_letter";
     const classification = classifyProcessingError(error);
+    if (terminal && stage === "embedding" && classification.code === "model_input_too_long") {
+      this.deps.repos.processing.update(job.targetMemoryId, {
+        state: "ready_text_only",
+        stage: null,
+        activeJobId: null,
+        attemptCount: job.attempts,
+        retryAction: "none",
+        errorCode: classification.code,
+        errorMessage: message,
+        failedAt: this.deps.nowIso(),
+        updatedAt: this.deps.nowIso()
+      }, ["embedding_pending", "embedding", "failed"]);
+      return;
+    }
     this.deps.repos.processing.update(job.targetMemoryId, {
       state: terminal ? "failed" : stage === "summary" ? "summary_pending" : "embedding_pending",
       stage,
@@ -572,6 +625,13 @@ export class WorkerRunner {
           }
         }
       } catch (error) {
+        const classification = classifyProcessingError(error);
+        if (classification.code === "model_input_too_long" && batch.length > 1) {
+          for (const item of batch) {
+            results.push(await this.runClaimedEmbeddingRetryItem(item.retry, item.claim, item.attemptNo));
+          }
+          continue;
+        }
         for (const item of batch) {
           results.push(this.failClaimedEmbeddingRetry(item.retry, item.claim, item.attemptNo, error));
         }
@@ -584,6 +644,19 @@ export class WorkerRunner {
       failed: results.reduce((sum, result) => sum + result.failed, 0),
       items: results.map((result) => result.item).filter((item): item is EmbeddingRetryRunSummary["items"][number] => Boolean(item))
     };
+  }
+
+  async runClaimedEmbeddingRetryItem(
+    retry: EmbeddingRetryRecord,
+    claim: EmbeddingRetryClaim,
+    attemptNo: number
+  ): Promise<EmbeddingRetryResult> {
+    try {
+      const vector = await this.deps.embedder.embedOne(retry.sourceText || "(empty)", retry.embedRole);
+      return this.applyEmbeddingRetryVector(retry, claim, vector);
+    } catch (error) {
+      return this.failClaimedEmbeddingRetry(retry, claim, attemptNo, error);
+    }
   }
 
   applyEmbeddingRetryVector(
@@ -642,8 +715,8 @@ export class WorkerRunner {
     attemptNo: number,
     error: unknown
   ): EmbeddingRetryResult {
-    const message = error instanceof Error ? error.message : String(error);
-    const terminal = attemptNo >= retry.maxAttempts;
+    const message = sanitizeProcessingError(error);
+    const terminal = classifyProcessingError(error).retryAction !== "retry" || attemptNo >= retry.maxAttempts;
     const updated = terminal
       ? this.deps.repos.runtime.markEmbeddingRetryFailedClaimed(retry.id, {
         ...claim,
@@ -678,6 +751,15 @@ export class WorkerRunner {
   private nowMs(): number {
     return this.deps.nowMs?.() ?? Date.now();
   }
+}
+
+function emptyPolicyEvidencePreflight(): PolicyEvidencePreflightReport {
+  return {
+    orphanPolicyIds: [],
+    affectedWorldModelIds: [],
+    affectedSkillIds: [],
+    restorablePolicyIds: []
+  };
 }
 
 function workerJobLogFields(job: EvolutionJobRecord): Record<string, unknown> {

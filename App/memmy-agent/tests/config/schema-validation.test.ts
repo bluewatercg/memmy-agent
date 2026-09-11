@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import YAML from "yaml";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConfigLoadError, loadConfig, saveConfig } from "../../src/config/loader.js";
 import { WebSocketConfig } from "../../src/integrations/channels/websocket.js";
@@ -12,6 +13,7 @@ import {
   BrowserToolsConfig,
   Config,
   ContextCompactionConfig,
+  DEFAULT_CONTEXT_WINDOW_TOKENS,
   GatewayConfig,
   InlineFallbackConfig,
   MCPServerConfig,
@@ -37,6 +39,68 @@ function configFile(contents = ""): string {
 }
 
 describe("config schema validation", () => {
+  it("serializes only providers with explicit connection settings", () => {
+    const emptyProviders = new Config().toObject().providers;
+    expect(emptyProviders).toEqual({});
+
+    const providers = new Config({
+      providers: {
+        openai: { endpoints: { chat: { apiBase: "https://openai.example.test/v1", protocol: "openai-responses" } } },
+        anthropic: { apiKey: "anthropic-key" },
+        gemini: { endpoints: { chat: { apiBase: "https://gemini.example.test", protocol: "gemini-generate-content" } } },
+        deepseek: { extraHeaders: { "X-Test": "header" } },
+        zhipu: { extraBody: { trace: true } },
+        bedrock: { region: "us-east-1" },
+      },
+    }).toObject().providers;
+
+    expect(new Set(Object.keys(providers))).toEqual(new Set([
+      "bedrock",
+      "openai",
+      "anthropic",
+      "gemini",
+      "deepseek",
+      "zhipu",
+    ]));
+    expect(providers).not.toHaveProperty("qwen");
+  });
+
+  it("round-trips current Provider endpoint blocks through the shared writer", () => {
+    const file = configFile(YAML.stringify({
+      providers: {
+        openai: {
+          apiKey: "openai-key",
+          endpoints: {
+            chat: {
+              apiBase: "https://openai.example.test/v1",
+              protocol: "openai-chat-completions",
+            },
+          },
+        },
+      },
+      channels: {
+        sendProgress: false,
+      },
+    }));
+    const config = loadConfig(file);
+
+    saveConfig(config, file);
+
+    const saved = YAML.parse(fs.readFileSync(file, "utf8"));
+    expect(saved.providers).toEqual({
+      openai: expect.objectContaining({
+        apiKey: "openai-key",
+        endpoints: {
+          chat: {
+            apiBase: "https://openai.example.test/v1",
+            protocol: "openai-chat-completions",
+          },
+        },
+      }),
+    });
+    expect(saved.channels.sendProgress).toBe(false);
+  });
+
   it("defines and round-trips browser tool defaults", () => {
     const defaults = new BrowserToolsConfig();
     expect(defaults.toObject()).toEqual({
@@ -142,11 +206,12 @@ describe("config schema validation", () => {
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
-  it("fails loudly for invalid unrelated sections without rewriting them", () => {
+  it("fails loudly for invalid unrelated sections without rewriting the config", () => {
     const contents = "sessionDag:\n  debugLog: \"true\"\n";
     const file = configFile(contents);
 
     expect(() => loadConfig(file)).toThrow(ConfigLoadError);
+    expect(() => loadConfig(file)).toThrow(/sessionDag\.debugLog/);
     expect(fs.readFileSync(file, "utf8")).toBe(contents);
   });
 
@@ -184,16 +249,85 @@ describe("config schema validation", () => {
   });
 
   it("requires model names in presets and inline fallback entries", () => {
-    expect(() => new ModelPresetConfig({ provider: "openai" })).toThrow(/modelPreset model/);
-    expect(() => new ModelPresetConfig({ model: "" })).toThrow(/modelPreset model/);
+    const base = { endpoint: "chat", provider: "openai", source: "byok", capabilities: ["agent"] };
+    expect(() => new ModelPresetConfig({ ...base })).toThrow(/modelPreset model/);
+    expect(() => new ModelPresetConfig({ ...base, model: "" })).toThrow(/modelPreset model/);
     expect(() => new InlineFallbackConfig({ provider: "openai" })).toThrow(/fallback model/);
     expect(() => new InlineFallbackConfig({ model: "gpt-4.1" })).toThrow(/fallback provider/);
     expect(() => new InlineFallbackConfig({ provider: "", model: "gpt-4.1" })).toThrow(/fallback provider/);
 
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).model).toBe("gpt-4.1");
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).maxTokens).toBe(DEFAULT_MAX_TOKENS);
-    expect(new ModelPresetConfig({ model: "gpt-4.1" }).temperature).toBe(0.7);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).model).toBe("gpt-4.1");
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).maxTokens).toBe(32_768);
+    expect(new ModelPresetConfig({ ...base, model: "gpt-4.1" }).temperature).toBe(0.7);
     expect(new InlineFallbackConfig({ provider: "openai", model: "gpt-4.1" }).provider).toBe("openai");
+  });
+
+  it("resolves model token defaults only for BYOK text-generation presets", () => {
+    const preset = (overrides: Record<string, unknown> = {}) => new ModelPresetConfig({
+      endpoint: "chat",
+      model: "gpt-5.6",
+      provider: "openai",
+      source: "byok",
+      capabilities: ["agent"],
+      ...overrides,
+    });
+
+    const defaults = new AgentDefaults();
+    expect(defaults.maxTokens).toBe(DEFAULT_MAX_TOKENS);
+    expect(defaults.contextWindowTokens).toBe(DEFAULT_CONTEXT_WINDOW_TOKENS);
+    expect(preset()).toMatchObject({ maxTokens: 128_000, contextWindowTokens: 1_050_000 });
+    expect(preset({ provider: "custom-openai" })).toMatchObject({
+      maxTokens: 128_000,
+      contextWindowTokens: 1_050_000,
+    });
+    expect(preset({ model: "private-model" })).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
+    expect(preset({ source: "account", ownerAccountId: "account-1" })).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
+
+    for (const capability of ["embedding", "asr", "image_generation"]) {
+      expect(preset({ capabilities: [capability] })).toMatchObject({
+        maxTokens: DEFAULT_MAX_TOKENS,
+        contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+      });
+    }
+    for (const capability of ["agent", "memory_summary", "memory_evolution"]) {
+      expect(preset({ capabilities: [capability] })).toMatchObject({
+        maxTokens: 128_000,
+        contextWindowTokens: 1_050_000,
+      });
+    }
+
+    expect(preset({ maxTokens: 12_345 })).toMatchObject({
+      maxTokens: 12_345,
+      contextWindowTokens: 1_050_000,
+    });
+    expect(preset({ contextWindowTokens: 345_678 })).toMatchObject({
+      maxTokens: 128_000,
+      contextWindowTokens: 345_678,
+    });
+    expect(preset({ maxTokens: 12_345, contextWindowTokens: 345_678 })).toMatchObject({
+      maxTokens: 12_345,
+      contextWindowTokens: 345_678,
+    });
+
+    for (const model of ["Gpt-5.6", " gpt-5.6 ", "gpt-5.6-unknown-snapshot"]) {
+      expect(preset({ model })).toMatchObject({
+        maxTokens: DEFAULT_MAX_TOKENS,
+        contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+      });
+    }
+
+    const config = new Config();
+    config.agents.defaults.model = "gpt-5.6";
+    expect(config.resolvePreset("default")).toMatchObject({
+      maxTokens: DEFAULT_MAX_TOKENS,
+      contextWindowTokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+    });
   });
 
   it("declares MCP server fields with camelCase defaults while preserving extensions", () => {

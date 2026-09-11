@@ -96,6 +96,7 @@ describe("SettingsPage invitation banner", () => {
               preparedUpdatePath: null,
               downloadProgress: null,
               feedback: null,
+              requestInlineAction: vi.fn(async () => undefined),
               requestPrimaryAction: vi.fn(async () => undefined)
             }}
           />
@@ -110,6 +111,11 @@ describe("SettingsPage invitation banner", () => {
     expect(container.textContent).not.toContain(
       "好友注册成功后，双方都会获得奖励 Token"
     );
+    const inviteTitle = [...container.querySelectorAll("p")]
+      .find((element) => element.textContent === "邀请好友，享更多额度");
+    const invitationBanner = inviteTitle?.parentElement?.parentElement;
+    const tokenUsageSection = container.querySelector("#token-usage");
+    expect(tokenUsageSection?.nextElementSibling).toBe(invitationBanner);
   });
 });
 

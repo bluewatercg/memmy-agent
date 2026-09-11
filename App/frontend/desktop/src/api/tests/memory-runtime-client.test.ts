@@ -12,7 +12,7 @@ describe("memory runtime client", () => {
   });
 
   it("declares the memory runtime endpoints exposed under /api/v1", () => {
-    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(18);
+    expect(MEMORY_RUNTIME_ENDPOINTS).toHaveLength(19);
     expect(MEMORY_RUNTIME_ENDPOINTS).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
@@ -26,6 +26,7 @@ describe("memory runtime client", () => {
       "POST /api/v1/memory/:id/processing/retry",
       "GET /api/v1/memory/:id",
       "DELETE /api/v1/memory/:id",
+      "GET /api/v1/memory/recalls/:queryId",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
@@ -54,11 +55,10 @@ describe("memory runtime client", () => {
             memoryLayers: ["L1", "L2", "L3", "Skill"],
             supportsCli: true
           },
-          activeProfile: "byok",
           models: {
-        summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-            evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-            embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+            summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+            evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "fixed" },
+            embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
           },
           serverTime: "2026-06-01T00:00:00.000Z"
         }),
@@ -83,13 +83,12 @@ describe("memory runtime client", () => {
     const fetchMock = vi.fn(async () => {
       return new Response(
         JSON.stringify({
-          activeProfile: "byok",
           changed: false,
           requiresRestart: false,
           models: {
-        summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-            evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-            embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+            summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+            evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "fixed" },
+            embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
           },
           reloadedAt: "2026-06-01T00:00:00.000Z"
         }),
@@ -99,7 +98,13 @@ describe("memory runtime client", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const client = createHttpMemoryRuntimeClient(runtimeConfig);
-    await expect(client.reloadConfig({ reason: "manual_reload" })).resolves.toMatchObject({ activeProfile: "byok" });
+    await expect(client.reloadConfig({ reason: "manual_reload" })).resolves.toMatchObject({
+      models: {
+        summary: { routing: "fixed" },
+        evolution: { routing: "fixed" },
+        embedding: { mode: "local" }
+      }
+    });
     expect(fetchMock).toHaveBeenCalledWith(
       new URL("/api/v1/admin/reload-config", runtimeConfig.baseUrl),
       expect.objectContaining({

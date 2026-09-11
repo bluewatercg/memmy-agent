@@ -291,7 +291,7 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
       )}
       {props.state.status === "ready" && filteredLogs.length > 0 && (
         <div className="memory-list">
-          <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <div className="memory-log-tour-group" data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
             {filteredLogs.slice(0, 2).map(renderLogCard)}
           </div>
           {filteredLogs.slice(2).map(renderLogCard)}
@@ -385,7 +385,7 @@ export function MemorySearchDetail(props: { sourceAgent?: string; input: unknown
   const { t } = useTranslation();
   const input = asRecord(props.input) as SearchInput;
   const output = asRecord(props.output) as SearchOutput;
-  const candidates = output.candidates ?? [];
+  const candidates = memorySearchCandidates(output);
   const filtered = output.filtered ?? [];
   const keptCandidateKeys = new Set(filtered.map(memorySearchCandidateKey));
   const sourceAgent = firstLogText(props.sourceAgent);
@@ -529,6 +529,9 @@ export function memorySearchCandidateLayerLabel(candidate: SearchCandidate): str
     case "Skill":
     case "skill":
       return "Skill";
+    case "UserMemory":
+    case "user_memory":
+      return "User";
     default:
       return "Memory";
   }
@@ -691,12 +694,26 @@ function usableAddSummary(value: string | null | undefined): string | undefined 
 }
 
 function memorySearchSummaryCounts(output: SearchOutput): { beforeLlm: number; afterLlm: number } {
+  const afterLlm = firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
+    ?? output.filtered?.length
+    ?? 0;
   return {
-    beforeLlm: firstNonNegativeInt(output.stats?.ranked) ?? output.candidates?.length ?? 0,
-    afterLlm: firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
-      ?? output.filtered?.length
-      ?? 0
+    beforeLlm: Math.max(
+      firstNonNegativeInt(output.stats?.ranked) ?? 0,
+      memorySearchCandidates(output).length,
+      afterLlm
+    ),
+    afterLlm
   };
+}
+
+function memorySearchCandidates(output: SearchOutput): SearchCandidate[] {
+  const candidates = new Map<string, SearchCandidate>();
+  for (const candidate of [...(output.candidates ?? []), ...(output.filtered ?? [])]) {
+    const key = memorySearchCandidateKey(candidate);
+    if (!candidates.has(key)) candidates.set(key, candidate);
+  }
+  return [...candidates.values()];
 }
 
 function firstNonNegativeInt(...values: unknown[]): number | undefined {

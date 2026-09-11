@@ -37,6 +37,10 @@ describe("installByokTokenUsage", () => {
       spec: {
         sessionKey: "cli:direct",
         model: "gpt-4.1-mini",
+        provider: {
+          spec: { name: "openai" }
+        },
+        actualModelContext: actualModelContext(),
       },
     });
     await hooks[0]?.beforeRun(ctx);
@@ -51,6 +55,72 @@ describe("installByokTokenUsage", () => {
     await hooks[0]?.beforeRun(ctx);
     await hooks[0]?.afterRun(ctx, { usage: { prompt_tokens: 2, completion_tokens: 3 } });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads runtime.json from MEMMY_HOME when the active development profile is relocated", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-byok-token-home-"));
+    const memmyHome = join(tempDir, "isolated-profile");
+    mkdirSync(memmyHome, { recursive: true });
+    writeFileSync(join(memmyHome, "runtime.json"), JSON.stringify({
+      baseUrl: "http://127.0.0.1:63002",
+      localToken: "runtime-token",
+    }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const hooks: AgentHook[] = [];
+
+    installByokTokenUsage(configFixture(), {
+      hooks,
+      env: { MEMMY_HOME: memmyHome },
+      homeDir: join(tempDir, "user-home"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    const ctx = new AgentHookContext({
+      spec: {
+        sessionKey: "websocket:relocated-profile",
+        model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
+      },
+    });
+    await hooks[0]?.beforeRun(ctx);
+    await hooks[0]?.afterRun(ctx, { usage: { prompt_tokens: 2, completion_tokens: 3 } });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:63002/api/app/byok-token-usage/events"
+    );
+  });
+
+  it("keeps the default user-home runtime path when MEMMY_HOME is not set", async () => {
+    tempDir = mkdtempSync(join(tmpdir(), "memmy-byok-token-default-home-"));
+    const runtimeHome = join(tempDir, ".memmy");
+    mkdirSync(runtimeHome, { recursive: true });
+    writeFileSync(join(runtimeHome, "runtime.json"), JSON.stringify({
+      baseUrl: "http://127.0.0.1:63003",
+      localToken: "runtime-token",
+    }));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    const hooks: AgentHook[] = [];
+
+    installByokTokenUsage(configFixture(), {
+      hooks,
+      env: {},
+      homeDir: tempDir,
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    const ctx = new AgentHookContext({
+      spec: {
+        sessionKey: "websocket:default-profile",
+        model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
+      },
+    });
+    await hooks[0]?.beforeRun(ctx);
+    await hooks[0]?.afterRun(ctx, { usage: { prompt_tokens: 3, completion_tokens: 4 } });
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toBe(
+      "http://127.0.0.1:63003/api/app/byok-token-usage/events"
+    );
   });
 
   it("does not install a hook in Vitest runtime", () => {
@@ -103,6 +173,7 @@ describe("installByokTokenUsage", () => {
       spec: {
         sessionKey: "cli:direct",
         model: "gpt-4.1-mini",
+        actualModelContext: actualModelContext(),
       },
     });
     await hooks[0]?.beforeRun(ctx);
@@ -144,6 +215,13 @@ describe("installByokTokenUsage", () => {
       chatId: "chat-title",
       modelId: "gpt-4.1-mini",
       operation: "session_title",
+      actualModelContext: {
+        presetId: "byok-agent",
+        source: "byok",
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        capability: "agent",
+      },
     });
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [URL, RequestInit];
@@ -151,6 +229,10 @@ describe("installByokTokenUsage", () => {
     expect(JSON.parse(String(init.body))).toMatchObject({
       kind: "agent_chat",
       source: "agent",
+      presetId: "byok-agent",
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      capability: "agent",
       metadata: {
         operation: "session_title",
         sessionKey: "websocket:chat-title",
@@ -177,4 +259,18 @@ function configFixture(): Config {
       },
     },
   });
+}
+
+function actualModelContext() {
+  return {
+    presetId: "byok-agent",
+    provider: "openai",
+    endpointId: "chat",
+    protocol: "openai-chat-completions" as const,
+    model: "gpt-4.1-mini",
+    source: "byok" as const,
+    ownerAccountId: null,
+    capability: "agent" as const,
+    capabilities: ["agent" as const],
+  };
 }

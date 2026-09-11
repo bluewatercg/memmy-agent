@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import OpenAI from "openai";
 import {
+  type AccountImageTextFallbackArgs,
   createProviderAbortError,
   isProviderAbortError,
   LLMProvider,
@@ -15,6 +16,7 @@ import {
   parseResponseOutput,
 } from "./openai-responses/index.js";
 import { memmyAccountNoneThinkingStyle } from "./memmy-account.js";
+import { getModelInputModalities } from "./model-input-capabilities.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS } from "./openrouter-attribution.js";
 import {
   classifyQuotaExhaustion,
@@ -460,11 +462,15 @@ export class OpenAICompatProvider extends LLMProvider {
     return [...parts, content];
   }
 
-  sanitizeMessages(messages: Record<string, any>[]): Record<string, any>[] {
+  sanitizeMessages(
+    messages: Record<string, any>[],
+    model = this.getDefaultModel(),
+  ): Record<string, any>[] {
     const sanitized = LLMProvider.sanitizeRequestMessages(messages, ALLOWED_MSG_KEYS);
     const idMap = new Map<string, string>();
     const pendingToolIds = new Map<string, string[]>();
-    const forceStringContent = specName(this.spec) === "deepseek";
+    const forceStringContent = specName(this.spec) === "deepseek"
+      && !getModelInputModalities(model).includes("image");
     const normalizeToolIds = this.shouldNormalizeToolCallIds();
 
     const mapId = (value: any): any => {
@@ -596,7 +602,7 @@ export class OpenAICompatProvider extends LLMProvider {
     const temperature = args.temperature ?? this.generation.temperature;
     const kwargs: Record<string, any> = {
       model: modelName,
-      messages: this.sanitizeMessages(messages),
+      messages: this.sanitizeMessages(messages, modelName),
     };
 
     if (OpenAICompatProvider.supportsTemperature(modelName, reasoningEffort))
@@ -736,6 +742,7 @@ export class OpenAICompatProvider extends LLMProvider {
     if (this.spec?.stripModelPrefix) modelName = modelName.split("/").at(-1) ?? modelName;
     const sanitizedMessages = this.sanitizeMessages(
       LLMProvider.sanitizeEmptyContent(args.messages),
+      modelName,
     );
     const [instructions, input] = convertMessages(sanitizedMessages);
     const reasoningEffort = args.reasoningEffort ?? null;
@@ -1030,7 +1037,49 @@ export class OpenAICompatProvider extends LLMProvider {
     return model;
   }
 
+  supportsAccountImageTextFallback(): boolean {
+    return specName(this.spec) === "memmy_account";
+  }
+
+  runAccountImageTextFallback(
+    args: AccountImageTextFallbackArgs,
+  ): Promise<LLMResponse | null> {
+    if (!this.supportsAccountImageTextFallback()) return Promise.resolve(null);
+    return this.chat({
+      messages: args.messages,
+      tools: null,
+      toolChoice: null,
+      model: "image2text",
+      temperature: 0,
+      reasoningEffort: "none",
+      maxTokens: 2048,
+      signal: args.signal ?? null,
+    });
+  }
+
+  private imageInputUnsupportedResponse(args: ChatArgs): LLMResponse | null {
+    const model = args.model ?? this.getDefaultModel();
+    if (
+      specName(this.spec) !== "deepseek"
+      || !LLMProvider.containsImageInput(args.messages)
+      || getModelInputModalities(model).includes("image")
+    ) {
+      return null;
+    }
+    return new LLMResponse({
+      content: "The DeepSeek chat adapter does not support image input.",
+      finishReason: "error",
+      errorStatusCode: 400,
+      errorKind: "invalid_request",
+      errorCode: "image_input_unsupported",
+      errorShouldRetry: false,
+      errorCategory: "image_input_unsupported",
+    });
+  }
+
   async chat(args: ChatArgs): Promise<LLMResponse> {
+    const imageInputError = this.imageInputUnsupportedResponse(args);
+    if (imageInputError) return imageInputError;
     await this.ensureClient();
     const model = args.model ?? this.getDefaultModel();
     const reasoningEffort = args.reasoningEffort ?? null;
@@ -1068,6 +1117,8 @@ export class OpenAICompatProvider extends LLMProvider {
   }
 
   async chatStream(args: ChatArgs): Promise<LLMResponse> {
+    const imageInputError = this.imageInputUnsupportedResponse(args);
+    if (imageInputError) return imageInputError;
     await this.ensureClient();
     const model = args.model ?? this.getDefaultModel();
     const reasoningEffort = args.reasoningEffort ?? null;

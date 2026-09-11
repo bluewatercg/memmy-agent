@@ -183,6 +183,7 @@ describe("PetPage helpers", () => {
           ...mockBootstrap.onboarding,
           completed: false,
           currentStep: "scan_permission_required" as const,
+          firstEncounterReportStatus: "shown" as const,
           completedAt: null
         }
       },
@@ -193,6 +194,41 @@ describe("PetPage helpers", () => {
         registeredAt: "2026-06-01T00:00:00.000Z"
       },
       guidanceCompleted: true
+    })).toBe("/main");
+  });
+
+  it("BYOK 尚无 Agent 模型时桌宠展开回到 API Key 配置", () => {
+    const bootstrap = {
+      ...mockBootstrap,
+      app: { ...mockBootstrap.app, userMode: "byok" as const },
+      onboarding: {
+        ...mockBootstrap.onboarding,
+        completed: true,
+        currentStep: "completed" as const,
+        firstEncounterReportStatus: "shown" as const,
+        completedAt: "2026-06-01T00:00:00.000Z"
+      }
+    };
+    const account = {
+      email: "",
+      phoneNumber: null,
+      nickname: "",
+      registeredAt: null
+    };
+
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: [] } } } }
+      }
+    })).toBe("/api-key");
+    expect(resolvePetFullRoute({
+      bootstrap,
+      account,
+      modelConfig: {
+        catalog: { modelAssignments: { byok: { agent: { candidates: ["local-agent"] } } } }
+      }
     })).toBe("/main");
   });
 
@@ -232,15 +268,38 @@ describe("PetPage helpers", () => {
 
   it("把真实 Agent WebSocket 事件映射到桌宠 TaskBus 动作", () => {
     expect(resolvePetAgentEventAction({ event: "delta", text: "你" }, "", "未接入")).toEqual({ type: "append", text: "你" });
-    expect(resolvePetAgentEventAction({ event: "stream_end", text: "你好" }, "你", "未接入")).toEqual({ type: "complete", text: "你好" });
-    expect(resolvePetAgentEventAction({ event: "stream_end" }, "你好", "未接入")).toEqual({ type: "complete", text: "你好" });
+    expect(resolvePetAgentEventAction({ event: "stream_end", text: "你好" }, "你", "未接入")).toEqual({ type: "ignore" });
+    expect(resolvePetAgentEventAction({ event: "stream_end", text: "你好" }, "", "未接入")).toEqual({ type: "append", text: "你好" });
+    expect(resolvePetAgentEventAction({ event: "stream_end" }, "你好", "未接入")).toEqual({ type: "ignore" });
     expect(resolvePetAgentEventAction({ event: "message", kind: "progress", text: "工具调用中" }, "你好", "未接入")).toEqual({ type: "ignore" });
     expect(resolvePetAgentEventAction({ event: "turn_end" }, "最终答案", "未接入")).toEqual({ type: "complete", text: "最终答案" });
-    expect(resolvePetAgentEventAction({ event: "goal_status", status: "running" }, "最终答案", "未接入")).toEqual({ type: "ignore" });
-    expect(resolvePetAgentEventAction({ event: "goal_status", status: "idle" }, "最终答案", "未接入")).toEqual({ type: "complete", text: "最终答案" });
+    expect(resolvePetAgentEventAction({ event: "run_status", status: "running" }, "最终答案", "未接入")).toEqual({ type: "turn_status", running: true });
+    expect(resolvePetAgentEventAction({ event: "run_status", status: "idle" }, "最终答案", "未接入")).toEqual({ type: "turn_status", running: false });
     expect(resolvePetAgentEventAction({ event: "run_status_snapshot", status: "running", started_at: 1780732800 }, "最终答案", "未接入")).toEqual({ type: "ignore" });
     expect(resolvePetAgentEventAction({ event: "run_status_snapshot", status: "idle" }, "最终答案", "未接入")).toEqual({ type: "ignore" });
     expect(resolvePetAgentEventAction({ event: "error", detail: "invalid chat_id" }, "", "未接入")).toEqual({ type: "error", message: "invalid chat_id" });
+  });
+
+  it("只有 Goal 的终态 turn_end 才结束对应桌宠任务", () => {
+    const goalId = "8f59f58a-7295-4c34-8e03-55e7035a5a8d";
+    expect(resolvePetAgentEventAction(
+      { event: "turn_end", goal_id: goalId, goal_outcome: "active" },
+      "阶段结果",
+      "未接入",
+      { goalId, turnRunning: true }
+    )).toEqual({ type: "turn_status", running: false });
+    expect(resolvePetAgentEventAction(
+      { event: "turn_end", goal_id: goalId, goal_outcome: "completed" },
+      "最终答案",
+      "未接入",
+      { goalId, turnRunning: true }
+    )).toEqual({ type: "complete", text: "最终答案" });
+    expect(resolvePetAgentEventAction(
+      { event: "turn_end", goal_id: "1d7e1916-5871-4d57-a477-e3b2f443fa31", goal_outcome: "completed" },
+      "旧目标结果",
+      "未接入",
+      { goalId, turnRunning: true }
+    )).toEqual({ type: "ignore" });
   });
 
   it("归一化桌宠 Agent 接入错误文案", () => {
@@ -403,8 +462,8 @@ describe("PetPage helpers", () => {
     });
 
     expect(targets).toEqual([
-      { chatId: "chat-running", sessionKey: "websocket:chat-running", isRunning: true },
-      { chatId: "chat-done", sessionKey: "websocket:chat-done", isRunning: false }
+      { taskId: "task-running", chatId: "chat-running", sessionKey: "websocket:chat-running", isRunning: true },
+      { taskId: "task-done", chatId: "chat-done", sessionKey: "websocket:chat-done", isRunning: false }
     ]);
   });
 
@@ -412,6 +471,7 @@ describe("PetPage helpers", () => {
     const messages = mapPetThreadMessagesToTaskBus([
       { role: "user", content: "旧问题", createdAt: 1_000 },
       { role: "assistant", content: "旧答案", createdAt: 1_100 },
+      { role: "user", content: "内部续跑", internal_context: "goal_continuation", createdAt: 1_200 },
       { role: "user", content: "新问题", createdAt: 2_000 }
     ]);
 
@@ -813,7 +873,8 @@ describe("PetPageView SSR", () => {
     expect(source).toContain("memmyAgentClient.listSessions()");
     expect(source).toContain("memmyAgentClient.readWebuiThread(target.sessionKey)");
     expect(source).toContain("mapPetThreadMessagesToTaskBus(thread.messages)");
-    expect(source).toContain("const isRunning = target.isRunning && thread.last_turn_closed !== true;");
+    expect(source).toContain("const isRunning = (target.isRunning && thread.last_turn_closed !== true)");
+    expect(source).toContain('|| lastGoalOutcome === "active";');
     expect(source).toContain("preserveFocus: target.chatId !== focusedChatId");
     expect(source).not.toContain("items: runningSessionItems,");
   });

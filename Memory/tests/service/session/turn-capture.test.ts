@@ -17,6 +17,30 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / session / turn capture", () => {
+  it("preserves an explicit empty turn-start layer selection for evaluation ablations", async () => {
+    const { db, service } = createTestService();
+    const session = service.openSession({
+      namespace: {
+        source: "memmy-agent",
+        profileId: "layer-ablation",
+        userId: "layer-ablation-user"
+      }
+    });
+
+    const started = await service.startTurn({
+      sessionId: session.sessionId,
+      turnId: "turn-layer-ablation-none",
+      query: "Fix the failing SWE test without retrieved memory.",
+      layers: []
+    });
+
+    expect(started.sourceMemoryIds).toEqual([]);
+    expect(db.db.prepare(
+      "SELECT layers_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId)).toEqual({ layers_json: "[]" });
+    db.close();
+  });
+
   it("records only recall audit at turn.start and commits episode, RawTurn, and L1 at turn.complete", async () => {
     const { db, service } = createTestService();
     const session = service.openSession({
@@ -41,7 +65,7 @@ describe("MemoryService / session / turn capture", () => {
       requestId: "cursor-start:readonly",
       sessionId: session.sessionId,
       turnId: "turn-start-readonly",
-      query: "Do not create L1 until the assistant finishes."
+      query: "Implement the sqlite persistence transaction after inspecting the schema."
     });
 
     expect(started.turnId).toBe("turn-start-readonly");
@@ -81,7 +105,7 @@ describe("MemoryService / session / turn capture", () => {
       adapterId: "memmy-cursor-hook",
       requestId: "cursor-complete:readonly",
       sessionId: session.sessionId,
-      query: "Do not create L1 until the assistant finishes.",
+      query: "Implement the sqlite persistence transaction after inspecting the schema.",
       answer: "The complete user and assistant turn is now safe to persist.",
       status: "succeeded",
       sourceMemoryIds: started.sourceMemoryIds
@@ -111,7 +135,7 @@ describe("MemoryService / session / turn capture", () => {
     };
     expect(completedRawTurn).toMatchObject({
       episode_id: completed.episodeId,
-      user_text: "Do not create L1 until the assistant finishes.",
+      user_text: "Implement the sqlite persistence transaction after inspecting the schema.",
       assistant_text: "The complete user and assistant turn is now safe to persist.",
       status: "succeeded"
     });
@@ -1144,14 +1168,7 @@ describe("MemoryService / session / turn capture", () => {
        WHERE job_type = 'l3_abstraction'
          AND json_extract(payload_json, '$.rawTurnId') = ?`
     ).get(compact.rawTurnId) as { target_memory_id: string | null; payload_json: string } | undefined;
-    expect(compactL3Job?.target_memory_id).toBeNull();
-    expect(JSON.parse(compactL3Job!.payload_json)).toMatchObject({
-      reason: "manual_compaction",
-      targetKind: "policy_cluster",
-      sourceMemoryId: compact.l1MemoryId,
-      episodeId: expect.stringMatching(/^episode_/),
-      rawTurnId: compact.rawTurnId
-    });
+    expect(compactL3Job).toBeUndefined();
 
     const compactWithoutL1 = service.compactSession(session.sessionId, {
       summary: "compact summary without l1 materialization",

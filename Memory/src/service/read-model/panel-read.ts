@@ -7,6 +7,7 @@ import type {
   EmbeddingRetryStatus,
   EpisodeRecord,
   EvolutionJobRecord,
+  L3WorldModelScopeRecord,
   RawTurnRecord,
   Repositories
 } from "../../storage/repositories.js";
@@ -17,9 +18,13 @@ import type {
   MemoryKind,
   MemoryLayer,
   MemoryListItem,
+  PanelMemoryListItem,
+  RecallMemoryLayer,
   RawTurnSummary,
   RequestEnvelope,
-  RuntimeNamespace
+  RuntimeNamespace,
+  UserMemoryRecord,
+  WorldModelScope
 } from "../../types.js";
 import { nowIso, resolveTimeZone } from "../../utils/time.js";
 import {
@@ -348,16 +353,18 @@ export class PanelReadModel {
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
-    counts: { memories: number; skills: number; experiences: number; worldModels: number };
+    counts: { memories: number; userMemories: number; skills: number; experiences: number; worldModels: number };
     sourceDistribution: Array<{ source: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.deps.repos.memories.listStats();
+    const userId = input.userId ?? input.namespace?.userId;
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
     return {
       counts: {
         memories: memories.filter((memory) => memory.memoryLayer === "L1").length,
+        userMemories: userId ? this.deps.repos.userMemories.countForPanel({ userId }) : 0,
         skills: memories.filter((memory) => memory.memoryLayer === "Skill").length,
         experiences: memories.filter((memory) => memory.memoryLayer === "L2").length,
         worldModels: memories.filter((memory) => memory.memoryLayer === "L3").length
@@ -385,7 +392,7 @@ export class PanelReadModel {
   } {
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelLastSevenDateKeys(this.now(), timeZone);
-    const memories = this.listAllMemoriesForStats();
+    const memories = this.deps.repos.memories.listStats();
     const skillMemories = memories.filter((memory) => memory.memoryLayer === "Skill");
     const logs = this.deps.repos.runtime.listApiLogs({ limit: 10_000, offset: 0 }).logs
       .filter((log) => dates.includes(panelDateKey(log.calledAt, timeZone)));
@@ -411,7 +418,7 @@ export class PanelReadModel {
 
   panelItems(input: RequestEnvelope & {
     userId?: string;
-    layer?: MemoryLayer;
+    layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
     tags?: string[];
@@ -421,7 +428,7 @@ export class PanelReadModel {
     limit?: number;
     cursor?: string | number;
   }): {
-    items: MemoryListItem[];
+    items: PanelMemoryListItem[];
     page: number;
     pageSize: number;
     total: number;
@@ -433,6 +440,47 @@ export class PanelReadModel {
     serverTime: string;
   } {
     const pageSize = normalizePanelItemsLimit(input.limit);
+    if (input.layer === "UserMemory") {
+      const userId = input.userId ?? input.namespace?.userId;
+      const requestedPage = normalizePageNumber(input.page);
+      if (!userId || input.status === "resolving") {
+        return emptyPanelItems(requestedPage, pageSize, this.now());
+      }
+      const status = input.status === "activated"
+        ? "active"
+        : input.status === "archived" || input.status === "deleted"
+          ? input.status
+          : undefined;
+      const total = this.deps.repos.userMemories.countForPanel({
+        userId,
+        status,
+        query: input.q,
+        sourceAgent: input.sourceAgent
+      });
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const offset = (page - 1) * pageSize;
+      const memories = this.deps.repos.userMemories.listForPanel({
+        userId,
+        status,
+        query: input.q,
+        sourceAgent: input.sourceAgent,
+        limit: pageSize,
+        offset
+      });
+      return {
+        items: memories.map(userMemoryPanelItem),
+        page,
+        pageSize,
+        total,
+        totalPages,
+        hasNext: offset + memories.length < total,
+        hasPrev: offset > 0,
+        etag: `panel-items-v${this.deps.repos.runtime.latestChangeSeq()}`,
+        nextCursor: offset + memories.length < total ? String(offset + memories.length) : undefined,
+        serverTime: this.now()
+      };
+    }
     const filter: MemoryFilter = {
       memoryLayer: input.layer,
       status: input.status,
@@ -455,12 +503,26 @@ export class PanelReadModel {
           offset
         ).map((hit) => hit.id))
       : this.deps.repos.memories.list(filter, pageSize, offset);
+    const scopes = this.deps.repos.l3WorldModels.getScopesByMemoryIds(
+      memories.filter((memory) => memory.memoryLayer === "L3").map((memory) => memory.id)
+    );
+    const scopesByMemoryId = new Map(
+      scopes.flatMap((scope) => scope.memoryId ? [[scope.memoryId, scope] as const] : [])
+    );
     return {
-      items: memories.map((memory) => panelListItemFromMemory(
-        this.deps.repos.memories.toListItem(memory),
-        memory,
-        this.deps.repos.processing.get(memory.id)
-      )),
+      items: memories.map((memory) => {
+        const item = panelListItemFromMemory(
+          this.deps.repos.memories.toListItem(memory),
+          memory,
+          this.deps.repos.processing.get(memory.id)
+        );
+        const scope = scopesByMemoryId.get(memory.id);
+        const worldModelScope = memory.memoryLayer === "L3" && scope &&
+          scope.memoryId === memory.id && scope.userId === memory.userId
+          ? panelWorldModelScope(scope)
+          : undefined;
+        return worldModelScope ? { ...item, worldModelScope } : item;
+      }),
       page,
       pageSize,
       total,
@@ -473,7 +535,7 @@ export class PanelReadModel {
     };
   }
 
-  panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
+  panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
     tasks: Array<{
       id: string;
       episode: Record<string, unknown>;
@@ -492,10 +554,16 @@ export class PanelReadModel {
     const pageSize = 20 as const;
     const query = input.q?.trim() || undefined;
     const userId = input.namespace?.userId;
-    const total = this.deps.repos.runtime.countEpisodes(userId, query);
+    const total = this.deps.repos.runtime.countEpisodes(userId, query, input.sourceAgent);
     const totalPages = Math.max(1, Math.ceil(total / pageSize));
     const page = Math.min(normalizePageNumber(input.page), totalPages);
-    const episodes = this.deps.repos.runtime.listEpisodes(userId, pageSize, (page - 1) * pageSize, query);
+    const episodes = this.deps.repos.runtime.listEpisodes(
+      userId,
+      pageSize,
+      (page - 1) * pageSize,
+      query,
+      input.sourceAgent,
+    );
     return {
       tasks: episodes.map((episode) => ({
         id: episode.id,
@@ -560,13 +628,7 @@ export class PanelReadModel {
   }
 
   private jobStatusCounts(): Record<"queued" | "leased" | "succeeded" | "failed" | "dead_letter", number> {
-    return {
-      queued: this.deps.repos.runtime.listJobs("queued", 1000).length,
-      leased: this.deps.repos.runtime.listJobs("leased", 1000).length,
-      succeeded: this.deps.repos.runtime.listJobs("succeeded", 1000).length,
-      failed: this.deps.repos.runtime.listJobs("failed", 1000).length,
-      dead_letter: this.deps.repos.runtime.listJobs("dead_letter", 1000).length
-    };
+    return this.deps.repos.runtime.countJobsByStatus();
   }
 
   private memoryLayerCounts(): Record<MemoryLayer, number> {
@@ -590,15 +652,39 @@ export class PanelReadModel {
     return counts;
   }
 
-  private listAllMemoriesForStats() {
-    const rows = [] as ReturnType<Repositories["memories"]["list"]>;
-    const pageSize = 1000;
-    for (let offset = 0;; offset += pageSize) {
-      const batch = this.deps.repos.memories.list({}, pageSize, offset);
-      rows.push(...batch);
-      if (batch.length < pageSize) break;
+}
+
+function panelWorldModelScope(scope: L3WorldModelScopeRecord): WorldModelScope {
+  if (!scope.projectId) return { kind: "general" };
+  const display = workspaceUriDisplay(scope.workspaceUri);
+  return {
+    kind: "project",
+    projectLabel: display.projectLabel,
+    workspaceDisplayPath: display.workspaceDisplayPath
+  };
+}
+
+export function workspaceUriDisplay(workspaceUri?: string): {
+  projectLabel: string | null;
+  workspaceDisplayPath: string | null;
+} {
+  if (!workspaceUri) return { projectLabel: null, workspaceDisplayPath: null };
+  try {
+    const url = new URL(workspaceUri);
+    const decodedSegments = url.pathname.split("/").map((segment) => decodeURIComponent(segment));
+    const decodedPath = decodedSegments.join("/");
+    const projectLabel = decodedSegments.filter(Boolean).at(-1) ?? null;
+    if (url.protocol !== "file:") {
+      return { projectLabel, workspaceDisplayPath: url.toString() };
     }
-    return rows;
+    const workspaceDisplayPath = url.host
+      ? `//${url.host}${decodedPath.startsWith("/") ? decodedPath : `/${decodedPath}`}`
+      : /^\/[A-Za-z]:\//u.test(decodedPath)
+        ? decodedPath.slice(1)
+        : decodedPath;
+    return { projectLabel, workspaceDisplayPath };
+  } catch {
+    return { projectLabel: null, workspaceDisplayPath: null };
   }
 }
 
@@ -623,6 +709,55 @@ export function changeLogToPanelChange(change: ChangeLogRecord): PanelChange {
     version: change.version ?? versionFromChange(change),
     source: changeSource(change.source),
     updatedAt: change.createdAt
+  };
+}
+
+function userMemoryPanelItem(memory: UserMemoryRecord): PanelMemoryListItem {
+  const title = memory.content.split(/\r?\n/, 1)[0]?.trim() || memory.id;
+  return {
+    id: memory.id,
+    kind: "user_memory",
+    memoryLayer: "UserMemory",
+    status: memory.status === "active" ? "activated" : memory.status,
+    title: title.slice(0, 80),
+    summary: memory.content,
+    tags: memory.memoryTypes,
+    metadata: {
+      sourceTurnId: memory.sourceTurnId,
+      sourceTurnRefs: memory.sourceTurnRefs,
+      memoryTypes: memory.memoryTypes,
+      replacesMemoryId: memory.replacesMemoryId,
+      replacedByMemoryId: memory.replacedByMemoryId,
+      archivedAt: memory.archivedAt,
+      archiveReason: memory.archiveReason
+    },
+    createdAt: memory.createdAt,
+    updatedAt: memory.updatedAt,
+    version: Math.max(1, memory.sourceTurnRefs.length)
+  };
+}
+
+function emptyPanelItems(page: number, pageSize: number, serverTime: string): {
+  items: PanelMemoryListItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  hasNext: boolean;
+  hasPrev: boolean;
+  etag: string;
+  serverTime: string;
+} {
+  return {
+    items: [],
+    page,
+    pageSize,
+    total: 0,
+    totalPages: 1,
+    hasNext: false,
+    hasPrev: false,
+    etag: "panel-items-empty",
+    serverTime
   };
 }
 

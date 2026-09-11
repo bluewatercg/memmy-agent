@@ -62,6 +62,15 @@ export function BrainCircuit(props: MemoryIconProps) {
   );
 }
 
+export function UserRound(props: MemoryIconProps) {
+  return (
+    <IconShell {...props} name="user-round">
+      <circle cx="12" cy="8" r="5" />
+      <path d="M20 21a8 8 0 0 0-16 0" />
+    </IconShell>
+  );
+}
+
 export function ListChecks(props: MemoryIconProps) {
   return (
     <IconShell {...props} name="list-checks">
@@ -428,6 +437,14 @@ export function CheckCircle2(props: MemoryIconProps) {
     <IconShell {...props} name="check-circle-2">
       <circle cx="12" cy="12" r="9" />
       <path d="m8 12 2.5 2.5L16 9" />
+    </IconShell>
+  );
+}
+
+export function Check(props: MemoryIconProps) {
+  return (
+    <IconShell {...props} name="check">
+      <path d="m20 6-11 11-5-5" />
     </IconShell>
   );
 }

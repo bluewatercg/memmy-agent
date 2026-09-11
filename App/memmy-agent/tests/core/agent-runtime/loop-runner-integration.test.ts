@@ -8,10 +8,12 @@ import { SESSION_TOOL_RESULT_MAX_CHARS_BY_NAME } from "../../../src/core/agent-r
 import { InboundMessage } from "../../../src/core/runtime-messages/events.js";
 import { Config } from "../../../src/config/schema.js";
 import { LLMResponse } from "../../../src/providers/base.js";
-import { GOAL_STATE_KEY } from "../../../src/core/session/goal-state.js";
+import { GOAL_STATE_KEY, readGoalState } from "../../../src/core/session/goal-state.js";
+import { Session, SessionManager } from "../../../src/core/session/manager.js";
+import { GuiTranscriptMirror } from "../../../src/entrypoints/frontend-bridge/gui-transcript-sync.js";
 
 const roots: string[] = [];
-const originalHome = process.env.HOME;
+const originalDataDir = process.env.MEMMY_AGENT_DATA_DIR;
 
 function workspace(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "memmy-loop-"));
@@ -59,17 +61,25 @@ function loop(p = provider(), extra: Record<string, any> = {}): AgentLoop {
   });
 }
 
+async function waitUntil(predicate: () => boolean | Promise<boolean>, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await predicate()) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  expect(await predicate()).toBe(true);
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
+  if (originalDataDir === undefined) delete process.env.MEMMY_AGENT_DATA_DIR;
+  else process.env.MEMMY_AGENT_DATA_DIR = originalDataDir;
   for (const dir of roots.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
 describe("AgentLoop direct processing", () => {
   it("expands the default home workspace instead of creating a literal tilde directory", () => {
     const fakeHome = workspace();
-    process.env.HOME = fakeHome;
+    vi.spyOn(os, "homedir").mockReturnValue(fakeHome);
     const p = provider(["ok"]);
     const agent = new AgentLoop({
       provider: p,
@@ -107,10 +117,95 @@ describe("AgentLoop direct processing", () => {
     });
   });
 
+  it("passes the structured Turn source into tool request metadata", async () => {
+    const agent = loop(provider(["ok"]));
+    const source = { kind: "gui", channel: "websocket" } as const;
+    const contextSpy = vi.spyOn(agent, "setToolContext");
+
+    await agent.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "goal-source",
+      content: "create a Goal",
+      turnSource: source,
+    }));
+
+    expect(contextSpy.mock.calls.some((call) => (
+      call[3]?.turn_source?.kind === source.kind
+      && call[3]?.turn_source?.channel === source.channel
+    ))).toBe(true);
+  });
+
+  it("keeps a projected CLI Session on its canonical workspace across the whole turn", async () => {
+    const root = workspace();
+    process.env.MEMMY_AGENT_DATA_DIR = path.join(root, "data");
+    const canonicalWorkspace = path.join(root, "canonical");
+    const workspaceAlias = path.join(root, "alias");
+    fs.mkdirSync(canonicalWorkspace, { recursive: true });
+    fs.symlinkSync(canonicalWorkspace, workspaceAlias, "dir");
+    const sessions = new SessionManager(path.join(canonicalWorkspace, "sessions"));
+    const session = new Session({
+      key: "cli:direct",
+      metadata: {
+        webui: true,
+        webuiProjectId: null,
+        webuiWorkspaceCwd: fs.realpathSync(canonicalWorkspace),
+      },
+    });
+    sessions.save(session, { fsync: true });
+    const p = provider(["projected answer"]);
+    const agent = new AgentLoop({
+      provider: p,
+      workspace: workspaceAlias,
+      model: "test-model",
+      contextWindowTokens: 4096,
+      sessionDir: sessions.root,
+      sessionManager: sessions,
+      config: new Config({ memmyMemory: { enabled: false } }),
+    });
+    agent.guiTranscriptMirror = new GuiTranscriptMirror(sessions, canonicalWorkspace);
+
+    const outbound = await agent.processDirect("hello", { sessionKey: "cli:direct" });
+
+    expect(outbound?.content).toBe("projected answer");
+    expect(p.chat).toHaveBeenCalledOnce();
+  });
+
+  it("treats a GUI cancellation of an independent cli turn as a normal stopped result", async () => {
+    const p = {
+      generation: { maxTokens: 100 },
+      getDefaultModel: () => "test-model",
+      chatWithRetry: vi.fn(async (args: Record<string, any>) => (
+        new Promise<never>((_resolve, reject) => {
+          const onAbort = () => {
+            const error = new Error("task cancelled");
+            error.name = "AbortError";
+            reject(error);
+          };
+          args.signal?.addEventListener("abort", onAbort, { once: true });
+        })
+      )),
+    };
+    const agent = loop(p);
+    const turn = agent.processDirect("keep working", { sessionKey: "cli:stoppable" });
+    while (!agent.terminalRunControl.read("cli:stoppable")) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+
+    await agent.terminalRunControl.requestCancel("cli:stoppable");
+
+    await expect(turn).resolves.toBeNull();
+    expect(agent.terminalRunControl.read("cli:stoppable")).toBeNull();
+    const session = agent.sessions.reload("cli:stoppable");
+    expect(session?.messages.map((message) => message.role)).toEqual(["user"]);
+    expect(session?.metadata).not.toHaveProperty(AgentLoop.PENDING_USER_TURN_KEY);
+    expect(session?.metadata).not.toHaveProperty(AgentLoop.RUNTIME_CHECKPOINT_KEY);
+    expect(agent.restorePendingUserTurn(session!)).toBe(false);
+  });
+
   it("attaches each turn's accumulated usage to its own outbound message", async () => {
     const agent = loop();
     const usages = [
-      { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165 },
+      { prompt_tokens: 120, completion_tokens: 45, total_tokens: 165, cached_tokens: 90 },
       { prompt_tokens: 30, completion_tokens: 8, total_tokens: 38 },
     ];
     let calls = 0;
@@ -126,8 +221,12 @@ describe("AgentLoop direct processing", () => {
     const second = await agent.processDirect("second", { sessionKey: "cli:usage-b" });
 
     expect(first?.metadata.usage).toEqual(usages[0]);
-    expect(second?.metadata.usage).toEqual(usages[1]);
-    expect(agent.lastUsage).toEqual(usages[1]);
+    expect(second?.metadata.usage).toEqual({ ...usages[1], cached_tokens: 0 });
+    expect(agent.lastUsageBySession.get("cli:usage-a")).toEqual(usages[0]);
+    expect(agent.lastUsageBySession.get("cli:usage-b")).toEqual({
+      ...usages[1],
+      cached_tokens: 0,
+    });
   });
 
   it("publishes a thread session update after early-persisting WebUI user messages", async () => {
@@ -180,7 +279,12 @@ describe("AgentLoop direct processing", () => {
     const persisted = agent.sessions.getOrCreate("websocket:web-quota").messages;
     expect(persisted.at(-1)?.model_error).toEqual({
       category: "quota_exhausted",
-      detail: "raw provider quota detail"
+      detail: "raw provider quota detail",
+      presetId: "default",
+      provider: "unknown",
+      model: "test-model",
+      capability: "agent",
+      source: "byok",
     });
   });
 
@@ -240,14 +344,15 @@ describe("AgentLoop direct processing", () => {
     expect(agent.sessions.getOrCreate("cli:test").messages.map((message) => message.content)).toEqual(["first", "one", "second", "two"]);
   });
 
-  it("uses the unified session key when unified sessions are enabled", async () => {
+  it("keeps explicit cli sessions separate when unified sessions are enabled", async () => {
     const p = provider(["ok"]);
     const agent = loop(p, { unifiedSession: true });
 
     await agent.processDirect("hello", { sessionKey: "cli:a", chatId: "a" });
 
     expect(agent.sessionKey({ sessionKey: "cli:a" } as any)).toBe(UNIFIED_SESSION_KEY);
-    expect(agent.sessions.getOrCreate(UNIFIED_SESSION_KEY).messages[0].content).toBe("hello");
+    expect(agent.sessions.getOrCreate("cli:a").messages[0].content).toBe("hello");
+    expect(agent.sessions.get(UNIFIED_SESSION_KEY)).toBeNull();
   });
 
   it("handles slash command shortcuts without calling the model and persists command turns outside LLM history", async () => {
@@ -264,18 +369,25 @@ describe("AgentLoop direct processing", () => {
     expect(session.getHistory({ maxMessages: 10 }).some((message) => String(message.content).includes("/help"))).toBe(false);
   });
 
-  it("rewrites /goal into an agent prompt and continues through the model", async () => {
+  it("creates /goal state directly and returns the control result before continuation output", async () => {
     const p = provider(["working on it"]);
     const agent = loop(p);
 
     const outbound = await agent.processDirect("/goal migrate the database", { sessionKey: "cli:test" });
 
-    expect(outbound?.content).toBe("working on it");
-    expect(p.chat).toHaveBeenCalledOnce();
-    const sent = JSON.stringify(p.calls[0].messages);
-    expect(sent).toContain("sustained objective");
-    expect(sent).toContain("migrate the database");
-    expect(agent.sessions.getOrCreate("cli:test").messages[0].content).toContain("sustained objective");
+    expect(outbound?.content).toContain("Goal created.");
+    expect(outbound?.content).toContain("migrate the database");
+    const session = agent.sessions.getOrCreate("cli:test");
+    expect(readGoalState(session.metadata)).toMatchObject({
+      objective: "migrate the database",
+      status: "active",
+      tokensUsed: 0,
+    });
+    expect(session.messages[0]).toMatchObject({
+      role: "user",
+      content: "/goal migrate the database",
+      commandMessage: true,
+    });
   });
 
   it("passes active goal state and runtime runner options through ordinary turns", async () => {
@@ -286,9 +398,14 @@ describe("AgentLoop direct processing", () => {
     agent.toolHintMaxLength = 12;
     const session = agent.sessions.getOrCreate("cli:goal");
     session.metadata[GOAL_STATE_KEY] = {
+      goalId: "8cd503f0-dc78-45c6-8978-983a09f694a0",
       status: "active",
       objective: "Finish the TypeScript parity fixes.",
-      uiSummary: "agent parity",
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
     };
     agent.sessions.save(session);
     let seenSpec: any = null;
@@ -304,8 +421,7 @@ describe("AgentLoop direct processing", () => {
     const outbound = await agent.processDirect("continue", { sessionKey: "cli:goal" });
 
     expect(outbound?.content).toBe("still working");
-    expect(JSON.stringify(seenSpec.messages)).toContain("Goal (active):");
-    expect(JSON.stringify(seenSpec.messages)).toContain("Finish the TypeScript parity fixes.");
+    expect(JSON.stringify(seenSpec.messages)).not.toContain("Goal (active):");
     expect(seenSpec.contextWindowTokens).toBe(4096);
     expect(seenSpec.contextBlockLimit).toBe(1234);
     expect(seenSpec.providerRetryMode).toBe("aggressive");
@@ -313,8 +429,163 @@ describe("AgentLoop direct processing", () => {
     expect(seenSpec.retryWaitCallback).toBeTypeOf("function");
     expect(seenSpec.checkpointCallback).toBeTypeOf("function");
     expect(seenSpec.llmTimeoutS).toBe(0);
-    expect(seenSpec.goalActivePredicate()).toBe(true);
-    expect(seenSpec.goalContinueMessage).toContain("Finish the TypeScript parity fixes.");
+    expect(seenSpec.goalActivePredicate).toBeUndefined();
+    expect(seenSpec.goalContinueMessage).toBeUndefined();
+  });
+
+  it("consumes a TUI Goal Steer in the same Runner Turn and persists its identity", async () => {
+    const calls: Array<{ messages: Record<string, any>[] }> = [];
+    let notifyFirstCall!: () => void;
+    const firstCallStarted = new Promise<void>((resolve) => {
+      notifyFirstCall = resolve;
+    });
+    let releaseFirstCall!: () => void;
+    const firstCallGate = new Promise<void>((resolve) => {
+      releaseFirstCall = resolve;
+    });
+    const p = {
+      generation: { maxTokens: 100 },
+      getDefaultModel: () => "test-model",
+      chat: vi.fn(async (args: any) => {
+        calls.push({ messages: structuredClone(args.messages) });
+        if (calls.length === 1) {
+          notifyFirstCall();
+          await firstCallGate;
+          return new LLMResponse({
+            content: "Initial Goal response",
+            usage: { prompt_tokens: 4, completion_tokens: 2, total_tokens: 6 },
+          });
+        }
+        return new LLMResponse({
+          content: "Goal response after steer",
+          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+        });
+      }),
+    };
+    const agent = loop(p);
+    agent.initializeRuntimeTools = vi.fn(async () => undefined);
+    vi.spyOn(agent, "scheduleGoalWork").mockImplementation(() => undefined);
+    const sessionKey = "websocket:tui-goal-runner";
+    const chatId = "tui-goal-runner";
+    const activeTurnId = "17171717-1717-4717-8717-171717171717";
+    const clientRequestId = "18181818-1818-4818-8818-181818181818";
+    agent.sessions.reserveWebuiSessionBinding(sessionKey, {
+      projectId: null,
+      cwd: fs.realpathSync(agent.workspace),
+    });
+    const session = agent.sessions.getOrCreate(sessionKey);
+    session.metadata.webui = true;
+    session.metadata.webuiProjectId = null;
+    session.metadata.webuiWorkspaceCwd = fs.realpathSync(agent.workspace);
+    agent.sessions.save(session);
+    const goal = await agent.goalRuntime.create({
+      sessionKey,
+      objective: "Complete the TUI Goal steer implementation",
+      tokenBudget: 1_000,
+      route: {
+        channel: "websocket",
+        chatId,
+        source: { kind: "tui", channel: "websocket" },
+      },
+      turnId: "goal-create-turn",
+    });
+    agent.goalRuntime.releaseTurn(sessionKey, "goal-create-turn");
+    while (agent.bus.outboundSize) await agent.bus.consumeOutbound();
+
+    const running = agent.run();
+    expect(agent.goalRuntime.reserveWork(sessionKey, activeTurnId, "continuation")).toBe(true);
+    await agent.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Continue the active Goal",
+      metadata: { webui: true, turn_id: activeTurnId },
+      internal: {
+        kind: "goal_continuation",
+        goalId: goal.goalId,
+        goalUpdatedAt: goal.updatedAt,
+      },
+      sessionKeyOverride: sessionKey,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await firstCallStarted;
+    await waitUntil(() => (agent.turnSlots.get(sessionKey) as any[])?.[0]?.acceptingSteer === true);
+
+    await agent.bus.publishInbound(new InboundMessage({
+      channel: "websocket",
+      chatId,
+      content: "Adjust the implementation and keep the same Goal Turn",
+      metadata: {
+        webui: true,
+        client_request_id: clientRequestId,
+        webui_request_digest: "tui-goal-runner-digest",
+      },
+      sessionKeyOverride: sessionKey,
+      turnAdmission: "steer",
+      expectedTurnId: activeTurnId,
+      turnSource: { kind: "tui", channel: "websocket" },
+    }));
+    await waitUntil(() => ((agent.turnSlots.get(sessionKey) as any[])?.[0]?.pendingSteer.size ?? 0) === 1);
+    expect(agent.goalRuntime.inbox(sessionKey)).toEqual([]);
+    expect(await agent.getQueueSnapshot(sessionKey)).toMatchObject({ revision: 0, items: [] });
+    releaseFirstCall();
+
+    await waitUntil(() => calls.length === 2);
+    await waitUntil(() => agent.sessions.getOrCreate(sessionKey).messages.some((message) => (
+      message.client_request_id === clientRequestId
+    )), 5_000);
+    await waitUntil(() => !agent.isSessionBusy(sessionKey), 5_000);
+    agent.stop();
+    await running;
+
+    expect(JSON.stringify(calls[1].messages)).toContain(
+      "Adjust the implementation and keep the same Goal Turn",
+    );
+    expect(JSON.stringify(calls[1].messages)).not.toContain(clientRequestId);
+    expect(JSON.stringify(calls[1].messages)).not.toContain("turn_source");
+    expect(JSON.stringify(calls[1].messages)).not.toContain("turn_id");
+    const persisted = agent.sessions.getOrCreate(sessionKey).messages;
+    expect(persisted.find((message) => message.client_request_id === clientRequestId)).toMatchObject({
+      role: "user",
+      content: "Adjust the implementation and keep the same Goal Turn",
+      client_request_id: clientRequestId,
+      turn_id: activeTurnId,
+      turn_source: { kind: "tui", channel: "websocket" },
+    });
+    expect(persisted).toContainEqual(expect.objectContaining({
+      role: "assistant",
+      content: "Goal response after steer",
+    }));
+    expect(agent.goalRuntime.get(sessionKey)).toMatchObject({
+      goalId: goal.goalId,
+      objective: goal.objective,
+      status: "active",
+      tokensUsed: 14,
+    });
+    expect(agent.goalRuntime.route(sessionKey)).toEqual({
+      channel: "websocket",
+      chatId,
+      source: { kind: "tui", channel: "websocket" },
+    });
+    expect(agent.goalRuntime.inbox(sessionKey)).toEqual([]);
+    expect(await agent.getQueueSnapshot(sessionKey)).toMatchObject({ revision: 0, items: [] });
+    const outbound = [];
+    while (agent.bus.outboundSize) outbound.push(await agent.bus.consumeOutbound());
+    expect(outbound).toContainEqual(expect.objectContaining({
+      metadata: expect.objectContaining({
+        webuiMessageSteered: true,
+        clientRequestId,
+        turnId: activeTurnId,
+      }),
+    }));
+    expect(outbound).toContainEqual(expect.objectContaining({
+      metadata: expect.objectContaining({
+        turnEnd: true,
+        turn_id: activeTurnId,
+        goalId: goal.goalId,
+        goalOutcome: "active",
+      }),
+    }));
+    expect(outbound.some((message) => message.metadata?.webuiMessageQueued)).toBe(false);
   });
 
   it("extracts document media before building prompt and keeps image media for multimodal content", async () => {
@@ -327,7 +598,7 @@ describe("AgentLoop direct processing", () => {
     const agent = new AgentLoop({
       provider: p,
       workspace: root,
-      model: "test-model",
+      model: "gpt-4.1",
       contextWindowTokens: 4096,
       sessionDir: path.join(root, "sessions"),
     });

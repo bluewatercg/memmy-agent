@@ -1,4 +1,4 @@
-import { mergeAnalyticsEventParams } from "./analytics-context.js";
+import { setDesktopAnalyticsClientId, setDesktopAnalyticsContext, trackCloudAnalyticsEvent } from "./cloud-analytics.js";
 import {
   resolveAnalyticsAppEdition,
   resolveAnalyticsAppEnv,
@@ -16,14 +16,15 @@ const MEASUREMENT_ID = (import.meta.env.MEMMY_GA4_MEASUREMENT_ID as string | und
 
 let initialized = false;
 
-export function initGtag(): void {
+export function initGtag(measurementId = MEASUREMENT_ID): void {
   if (initialized) return;
-  if (!MEASUREMENT_ID) {
+  void initializeDesktopAnalyticsContext();
+  if (!measurementId) {
     console.log("[analytics] initGtag skipped: MEMMY_GA4_MEASUREMENT_ID not set");
     return;
   }
   initialized = true;
-  console.log("[analytics] initGtag starting, MEASUREMENT_ID:", MEASUREMENT_ID);
+  console.log("[analytics] initGtag starting, MEASUREMENT_ID:", measurementId);
 
   window.dataLayer = window.dataLayer || [];
   // eslint-disable-next-line prefer-rest-params
@@ -31,12 +32,12 @@ export function initGtag(): void {
 
   window.gtag("js", new Date());
   const configOptions = resolveGtagConfigOptions();
-  window.gtag("config", MEASUREMENT_ID, configOptions);
+  window.gtag("config", measurementId, configOptions);
   console.log("[analytics] gtag config:", configOptions);
 
   const script = document.createElement("script");
   script.async = true;
-  script.src = `https://www.googletagmanager.com/gtag/js?id=${MEASUREMENT_ID}`;
+  script.src = `https://www.googletagmanager.com/gtag/js?id=${measurementId}`;
   document.head.appendChild(script);
   console.log("[analytics] gtag.js script injection started:", script.src);
 
@@ -47,33 +48,53 @@ export function initGtag(): void {
   // After the script finishes loading, obtain the client_id and pass it to the main process for later use
   script.onload = () => {
     console.log("[analytics] gtag.js script loaded successfully");
-    window.gtag("get", MEASUREMENT_ID, "client_id", (clientId: unknown) => {
+    // This browser-side event opens the GA4 session and enables the automatic
+    // session_start / first_visit events. Product app_launch goes through cloud.
+    window.gtag("event", "app_init");
+    console.log("[analytics] app_init sent via gtag");
+
+    window.gtag("get", measurementId, "client_id", (clientId: unknown) => {
       if (typeof clientId === "string" && clientId) {
+        // Memory gate for Desktop → cloud UI events (do not read shared file here).
+        setDesktopAnalyticsClientId(clientId);
         window.memmy?.sendAnalyticsClientId({
           clientId,
           appEnv: resolveAnalyticsAppEnv(),
           appEdition: resolveAnalyticsAppEdition()
         });
-        console.log("[analytics] gtag client_id ready:", clientId);
       }
     });
 
-    // app_launch is reported directly by gtag (GA4's automatic session_start/first_visit collection is also triggered here)
-    window.gtag("event", "app_launch");
-    console.log("[analytics] app_launch sent via gtag");
+    trackCloudAnalyticsEvent("app_launch");
   };
 }
 
-/** Sends a single GA4 event (wraps the gtag('event', ...) call). */
+async function initializeDesktopAnalyticsContext(): Promise<void> {
+  const memmy = window.memmy;
+  if (!memmy) return;
+  try {
+    const [installationId, appInfo] = await Promise.all([
+      memmy.getInstallationId(),
+      memmy.getAppInfo(),
+    ]);
+    setDesktopAnalyticsContext({
+      installationId,
+      appVersion: appInfo.version,
+      platform: appInfo.platform,
+    });
+  } catch (error) {
+    console.warn("[analytics] failed to initialize desktop analytics context:", error);
+  }
+}
+
+/**
+ * Desktop UI events go through cloud `/api/analytics/events`.
+ * Kept as `gtagEvent` for call-site compatibility; app_init is emitted directly during setup.
+ */
 export function gtagEvent(
   name: string,
   params?: Record<string, string | number | boolean>
 ): void {
-  if (!MEASUREMENT_ID || typeof window === "undefined" || typeof window.gtag !== "function") {
-    console.log("[analytics] gtagEvent skipped (gtag not ready):", name, params);
-    return;
-  }
-  const mergedParams = mergeAnalyticsEventParams(params);
-  console.log("[analytics] gtagEvent:", name, mergedParams);
-  window.gtag("event", name, mergedParams);
+  console.log("[analytics] gtagEvent → cloud:", name, params);
+  trackCloudAnalyticsEvent(name, params);
 }

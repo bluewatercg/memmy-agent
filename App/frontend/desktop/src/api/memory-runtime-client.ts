@@ -15,6 +15,7 @@ import {
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigInputSchema,
   MemoryReloadConfigOutputSchema,
+  RecallEvidenceOutputSchema,
   OpenSessionInputSchema,
   OpenSessionOutputSchema,
   PanelAnalysisOutputSchema,
@@ -43,6 +44,7 @@ import {
   type MemoryProcessingStatusOutput,
   type MemoryReloadConfigInput,
   type MemoryReloadConfigOutput,
+  type RecallEvidenceOutput,
   type OpenSessionInput,
   type OpenSessionOutput,
   type PanelAnalysisOutput,
@@ -73,6 +75,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "POST /api/v1/memory/:id/processing/retry",
   "GET /api/v1/memory/:id",
   "DELETE /api/v1/memory/:id",
+  "GET /api/v1/memory/recalls/:queryId",
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
@@ -92,6 +95,7 @@ export interface MemoryRuntimeClient {
   addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
   getMemory(id: string): Promise<GetMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
+  recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
   listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
@@ -169,6 +173,14 @@ export function createHttpMemoryRuntimeClient(config: RuntimeConfig): MemoryRunt
       });
     },
 
+    async recallEvidence(queryId) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/recalls/${encodeURIComponent(queryId)}`,
+        schema: RecallEvidenceOutputSchema
+      });
+    },
+
     async getMemoryProcessingStatus(memoryIds) {
       return requestJson({
         config,
@@ -243,11 +255,10 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
           memoryLayers: ["L1", "L2", "L3", "Skill"],
           supportsCli: false
         },
-        activeProfile: "byok",
         models: {
-          summary: { provider: "", configured: false, remote: false },
-          evolution: { provider: "", configured: false, remote: false },
-          embedding: { provider: "local", configured: true, remote: false }
+          summary: { provider: "", configured: false, remote: false, routing: null },
+          evolution: { provider: "", configured: false, remote: false, routing: null },
+          embedding: { provider: "local", configured: true, remote: false, mode: null }
         },
         serverTime: new Date().toISOString()
       };
@@ -277,6 +288,9 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
       throw unavailable();
     },
     async deleteMemory() {
+      throw unavailable();
+    },
+    async recallEvidence() {
       throw unavailable();
     },
     async getMemoryProcessingStatus() {

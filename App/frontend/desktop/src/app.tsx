@@ -1,8 +1,8 @@
 /** App module. */
 import { SseEventSchema, type AccountSessionView, type SseEvent } from "@memmy/local-api-contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { setAnalyticsUserMode } from "./analytics/analytics-context.js";
-import { gtagEvent } from "./analytics/gtag-init.js";
+import { setAnalyticsUserId, setAnalyticsUserMode } from "./analytics/analytics-context.js";
+import { trackCloudAnalyticsEvent } from "./analytics/cloud-analytics.js";
 import { trackAgentSourceScanOutcome } from "./analytics/memory-ui-analytics.js";
 import { useAnalytics } from "./analytics/use-analytics.js";
 import { buildInvitationToastEvent } from "./app/invitation-analytics.js";
@@ -69,6 +69,7 @@ function RuntimeApp() {
   const { t } = useTranslation();
   const translationRef = useRef(t);
   const agentStateRef = useRef(state.agent);
+  const rendererReadyReportedRef = useRef(false);
   const [bootKey, setBootKey] = useState(0);
   translationRef.current = t;
   agentStateRef.current = state.agent;
@@ -87,6 +88,22 @@ function RuntimeApp() {
   useEffect(() => {
     setAnalyticsUserMode(state.bootstrap?.app.userMode ?? "unset");
   }, [state.bootstrap?.app.userMode]);
+
+  useEffect(() => {
+    setAnalyticsUserId(state.account.userId);
+  }, [state.account.userId]);
+
+  useEffect(() => {
+    if (
+      rendererReadyReportedRef.current
+      || !clients
+      || !state.bootstrap
+      || typeof window === "undefined"
+      || !window.memmy?.notifyRendererReady
+    ) return;
+    rendererReadyReportedRef.current = true;
+    window.memmy.notifyRendererReady();
+  }, [clients, state.bootstrap]);
 
   useEffect(() => () => taskStateCoordinator?.dispose(), [taskStateCoordinator]);
 
@@ -168,7 +185,8 @@ function RuntimeApp() {
           bootstrap: effectiveBootstrap,
           preferredMode: launchModeOverride ?? persistedPreferredMode,
           accountSession,
-          guidanceCompleted
+          guidanceCompleted,
+          modelConfig
         });
         const initialPath = resolveLaunchInitialView({
           defaultPath: defaultInitialPath,
@@ -191,10 +209,11 @@ function RuntimeApp() {
 
         setClients(clients);
         setAnalyticsUserMode(effectiveBootstrap.app.userMode);
+        setAnalyticsUserId(accountSession.authenticated ? accountSession.profile.userId : null);
         dispatch(appActions.bootstrapLoaded(effectiveBootstrap, initialPath));
         if (bootstrap.tokenUsage.totalTokens > 0) {
           const u = bootstrap.tokenUsage;
-          gtagEvent("token_usage_snapshot", {
+          trackCloudAnalyticsEvent("token_usage_snapshot", {
             plan_name: u.planName,
             total_tokens: u.totalTokens,
             used_tokens: u.usedTokens,
@@ -212,6 +231,7 @@ function RuntimeApp() {
         }
         if (accountSession.authenticated) {
           dispatch(appActions.accountUpdated({
+            userId: accountSession.profile.userId,
             email: accountSession.profile.email ?? "",
             phoneNumber: accountSession.profile.phoneNumber,
             nickname: accountSession.profile.nickname,

@@ -11,6 +11,7 @@ import { AgentDefaults, Config } from "../../config/schema.js";
 import { readTemplate } from "../../templates/index.js";
 import { ContextBuilder } from "./context.js";
 import { SkillsLoader } from "./skills.js";
+import type { ActualModelContext } from "../../providers/model-catalog.js";
 
 export class SubagentStatus {
   static PENDING = "pending";
@@ -79,6 +80,7 @@ export class SubagentHook extends AgentHook {
 
   override async beforeExecuteTools(context: AgentHookContext): Promise<void> {
     // Hook point retained for parity with memmy logging and tests.
+    void context;
   }
 
   override async afterIteration(context: AgentHookContext): Promise<void> {
@@ -245,6 +247,12 @@ export class SubagentManager {
     temperature?: number | null;
     workspace?: string | null;
     readonlySkillRoots?: readonly string[];
+    provider?: any;
+    model?: string | null;
+    contextWindowTokens?: number;
+    modelPreset?: string | null;
+    modelProvider?: string | null;
+    actualModelContext?: ActualModelContext | null;
   }, label: string | null = null, originChannel = "cli", originChatId = "direct", sessionKey: string | null = null, originMessageId: string | null = null, temperature: number | null = null): Promise<string> {
     const args = typeof input === "string" ? { task: input, label, originChannel, originChatId, sessionKey, originMessageId, temperature } : input;
     const task = String(args.task ?? "");
@@ -256,6 +264,17 @@ export class SubagentManager {
       sessionKey: args.sessionKey ?? sessionKey,
       workspace: path.resolve(args.workspace ?? this.workspace),
       readonlySkillRoots: Object.freeze([...(args.readonlySkillRoots ?? [])]),
+      provider: args.provider ?? this.provider,
+      model: args.model ?? this.model,
+      contextWindowTokens: args.contextWindowTokens ?? this.contextWindowTokens,
+      modelPreset: args.modelPreset ?? null,
+      modelProvider: args.modelProvider ?? null,
+      actualModelContext: args.actualModelContext == null
+        ? null
+        : Object.freeze({
+            ...args.actualModelContext,
+            capabilities: Object.freeze([...args.actualModelContext.capabilities]),
+          }),
     };
     const status = new SubagentStatus({
       taskId,
@@ -344,17 +363,21 @@ export class SubagentManager {
         { role: "user", content: task },
       ];
       const sessKey = origin.sessionKey ?? null;
+      const provider = origin.provider ?? this.provider;
+      const model = origin.model ?? this.model;
+      const contextWindowTokens = origin.contextWindowTokens ?? this.contextWindowTokens;
       const result = await this.runner.run(new AgentRunSpec({
         messages,
-        provider: this.provider,
+        provider,
         tools,
-        model: this.model,
-        maxTokens: this.provider?.generation?.maxTokens,
-        contextWindowTokens: this.contextWindowTokens,
+        model,
+        maxTokens: provider?.generation?.maxTokens,
+        contextWindowTokens,
         temperature: temperature ?? undefined,
         maxIterations: this.maxIterations,
         maxToolResultChars: this.maxToolResultChars,
-        maxIterationsMessage: "Task completed but no final response was generated.",
+        maxIterationsMessage: "The subagent reached its iteration limit before completing the task; its report may be incomplete.",
+        maxIterationsFinalPrompt: readTemplate("agent/subagent-max-iterations-final-response.md").trim(),
         errorMessage: null,
         failOnToolError: true,
         checkpointCallback: async (payload: Record<string, any>) => {
@@ -366,6 +389,7 @@ export class SubagentManager {
         llmTimeoutS: this.llmWallTimeoutForSession?.(sessKey) ?? null,
         abortSignal: signal,
         hook: new SubagentHook(taskId, status),
+        actualModelContext: origin.actualModelContext ?? null,
       }));
       if (isCancelled()) {
         status.phase = SubagentStatus.CANCELLED;
@@ -435,6 +459,13 @@ export class SubagentManager {
     const metadata: Record<string, any> = {
       injectedEvent: "subagentResult",
       subagentTaskId: taskId,
+      ...(origin.modelPreset
+        ? {
+            model_preset: origin.modelPreset,
+            model_provider: origin.modelProvider ?? null,
+            model: origin.model ?? null,
+          }
+        : {}),
     };
     if (originMessageId) metadata.originMessageId = originMessageId;
     const msg = new InboundMessage({

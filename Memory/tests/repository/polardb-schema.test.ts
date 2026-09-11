@@ -8,8 +8,8 @@ import {
 describe("repository PolarDB schema contract", () => {
   it("publishes migration SQL for the memories table and runtime support tables", () => {
     const sql = polardbMigrationSql().join("\n");
-    expect(POLARDB_MIGRATION_ID).toBe("001_memmy_memory_service_runtime_schema");
-    expect(POLARDB_SCHEMA_VERSION).toBe("runtime-v1");
+    expect(POLARDB_MIGRATION_ID).toBe("003_memory_capture_claims");
+    expect(POLARDB_SCHEMA_VERSION).toBe("runtime-v3");
     expect(sql).toContain("CREATE EXTENSION IF NOT EXISTS vector");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS memories");
     expect(sql).toContain("properties JSONB");
@@ -40,8 +40,18 @@ describe("repository PolarDB schema contract", () => {
     expect(sql).toContain("idx_skill_trials_episode_status");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS memory_change_log");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS idempotency_keys");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS memory_capture_claims");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS evolution_jobs");
     expect(sql).toContain("CREATE TABLE IF NOT EXISTS embedding_retry_queue");
     expect(sql).toContain("idx_embedding_retry_due");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_scopes");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_session_cursors");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_input_traces");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_evidence_batches");
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS l3_world_model_batch_targets");
+    expect(sql).not.toContain("l3_world_model_project_environment_state");
+    expect(sql).toContain("workspace_uri TEXT");
+    expect(sql).not.toContain("summary_text TEXT");
+    expect(sql).not.toContain("summary_scan_id TEXT");
   });
 });

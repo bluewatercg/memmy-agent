@@ -17,6 +17,7 @@ import type {
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
+  RecallEvidenceOutput,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -36,11 +37,14 @@ import type {
 /** Contract for memory client. */
 export interface MemoryRequestContext {
   timeZone?: string;
+  userId?: string;
 }
 
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  exportBundle?(): Promise<Record<string, unknown>>;
+  clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 
   openSession(input: OpenSessionInput, context?: MemoryRequestContext): Promise<OpenSessionOutput>;
   closeSession(input: CloseSessionInput & { sessionId: string }, context?: MemoryRequestContext): Promise<CloseSessionOutput>;
@@ -52,6 +56,7 @@ export interface MemoryClient {
   addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
   getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
   deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
+  recallEvidence(queryId: string, context?: MemoryRequestContext): Promise<RecallEvidenceOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;

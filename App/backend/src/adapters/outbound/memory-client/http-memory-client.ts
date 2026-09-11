@@ -12,6 +12,7 @@ import {
   MemoryHealthSnapshotSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
+  RecallEvidenceOutputSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
@@ -22,7 +23,7 @@ import {
   RetryMemoryProcessingOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
 import { retryWithBackoff } from "./retry.js";
@@ -64,6 +65,7 @@ export function createHttpMemoryClient(
       query?: Readonly<Record<string, unknown>>;
       signal?: AbortSignal;
       timeoutMs?: number;
+      maxRetries?: number;
       context?: MemoryRequestContext;
     } = {}
   ): Promise<Output> {
@@ -78,6 +80,7 @@ export function createHttpMemoryClient(
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
             "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
+            ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
             authorization: `Bearer ${config.token}`
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
@@ -105,7 +108,7 @@ export function createHttpMemoryClient(
         );
       },
       {
-        maxRetries: config.maxRetries,
+        maxRetries: requestOptions.maxRetries ?? config.maxRetries,
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
@@ -123,6 +126,18 @@ export function createHttpMemoryClient(
 
     async reloadConfig(input = {}) {
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
+    },
+
+    async exportBundle() {
+      return request("GET", "exportBundle", z.record(z.string(), z.unknown()));
+    },
+
+    async clearAllData() {
+      return request("DELETE", "clearAllData", z.object({
+        ok: z.literal(true),
+        clearedAt: z.string(),
+        cleared: z.record(z.string(), z.number())
+      }), { body: {} });
     },
 
     async openSession(input, context) {
@@ -175,6 +190,13 @@ export function createHttpMemoryClient(
       });
     },
 
+    async recallEvidence(queryId, context) {
+      return request("GET", "recallEvidence", RecallEvidenceOutputSchema, {
+        params: { queryId },
+        context
+      });
+    },
+
     async enqueueImportSummaries(memoryIds) {
       return request("POST", "enqueueImportSummaries", EnqueueImportSummariesOutputSchema, {
         body: memoryIds ? { memoryIds } : {}
@@ -202,16 +224,17 @@ export function createHttpMemoryClient(
           priorityCohortOnly: input.priorityCohortOnly
         },
         signal: input.signal,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        maxRetries: 0
       });
     },
 
     async panelOverview(context) {
-      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context });
+      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context, maxRetries: 0 });
     },
 
     async panelAnalysis(context) {
-      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context });
+      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context, maxRetries: 0 });
     },
 
     async panelItems(input, context) {

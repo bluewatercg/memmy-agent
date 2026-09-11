@@ -29,7 +29,7 @@ export type AgentSourceInstallType =
 export type AgentSourceKind = "hook" | "native_plugin" | "skill" | "managed_skill";
 
 const HOOK_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex"]);
-const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes"]);
+const NATIVE_PLUGIN_AGENT_SOURCE_IDS = new Set(["opencode", "openclaw", "hermes", "deepseek_harness"]);
 const AGENT_SOURCE_ANALYTICS_SOURCE = "memmy-backend";
 
 export type AgentSourceLifecycleAnalytics = {
@@ -136,6 +136,7 @@ export function buildAgentSourceConflictParams(input: AgentSourceConflictInput):
 
 export function createAgentSourceLifecycleAnalytics(options: {
   getClientId?: () => string | null | undefined;
+  getInstallationId?: () => string | null | undefined;
   getUserId?: () => string | null | undefined;
   getUserMode?: () => string | null | undefined;
   appEnv?: AnalyticsAppEnv | null;
@@ -147,6 +148,7 @@ export function createAgentSourceLifecycleAnalytics(options: {
   const queued = createQueuedAnalytics({
     source: AGENT_SOURCE_ANALYTICS_SOURCE,
     getClientId: options.getClientId ?? (() => readAnalyticsClientId()),
+    getInstallationId: options.getInstallationId,
     getUserId: options.getUserId,
     getUserMode: options.getUserMode,
     appEnv: options.appEnv,

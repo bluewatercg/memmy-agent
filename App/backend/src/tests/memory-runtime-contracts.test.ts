@@ -23,19 +23,97 @@ import {
   PanelAnalysisOutputSchema,
   PanelItemsInputSchema,
   PanelItemsOutputSchema,
+  PanelMemoryListItemSchema,
   PanelOverviewOutputSchema,
   RawTurnSummarySchema,
   RecallHitSchema,
+  RecallEvidenceOutputSchema,
   SearchInputSchema,
   SearchOutputSchema,
   StartTurnInputSchema,
-  StartTurnOutputSchema
+  StartTurnOutputSchema,
+  WorldModelScopeSchema
 } from "@memmy/local-api-contracts";
 import type { ZodType } from "zod";
 
 const ISO = "2026-05-29T10:00:00.000Z";
 
 describe("memory runtime contracts", () => {
+  it("accepts optional L3 feature versions while preserving old health responses", () => {
+    expect(() => MemoryHealthSnapshotSchema.parse(healthOutput())).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: [2]
+      }
+    })).not.toThrow();
+    expect(() => MemoryHealthSnapshotSchema.parse({
+      ...healthOutput(),
+      features: {
+        l3WorldModelProtocolVersions: ["2"]
+      }
+    })).toThrow();
+  });
+
+  it("keeps legacy open-session input and strictly validates protocol v2", () => {
+    expect(() => OpenSessionInputSchema.parse({
+      sessionId: "host-session-1",
+      workspacePath: "/tmp/project",
+      source: "codex"
+    })).not.toThrow();
+    const v2 = {
+      requestId: "86af17ba-8eed-4a3a-9d09-2cc1a9db7b3f",
+      adapterId: "codex-memory",
+      source: "codex",
+      namespace: {
+        source: "codex",
+        profileId: "default",
+        sessionKey: "codex:session-1"
+      },
+      l3WorldModelProtocolVersion: 2,
+      l3WorldModelTransition: "resume_only",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    } as const;
+    expect(() => OpenSessionInputSchema.parse(v2)).not.toThrow();
+    expect(() => OpenSessionInputSchema.parse({ ...v2, l3WorldModelTransition: undefined })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      source: "codex",
+      workspaceUri: "file:///tmp/project",
+      workspaceHostId: "a".repeat(64)
+    })).toThrow();
+    expect(() => OpenSessionInputSchema.parse({
+      ...v2,
+      namespace: { ...v2.namespace, projectId: "host-project" }
+    })).toThrow();
+    expect(() => OpenSessionOutputSchema.parse({
+      ...openSessionOutput(),
+      projectId: "ws_project"
+    })).not.toThrow();
+  });
+
+  it("accepts strict four-field World Model details and preserves legacy details", () => {
+    expect(() => GetMemoryOutputSchema.parse(getMemoryOutput())).not.toThrow();
+    const v2 = getMemoryOutput();
+    v2.item.worldModel = {
+      schemaVersion: 2,
+      sourceMemoryIds: ["memory-1"],
+      summary: "project context",
+      generalRulesAndSafetyConstraints: null,
+      projectEnvironmentProfile: "语言：TypeScript",
+      projectContract: "Run tests before commit.",
+      domainKnowledge: null
+    } as typeof v2.item.worldModel;
+    expect(() => GetMemoryOutputSchema.parse(v2)).not.toThrow();
+    expect(() => GetMemoryOutputSchema.parse({
+      ...v2,
+      item: {
+        ...v2.item,
+        worldModel: { ...v2.item.worldModel, domainKnowledge: 1 }
+      }
+    })).toThrow();
+  });
+
   it("parses Span memories and Span processing jobs", () => {
     expect(() => MemoryListItemSchema.parse(memoryListItem({ kind: "span" }))).not.toThrow();
     expect(() => PanelItemsOutputSchema.parse({
@@ -48,15 +126,45 @@ describe("memory runtime contracts", () => {
     })).not.toThrow();
   });
 
+  it("accepts User Memory as a panel-only memory layer", () => {
+    expect(() => PanelItemsInputSchema.parse({ layer: "UserMemory", page: 1 })).not.toThrow();
+    expect(() => MemoryListItemSchema.parse(memoryListItem({
+      kind: "user_memory",
+      memoryLayer: "UserMemory"
+    }))).not.toThrow();
+  });
+
+  it("keeps world model scope typed and exclusive to panel list items", () => {
+    const general = { kind: "general" };
+    const project = {
+      kind: "project",
+      projectLabel: "deepseek-harness",
+      workspaceDisplayPath: "/Users/test/deepseek-harness"
+    };
+    expect(WorldModelScopeSchema.parse(general)).toEqual(general);
+    expect(WorldModelScopeSchema.parse(project)).toEqual(project);
+    expect(() => WorldModelScopeSchema.parse({ ...general, projectLabel: null })).toThrow();
+    expect(() => WorldModelScopeSchema.parse({ ...project, projectId: "internal" })).toThrow();
+
+    const panelItem = { ...memoryListItem({ memoryLayer: "L3" }), worldModelScope: project };
+    expect(PanelMemoryListItemSchema.parse(panelItem)).toEqual(panelItem);
+    expect(PanelItemsOutputSchema.parse({ ...panelItemsOutput(), items: [panelItem] }).items[0])
+      .toHaveProperty("worldModelScope", project);
+    expect(MemoryListItemSchema.parse(panelItem)).not.toHaveProperty("worldModelScope");
+    expect(MemoryDetailItemSchema.parse({ ...memoryDetailItem(), worldModelScope: project }))
+      .not.toHaveProperty("worldModelScope");
+  });
+
   const outputCases: Array<{ name: string; schema: ZodType<unknown>; valid: unknown; invalid: unknown }> = [
     { name: "InjectedContext", schema: InjectedContextSchema, valid: injectedContext(), invalid: { markdown: "", sections: [{ id: "sec-1", kind: "bad" }] } },
     { name: "RecallHit", schema: RecallHitSchema, valid: recallHit(), invalid: { ...recallHit(), memoryLayer: "L4" } },
+    { name: "RecallEvidenceOutput", schema: RecallEvidenceOutputSchema, valid: { recallEventId: "recall-1", queryId: "turn-1", query: "remember", hits: [recallHit()], diagnostics: { candidateMemoryIds: ["memory-1"], injectedMemoryIds: ["memory-1"], capture: { status: "completed" } }, createdAt: ISO, serverTime: ISO }, invalid: { queryId: "", hits: [] } },
     { name: "MemoryListItem", schema: MemoryListItemSchema, valid: memoryListItem(), invalid: { ...memoryListItem(), status: "draft" } },
     { name: "MemoryDetailItem", schema: MemoryDetailItemSchema, valid: memoryDetailItem(), invalid: { ...memoryDetailItem(), createdAt: "not-a-date" } },
     { name: "RawTurnSummary", schema: RawTurnSummarySchema, valid: rawTurnSummary(), invalid: { ...rawTurnSummary(), rawTurnId: "" } },
     { name: "JobRef", schema: JobRefSchema, valid: jobRef(), invalid: { ...jobRef(), jobType: "unknown" } },
     { name: "MemoryHealthSnapshot", schema: MemoryHealthSnapshotSchema, valid: healthOutput(), invalid: { ...healthOutput(), storage: { backend: "memory", schemaVersion: "3", ready: true } } },
-    { name: "MemoryReloadConfigOutput", schema: MemoryReloadConfigOutputSchema, valid: reloadConfigOutput(), invalid: { ...reloadConfigOutput(), activeProfile: "personal" } },
+    { name: "MemoryReloadConfigOutput", schema: MemoryReloadConfigOutputSchema, valid: reloadConfigOutput(), invalid: { ...reloadConfigOutput(), models: { ...modelStatuses(), summary: { ...modelStatuses().summary, routing: "personal" } } } },
     { name: "OpenSessionOutput", schema: OpenSessionOutputSchema, valid: openSessionOutput(), invalid: { sessionId: "session-1", status: "closed", resumed: false, serverTime: ISO } },
     { name: "CloseSessionOutput", schema: CloseSessionOutputSchema, valid: closeSessionOutput(), invalid: { ok: false, sessionId: "session-1", status: "closed", closedEpisodeIds: [], serverTime: ISO } },
     { name: "StartTurnOutput", schema: StartTurnOutputSchema, valid: startTurnOutput(), invalid: { contextPacketId: "context-1", sessionId: "session-1" } },
@@ -192,7 +300,6 @@ function healthOutput() {
     mode: "local",
     storage: { backend: "sqlite", schemaVersion: "3", ready: true, lastMigrationId: "0003" },
     capabilities: { routes: ["/api/v1/health"], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-    activeProfile: "byok",
     models: modelStatuses(),
     serverTime: ISO
   };
@@ -200,7 +307,6 @@ function healthOutput() {
 
 function reloadConfigOutput() {
   return {
-    activeProfile: "account",
     changed: true,
     requiresRestart: false,
     models: modelStatuses(),
@@ -210,9 +316,9 @@ function reloadConfigOutput() {
 
 function modelStatuses() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
   };
 }
 
@@ -268,7 +374,7 @@ function deleteMemoryOutput() {
 
 function panelOverviewOutput() {
   return {
-    counts: { memories: 1, skills: 4, experiences: 2, worldModels: 3 },
+    counts: { memories: 1, userMemories: 5, skills: 4, experiences: 2, worldModels: 3 },
     dailyActivity: panelDays(),
     sourceDistribution: [{ source: "codex", count: 10, percentage: 100 }]
   };

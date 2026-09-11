@@ -1,3 +1,4 @@
+import { mutateMemoryConfig } from "../config/writer.js";
 import {
   existsSync,
   lstatSync,
@@ -5,19 +6,29 @@ import {
   readFileSync,
   readlinkSync,
   symlinkSync,
-  unlinkSync,
-  writeFileSync
+  unlinkSync
 } from "node:fs";
+import crypto from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import YAML from "yaml";
+import { parse as parseYaml } from "yaml";
 import { asRecord, expandHome, optionalString } from "./config.js";
+import {
+  installMemoryRuntime,
+  installedAgents,
+  type MemoryRuntimeInstallOptions
+} from "./runtime-installer.js";
+import {
+  migrateLegacyLocalPlugins,
+  type LegacyConfigSource
+} from "./legacy-migration.js";
+import { installAgentAdapters } from "./adapter-installer.js";
 import {
   installMemmyMemorySkillForAgents,
   SUPPORTED_MEMMY_AGENT_IDS,
   type AgentSkillInstallResult
 } from "./skill-writer/index.js";
 
-export interface MemoryCliSetupOptions {
+export interface MemoryCliSetupOptions extends MemoryRuntimeInstallOptions {
   home?: string;
   configPath?: string;
   dbPath?: string;
@@ -31,18 +42,31 @@ export interface MemoryCliSetupOptions {
   agentRoot?: string;
   assetRoot?: string;
   skipAgentSkills?: boolean;
+  generateTokenIfMissing?: boolean;
+  serviceOnly?: boolean;
+  configSource?: LegacyConfigSource;
+  legacyRoot?: string;
+  nonInteractive?: boolean;
+  skipLegacyMigration?: boolean;
+  memmyConfigPreexisting?: boolean;
+  userHome?: string;
+  dshProfile?: string;
 }
 
 export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
-  const home = resolve(expandHome(options.home ?? "~/.memmy"));
-  const configPath = resolve(expandHome(options.configPath ?? join(home, "config.yaml")));
-  const dbPath = resolve(expandHome(options.dbPath ?? join(home, "memory-service", "memory.sqlite")));
-  const endpoint = options.endpoint ?? "http://127.0.0.1:18960";
+  const { home, configPath, dbPath, endpoint } = setupPaths(options);
 
   if (!options.dryRun) {
     mkdirSync(home, { recursive: true });
     mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, setupConfigYaml(configPath, { dbPath, endpoint, token: options.token }), "utf8");
+    await mutateMemoryConfig(configPath, (config) => {
+      setupMemoryConfig(config, {
+        dbPath,
+        endpoint,
+        token: options.token,
+        generateTokenIfMissing: options.generateTokenIfMissing,
+      });
+    });
   }
 
   let agentInstallations: AgentSkillInstallResult[] = [];
@@ -57,6 +81,7 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
     agentInstallations = await installMemmyMemorySkillForAgents(requestedAgents, {
       agentRoot: options.agents?.length ? options.agentRoot : undefined,
       assetRoot: options.assetRoot,
+      memmyConfigPath: configPath,
       dryRun: options.dryRun,
       skipUnavailable: !options.agents?.length
     });
@@ -75,6 +100,52 @@ export async function initMemoryCli(options: MemoryCliSetupOptions = {}): Promis
 }
 
 export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
+  const sourceInstall = options.sourcePath !== undefined || options.binPath !== undefined;
+  const paths = setupPaths(options);
+  const memmyConfigExisted = options.memmyConfigPreexisting ?? existsSync(paths.configPath);
+  const init = await initMemoryCli({
+    ...options,
+    skipAgentSkills: options.serviceOnly ? true : options.skipAgentSkills
+  });
+  const migration = options.skipLegacyMigration
+    ? undefined
+    : await migrateLegacyLocalPlugins({
+        configPath: paths.configPath,
+        dbPath: paths.dbPath,
+        memmyConfigExisted,
+        configSource: options.configSource,
+        legacyRoot: options.legacyRoot,
+        nonInteractive: options.nonInteractive,
+        dryRun: options.dryRun
+      });
+
+  if (!sourceInstall) {
+    const agents = options.serviceOnly ? [] : installedAgentIds(init);
+    const runtime = await installMemoryRuntime({
+      ...options,
+      agents
+    });
+    const pointer = runtimePointer(runtime);
+    const adapters = pointer && agents.length
+      ? await installAgentAdapters({
+          agents,
+          runtime: pointer,
+          userHome: options.userHome,
+          dshProfile: options.dshProfile,
+          dryRun: options.dryRun,
+          explicit: Boolean(options.agents?.length)
+        })
+      : [];
+    return {
+      ...init,
+      command: "install",
+      serviceOnly: options.serviceOnly ?? false,
+      ...(migration ? { migration } : {}),
+      runtime,
+      ...(adapters.length ? { adapters } : {})
+    };
+  }
+
   const home = resolve(expandHome(options.home ?? "~/.memmy"));
   const binPath = resolve(expandHome(options.binPath ?? join(home, "bin", "memmy-memory")));
   const source = resolve(expandHome(options.sourcePath ?? join(process.cwd(), "dist", "src", "cli", "index.js")));
@@ -82,8 +153,6 @@ export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Pro
   if (existsSync(binPath) && !options.force && !isExistingMemmyMemoryLink(binPath, source)) {
     throw new Error(`${binPath} already exists`);
   }
-
-  const init = await initMemoryCli(options);
 
   if (!options.dryRun) {
     mkdirSync(dirname(binPath), { recursive: true });
@@ -96,8 +165,105 @@ export async function installMemoryCli(options: MemoryCliSetupOptions = {}): Pro
     command: "install",
     binPath,
     source,
+    ...(migration ? { migration } : {}),
     pathReady: isPathReady(dirname(binPath)),
   };
+}
+
+export async function upgradeMemoryCli(options: MemoryCliSetupOptions = {}): Promise<Record<string, unknown>> {
+  const paths = setupPaths(options);
+  const migration = options.skipLegacyMigration
+    ? undefined
+    : await migrateLegacyLocalPlugins({
+        configPath: paths.configPath,
+        dbPath: paths.dbPath,
+        memmyConfigExisted: existsSync(paths.configPath),
+        configSource: options.configSource,
+        legacyRoot: options.legacyRoot,
+        nonInteractive: options.nonInteractive,
+        dryRun: options.dryRun
+      });
+  const agents = options.agents?.length
+    ? options.agents
+    : await installedAgents(options.home);
+  const agentInstallations = agents.length
+    ? await installMemmyMemorySkillForAgents(agents, {
+        agentRoot: options.agentRoot,
+        assetRoot: options.assetRoot,
+        dryRun: options.dryRun
+      })
+    : [];
+  const runtime = await installMemoryRuntime({
+    ...options,
+    latest: options.version ? false : true,
+    agents
+  });
+  const pointer = runtimePointer(runtime);
+  const adapters = pointer && agents.length
+    ? await installAgentAdapters({
+        agents,
+        runtime: pointer,
+        userHome: options.userHome,
+        dshProfile: options.dshProfile,
+        dryRun: options.dryRun,
+        explicit: Boolean(options.agents?.length)
+      })
+    : [];
+  return {
+    ok: true,
+    command: "upgrade",
+    runtime,
+    ...(migration ? { migration } : {}),
+    ...(adapters.length ? { adapters } : {}),
+    ...(agentInstallations.length ? { agents: agentInstallations } : {})
+  };
+}
+
+function runtimePointer(value: Record<string, unknown>): import("./runtime-installer.js").InstalledRuntimePointer | undefined {
+  const candidate = value.pointer && typeof value.pointer === "object"
+    ? value.pointer as Record<string, unknown>
+    : value;
+  return typeof candidate.version === "string" && typeof candidate.runtimeDir === "string" && typeof candidate.entrypoint === "string"
+    ? candidate as unknown as import("./runtime-installer.js").InstalledRuntimePointer
+    : undefined;
+}
+
+function setupPaths(options: MemoryCliSetupOptions): {
+  home: string;
+  configPath: string;
+  dbPath: string;
+  endpoint: string;
+} {
+  const home = resolve(expandHome(options.home ?? "~/.memmy"));
+  const configPath = resolve(expandHome(options.configPath ?? join(home, "config.yaml")));
+  const storage = existingMemoryStorage(configPath);
+  return {
+    home,
+    configPath,
+    dbPath: resolve(expandHome(
+      options.dbPath
+        ?? optionalString(storage.sqlitePath)
+        ?? join(home, "memory-service", "memory.sqlite")
+    )),
+    endpoint: options.endpoint
+      ?? optionalString(storage.endpoint)
+      ?? "http://127.0.0.1:18960"
+  };
+}
+
+function existingMemoryStorage(configPath: string): Record<string, unknown> {
+  if (!existsSync(configPath)) return {};
+  const parsed = parseYaml(readFileSync(configPath, "utf8")) as unknown;
+  return asRecord(asRecord(asRecord(parsed).memmyMemory).storage);
+}
+
+function installedAgentIds(result: Record<string, unknown>): string[] {
+  if (!Array.isArray(result.agents)) return [];
+  return result.agents.flatMap((installation) => {
+    if (!installation || typeof installation !== "object") return [];
+    const agent = (installation as { agent?: unknown }).agent;
+    return typeof agent === "string" ? [agent] : [];
+  });
 }
 
 function isExistingMemmyMemoryLink(binPath: string, source: string): boolean {
@@ -116,144 +282,93 @@ function isPathReady(binDir: string): boolean {
     .some((entry) => entry && resolve(expandHome(entry)) === binDir);
 }
 
-function setupConfigYaml(
-  configPath: string,
+function setupMemoryConfig(
+  config: Record<string, unknown>,
   options: {
     dbPath: string;
     endpoint: string;
     token?: string;
+    generateTokenIfMissing?: boolean;
   }
-): string {
-  const config = readExistingConfig(configPath);
-  const app = { ...asRecord(config.app) };
+): void {
+  const app = asRecord(config.app);
   const appUserId = optionalString(app.userId);
-  delete app.user_id;
-  delete app.cloud_uuid;
-  if (appUserId) app.userId = appUserId;
-  if (Object.keys(app).length > 0) config.app = app;
-  else delete config.app;
-  delete config.identity;
-  delete config.uuid;
 
   config.memmyMemory = setupMemmyMemoryConfig(asRecord(config.memmyMemory), {
     appUserId,
+    accountMode: app.userMode === "account",
     dbPath: options.dbPath,
     endpoint: options.endpoint,
-    token: options.token
+    token: options.token,
+    generateTokenIfMissing: options.generateTokenIfMissing,
   });
-
-  const yaml = YAML.stringify(config);
-  return yaml.endsWith("\n") ? yaml : `${yaml}\n`;
-}
-
-function readExistingConfig(configPath: string): Record<string, unknown> {
-  if (!existsSync(configPath)) return {};
-  try {
-    const parsed = YAML.parse(readFileSync(configPath, "utf8"));
-    return asRecord(parsed);
-  } catch {
-    return {};
-  }
 }
 
 function setupMemmyMemoryConfig(
   existing: Record<string, unknown>,
   options: {
     appUserId?: string;
+    accountMode: boolean;
     dbPath: string;
     endpoint: string;
     token?: string;
+    generateTokenIfMissing?: boolean;
   }
 ): Record<string, unknown> {
+  const roleRouting = asRecord(existing.roleRouting);
+  const embedding = asRecord(existing.embedding);
+  const storage = asRecord(existing.storage);
+  const algorithm = asRecord(existing.algorithm);
+  const agentAccess = asRecord(existing.agentAccess);
+  const existingToken = optionalString(storage.token);
+  const token = options.token
+    ?? existingToken
+    ?? (options.generateTokenIfMissing ? crypto.randomBytes(32).toString("hex") : undefined);
   const memmyMemory: Record<string, unknown> = {
     ...existing,
     version: 1,
-    activeProfile: memoryProfileName(existing.activeProfile) ?? "byok",
+    userId: optionalString(existing.userId) ?? options.appUserId ?? "local-user",
+    roleRouting: {
+      ...roleRouting,
+      // Account mode has platform-owned models for both memory roles. Never
+      // let either role silently inherit the agent chat model.
+      summary: options.accountMode ? "fixed" : memoryRoleRouting(roleRouting.summary),
+      evolution: options.accountMode ? "fixed" : memoryRoleRouting(roleRouting.evolution)
+    },
     storage: {
+      ...storage,
       mode: "local",
       backend: "sqlite",
       sqlitePath: options.dbPath,
       endpoint: options.endpoint,
-      ...(options.token ? { token: options.token } : {})
+      ...(token !== undefined ? { token } : {})
     },
     algorithm: {
-      ...supportedAlgorithmConfig(asRecord(existing.algorithm)),
+      ...algorithm,
       enableMemoryAdd: true,
       enableMemorySearch: true,
       enableQueryRewrite: false
-    }
+    },
+    agentAccess: {
+      ...agentAccess,
+      autoScanKnownAgents: optionalBoolean(agentAccess.autoScanKnownAgents) ?? true,
+      watchFileChanges: optionalBoolean(agentAccess.watchFileChanges) ?? true,
+      autoInjectSkill: optionalBoolean(agentAccess.autoInjectSkill) ?? false
+    },
+    embedding: Object.keys(embedding).length
+      ? embedding
+      : {
+          mode: options.accountMode ? "cloud" : "local",
+          ...(options.accountMode ? {} : { provider: "local" })
+        }
   };
-  const profiles = memoryProfiles(existing);
-  if (!profiles.byok) {
-    profiles.byok = byokProfileFromExisting(existing, options.appUserId);
-  }
-  memmyMemory.profiles = profiles;
-  delete memmyMemory.userId;
-  delete memmyMemory.summary;
-  delete memmyMemory.evolution;
-  delete memmyMemory.embedding;
   return memmyMemory;
 }
 
-function supportedAlgorithmConfig(input: Record<string, unknown>): Record<string, unknown> {
-  const supported = [
-    "capture",
-    "reward",
-    "feedback",
-    "l2Induction",
-    "l3Abstraction",
-    "skill",
-    "session",
-    "retrieval"
-  ];
-  return Object.fromEntries(
-    supported
-      .filter((key) => Object.prototype.hasOwnProperty.call(input, key))
-      .map((key) => [key, input[key]])
-  );
+function memoryRoleRouting(value: unknown): "follow" | "fixed" {
+  return value === "fixed" ? "fixed" : "follow";
 }
 
-function memoryProfiles(memmyMemory: Record<string, unknown>): Record<string, unknown> {
-  const profiles = asRecord(memmyMemory.profiles);
-  return {
-    ...(Object.keys(asRecord(profiles.account)).length ? { account: { ...asRecord(profiles.account) } } : {}),
-    ...(Object.keys(asRecord(profiles.byok)).length ? { byok: { ...asRecord(profiles.byok) } } : {})
-  };
-}
-
-function byokProfileFromExisting(existing: Record<string, unknown>, appUserId?: string): Record<string, unknown> {
-  const userId = optionalString(existing.userId) ?? appUserId;
-  const legacy = {
-    ...(userId ? { userId } : {}),
-    ...(Object.keys(asRecord(existing.summary)).length ? { summary: { ...asRecord(existing.summary) } } : {}),
-    ...(Object.keys(asRecord(existing.evolution)).length ? { evolution: { ...asRecord(existing.evolution) } } : {}),
-    embedding: byokEmbeddingFromExisting(asRecord(existing.embedding))
-  };
-  return legacy;
-}
-
-function byokEmbeddingFromExisting(existing: Record<string, unknown>): Record<string, unknown> {
-  const provider = optionalString(existing.provider);
-  if (
-    provider === "openai_compatible" ||
-    provider === "gemini" ||
-    provider === "cohere" ||
-    provider === "voyage" ||
-    provider === "mistral"
-  ) {
-    return { ...existing };
-  }
-  if (!provider || provider === "local") {
-    return {
-      provider: "local"
-    };
-  }
-  return {
-    provider: "local"
-  };
-}
-
-function memoryProfileName(value: unknown): "account" | "byok" | undefined {
-  const profile = optionalString(value);
-  return profile === "account" || profile === "byok" ? profile : undefined;
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
 }

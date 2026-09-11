@@ -49,7 +49,9 @@ function drainArray(items: any[]): ({ limit }?: { limit?: number }) => any[] {
   return ({ limit = MAX_INJECTIONS_PER_TURN } = {}) => items.splice(0, limit);
 }
 
-async function waitUntil(predicate: () => boolean, timeout = 1000): Promise<void> {
+// Full-suite workers can spend more than one second initializing runtime tools
+// before the loop begins draining its already-buffered inbound queue.
+async function waitUntil(predicate: () => boolean, timeout = 5000): Promise<void> {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (predicate()) return;
@@ -99,6 +101,76 @@ describe("AgentRunner injection drain", () => {
   it("handles injection callback exceptions", async () => {
     const spec = new AgentRunSpec({ injectionCallback: async () => { throw new Error("boom"); } });
     await expect(new AgentRunner().drainInjections(spec)).resolves.toEqual([]);
+  });
+
+  it("preserves queue-steer recovery identity without merging or exposing it to providers", async () => {
+    const injection = {
+      role: "user",
+      content: "queued adjustment",
+      client_request_id: "88888888-8888-4888-8888-888888888888",
+      webui_request_digest: "queue-steer-digest",
+      turn_id: "turn-queue-steer",
+      turn_source: { kind: "gui", channel: "websocket" },
+      webui_queue_steer_origin: true,
+      webui_queue_steer_recovery: {
+        content: "queued adjustment",
+        media: [],
+        turn_id: "turn-queue-steer",
+      },
+    };
+    const drained = await new AgentRunner().drainInjections(new AgentRunSpec({
+      injectionCallback: async () => [injection],
+    }));
+    expect(drained).toEqual([injection]);
+
+    const adjacent = [{ role: "user", content: "existing" }];
+    AgentRunner.appendInjectedMessages(adjacent, drained);
+    expect(adjacent).toHaveLength(2);
+
+    let calls = 0;
+    const providerMessages: any[][] = [];
+    const provider = makeProvider(async ({ messages }) => {
+      calls += 1;
+      providerMessages.push(messages);
+      return new LLMResponse({ content: calls === 1 ? "first" : "final" });
+    });
+    const pending = [injection];
+    const beforeFollowupModelRequest = vi.fn(async (context: any) => {
+      expect(context.currentTurnMessages).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          content: injection.content,
+          client_request_id: injection.client_request_id,
+          webui_queue_steer_recovery: injection.webui_queue_steer_recovery,
+        }),
+      ]));
+      return {
+        messages: [
+          { role: "system", content: "compacted history" },
+          ...context.currentTurnMessages,
+        ],
+      };
+    });
+    const result = await new AgentRunner(provider).run(new AgentRunSpec({
+      messages: [{ role: "user", content: "hello" }],
+      provider,
+      tools: makeTools(),
+      maxIterations: 5,
+      injectionCallback: drainArray(pending),
+      currentTurnMessageStartIndex: 0,
+      beforeFollowupModelRequest,
+    }));
+    const persisted = result.messages.find((message) => (
+      message.client_request_id === injection.client_request_id
+    ));
+    expect(persisted).toMatchObject({
+      client_request_id: injection.client_request_id,
+      webui_request_digest: injection.webui_request_digest,
+      turn_id: injection.turn_id,
+      webui_queue_steer_recovery: injection.webui_queue_steer_recovery,
+    });
+    expect(providerMessages.at(-1)?.find((message) => message.content === injection.content))
+      .toEqual({ role: "user", content: injection.content });
+    expect(beforeFollowupModelRequest).toHaveBeenCalledOnce();
   });
 });
 
@@ -197,7 +269,7 @@ describe("AgentRunner injection checkpoints", () => {
       captured.push(messages.map((msg: any) => ({ ...msg })));
       return new LLMResponse({ content: calls === 1 ? "first answer" : "second answer" });
     });
-    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "test-model" });
+    const loop = new AgentLoop({ bus: new MessageBus(), provider, workspace: root, model: "gpt-4.1" });
     loop.tools.getDefinitions = vi.fn(() => []);
     const pending = new AsyncQueue<InboundMessage>();
     pending.put(inbound("", { media: [imagePath] }));
@@ -221,6 +293,7 @@ describe("AgentRunner injection checkpoints", () => {
 
     const result = await new AgentRunner(provider).run(new AgentRunSpec({
       messages: [{ role: "user", content: "hello" }],
+      model: "gpt-4.1",
       provider,
       tools: makeTools(),
       maxIterations: 5,
@@ -280,25 +353,26 @@ describe("AgentLoop pending queues", () => {
     expect(loop.pendingQueues.has(msg.sessionKey)).toBe(false);
   });
 
-  it("routes unified-session follow-ups to an active pending queue", async () => {
+  it("keeps default unified-session input out of a direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
     loop.unifiedSession = true;
-    loop.dispatchMessage = vi.fn(async () => undefined) as any;
+    loop.processMessageInternal = vi.fn(async () => null) as any;
     const pending = new AsyncQueue<InboundMessage>();
     loop.pendingQueues.set(UNIFIED_SESSION_KEY, pending);
 
     const runTask = loop.run();
     await bus.publishInbound(new InboundMessage({ channel: "discord", senderId: "u", chatId: "c", content: "follow-up" }));
-    await waitUntil(() => pending.size > 0);
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length > 0);
     loop.stop();
     await runTask;
 
-    expect(loop.dispatchMessage).not.toHaveBeenCalled();
-    const queued = pending.getNowait()!;
+    expect(pending.size).toBe(0);
+    const [queued, sessionKey] = (loop.processMessageInternal as any).mock.calls[0];
     expect(queued.content).toBe("follow-up");
-    expect(queued.sessionKey).toBe(UNIFIED_SESSION_KEY);
+    expect(queued.turnAdmission).toBe("queue");
+    expect(sessionKey).toBe(UNIFIED_SESSION_KEY);
   });
 
   it("preserves pending queue overflow for later injection cycles", async () => {
@@ -326,20 +400,20 @@ describe("AgentLoop pending queues", () => {
     for (let i = 0; i < total; i += 1) expect(flattened).toContain(`follow-up-${i}`);
   });
 
-  it("falls back to dispatch when an active pending queue rejects a put", async () => {
+  it("does not put default input into an active direct pending queue", async () => {
     const root = tmpRoot();
     const bus = new MessageBus();
     const loop = new AgentLoop({ bus, provider: makeProvider(async () => new LLMResponse({ content: "done" })), workspace: root, model: "test-model" });
-    loop.dispatchMessage = vi.fn(async () => undefined) as any;
+    loop.processMessageInternal = vi.fn(async () => null) as any;
     loop.pendingQueues.set("cli:c", { put: () => { throw new Error("full"); } } as any);
 
     const runTask = loop.run();
     await bus.publishInbound(inbound("follow-up"));
-    await waitUntil(() => (loop.dispatchMessage as any).mock.calls.length > 0);
+    await waitUntil(() => (loop.processMessageInternal as any).mock.calls.length > 0);
     loop.stop();
     await runTask;
 
-    expect(loop.dispatchMessage).toHaveBeenCalledOnce();
+    expect(loop.processMessageInternal).toHaveBeenCalledOnce();
   });
 
   it("re-publishes leftover pending queue messages after dispatch cleanup", async () => {

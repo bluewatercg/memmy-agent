@@ -1,34 +1,12 @@
 import { CronSchedule } from "../cron/types.js";
-import { PROVIDERS, findByName, normalizeProviderName } from "../providers/registry.js";
+import { getModelTokenDefaults } from "../providers/model-token-defaults.js";
+import { PROVIDERS, findByName } from "../providers/registry.js";
 import { DEFAULT_MAX_TOKENS } from "../token-budget.js";
 import { normalizeTimeZoneOffset, systemUtcOffset } from "../utils/time-zone.js";
 
 type Dict<T = any> = Record<string, T>;
-type MemoryProfileName = "account" | "byok";
-type ImageGenerationProfileName = "account" | "byok";
 export type ContextCompactionSummaryMode = "text" | "dag";
 export const DEFAULT_CONTEXT_WINDOW_TOKENS = 200_000;
-const IMAGE_GENERATION_PROVIDERS = new Set([
-  "openai",
-  "custom",
-  "azure_openai",
-  "bedrock",
-  "openrouter",
-  "aihubmix",
-  "ollama",
-  "gemini",
-  "minimax",
-  "stepfun",
-  "zhipu",
-  "openai_codex",
-  "volcengine",
-  "byteplus",
-  "dashscope",
-  "qianfan",
-  "nvidia",
-  "memmy_account",
-]);
-
 function isRecord(value: any): value is Dict {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -48,24 +26,6 @@ function optionalString(value: any): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function memoryProfileName(value: any): MemoryProfileName | undefined {
-  return value === "account" || value === "byok" ? value : undefined;
-}
-
-function imageGenerationProfileName(value: any): ImageGenerationProfileName | null {
-  return value === "account" || value === "byok" ? value : null;
-}
-
-function pickMemoryProfiles(value: any): Dict | undefined {
-  if (!isRecord(value)) return undefined;
-
-  const profiles = Object.fromEntries(
-    (["account", "byok"] as const)
-      .filter((name) => isRecord(value[name]))
-      .map((name) => [name, { ...value[name] }]),
-  );
-  return Object.keys(profiles).length > 0 ? profiles : undefined;
-}
 
 function assertIntRange(field: string, value: any, min?: number, max?: number): number {
   if (!Number.isInteger(value)) throw new ValueError(`${field} must be an integer`);
@@ -116,14 +76,6 @@ function assertPlainObject(field: string, value: any): Dict {
   return value;
 }
 
-function assertStringRecord(field: string, value: any): Dict<string> {
-  const record = assertPlainObject(field, value);
-  for (const [key, item] of Object.entries(record)) {
-    if (typeof item !== "string") throw new ValueError(`${field}.${key} must be a string`);
-  }
-  return record as Dict<string>;
-}
-
 function assertBoolean(field: string, value: any): boolean {
   if (typeof value !== "boolean") throw new ValueError(`${field} must be a boolean`);
   return value;
@@ -134,19 +86,28 @@ function assertIntArrayRange(field: string, value: any, min?: number, max?: numb
   return value.map((item, idx) => assertIntRange(`${field}[${idx}]`, item, min, max));
 }
 
-function normalizedKeyMap(data: Dict): Map<string, any> {
-  return new Map(Object.entries(data).map(([key, value]) => [normalizeProviderName(key), value]));
-}
-
 type ProviderApiType = "auto" | "chatCompletions" | "responses";
+export type ModelCapability = "agent" | "memory_summary" | "memory_evolution" | "embedding" | "asr" | "image_generation";
+export type ModelEndpointProtocol =
+  | "openai-chat-completions"
+  | "openai-responses"
+  | "anthropic-messages"
+  | "gemini-generate-content"
+  | "openai-embeddings"
+  | "dashscope-input-audio-chat"
+  | "openai-images"
+  | "dashscope-multimodal-generation"
+  | "memmy-account";
 
-function normalizeProviderApiType(value: any): ProviderApiType {
-  const apiType = value ?? "auto";
-  if (apiType === "chat_completions" || apiType === "chat-completions") return "chatCompletions";
-  if (apiType === "auto" || apiType === "chatCompletions" || apiType === "responses")
-    return apiType;
-  throw new ValueError("apiType must be one of auto, chatCompletions, responses");
-}
+const MODEL_CAPABILITIES = ["agent", "memory_summary", "memory_evolution", "embedding", "asr", "image_generation"] as const;
+const TEXT_GENERATION_CAPABILITIES: ReadonlySet<ModelCapability> = new Set([
+  "agent", "memory_summary", "memory_evolution",
+]);
+const ENDPOINT_PROTOCOLS = [
+  "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content",
+  "openai-embeddings", "dashscope-input-audio-chat", "openai-images",
+  "dashscope-multimodal-generation", "memmy-account",
+] as const;
 
 export class Base {
   constructor(init: Dict = {}) {
@@ -263,24 +224,50 @@ export class InlineFallbackConfig extends Base {
 export type FallbackCandidate = string | InlineFallbackConfig;
 
 export class ModelPresetConfig extends Base {
-  label: string | null;
+  endpoint: string;
   model: string;
-  provider = "auto";
+  provider: string;
+  source: "account" | "byok";
+  ownerAccountId: string | null;
+  capabilities: ModelCapability[];
   maxTokens = DEFAULT_MAX_TOKENS;
   contextWindowTokens = DEFAULT_CONTEXT_WINDOW_TOKENS;
   temperature = 0.7;
   reasoningEffort: string | null = null;
 
   constructor(init: Dict) {
-    super();
-    this.label = pick(init, ["label"], null);
+    super(init);
+    delete (this as Dict).label;
+    this.endpoint = init.endpoint;
     this.model = init.model;
-    this.provider = pick(init, ["provider"], "auto");
-    this.maxTokens = pick(init, ["maxTokens"], DEFAULT_MAX_TOKENS);
-    this.contextWindowTokens = pick(init, ["contextWindowTokens"], DEFAULT_CONTEXT_WINDOW_TOKENS);
+    this.provider = init.provider;
+    this.source = assertOneOf("modelPreset source", init.source, ["account", "byok"] as const);
+    this.ownerAccountId = pick(init, ["ownerAccountId"], null);
+    this.capabilities = assertStringArray("modelPreset capabilities", init.capabilities) as ModelCapability[];
+    assertRequiredString("modelPreset endpoint", this.endpoint);
+    assertRequiredString("modelPreset model", this.model);
+    assertRequiredString("modelPreset provider", this.provider);
+    if (!this.capabilities.length || this.capabilities.some((capability) => !MODEL_CAPABILITIES.includes(capability))) {
+      throw new ValueError(`modelPreset capabilities must contain only ${MODEL_CAPABILITIES.join(", ")}`);
+    }
+    const mappedDefaults = this.source === "byok"
+      && this.capabilities.some((capability) => TEXT_GENERATION_CAPABILITIES.has(capability))
+      ? getModelTokenDefaults(this.model)
+      : null;
+    this.maxTokens = pick(init, ["maxTokens"], mappedDefaults?.maxTokens ?? DEFAULT_MAX_TOKENS);
+    this.contextWindowTokens = pick(
+      init,
+      ["contextWindowTokens"],
+      mappedDefaults?.contextWindowTokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS,
+    );
     this.temperature = pick(init, ["temperature"], 0.7);
     this.reasoningEffort = pick(init, ["reasoningEffort"], null);
-    assertRequiredString("modelPreset model", this.model);
+    if (this.source === "account" && !optionalString(this.ownerAccountId)) {
+      throw new ValueError("account modelPreset ownerAccountId is required");
+    }
+    if (this.source === "byok" && optionalString(this.ownerAccountId)) {
+      throw new ValueError("BYOK modelPreset must not define ownerAccountId");
+    }
   }
 
   toGenerationSettings(): any {
@@ -288,6 +275,86 @@ export class ModelPresetConfig extends Base {
       temperature: this.temperature,
       maxTokens: this.maxTokens,
       reasoningEffort: this.reasoningEffort,
+    };
+  }
+
+  override toObject(): Dict {
+    return omitUndefined({
+      ...this,
+      ownerAccountId: this.ownerAccountId ?? undefined,
+    });
+  }
+}
+
+export class AgentModelAssignmentConfig extends Base {
+  candidates: string[];
+  default: string | null;
+
+  constructor(init: Dict = {}) {
+    super(init);
+    this.candidates = assertStringArray("modelAssignments agent candidates", pick(init, ["candidates"], []));
+    this.default = pick(init, ["default"], null);
+    if (new Set(this.candidates).size !== this.candidates.length) {
+      throw new ValueError("modelAssignments agent candidates must be unique");
+    }
+    if (this.default && !this.candidates.includes(this.default)) {
+      throw new ValueError("modelAssignments agent default must be one of candidates");
+    }
+    if (!this.default && this.candidates.length) {
+      throw new ValueError("modelAssignments agent default is required when candidates exist");
+    }
+  }
+}
+
+export class ModelAssignmentConfig extends Base {
+  ownerAccountId: string | null;
+  agent: AgentModelAssignmentConfig;
+  memorySummary: string | null;
+  memoryEvolution: string | null;
+  embedding: string | null;
+  asr: string | null;
+  imageGeneration: string | null;
+
+  constructor(init: Dict = {}) {
+    super(init);
+    this.ownerAccountId = pick(init, ["ownerAccountId"], null);
+    this.agent = init.agent instanceof AgentModelAssignmentConfig
+      ? init.agent
+      : new AgentModelAssignmentConfig(init.agent ?? {});
+    this.memorySummary = pick(init, ["memorySummary"], null);
+    this.memoryEvolution = pick(init, ["memoryEvolution"], null);
+    this.embedding = pick(init, ["embedding"], null);
+    this.asr = pick(init, ["asr"], null);
+    this.imageGeneration = pick(init, ["imageGeneration"], null);
+  }
+
+  override toObject(): Dict {
+    return omitUndefined({
+      ...this,
+      ownerAccountId: this.ownerAccountId ?? undefined,
+      agent: this.agent instanceof AgentModelAssignmentConfig
+        ? this.agent.toObject()
+        : new AgentModelAssignmentConfig(this.agent).toObject(),
+    });
+  }
+}
+
+export class ModelAssignmentsConfig extends Base {
+  byok: ModelAssignmentConfig;
+  account: ModelAssignmentConfig;
+
+  constructor(init: Dict = {}) {
+    super(init);
+    this.byok = init.byok instanceof ModelAssignmentConfig ? init.byok : new ModelAssignmentConfig(init.byok ?? {});
+    this.account = init.account instanceof ModelAssignmentConfig ? init.account : new ModelAssignmentConfig(init.account ?? {});
+    if (this.byok.ownerAccountId) throw new ValueError("modelAssignments.byok must not define ownerAccountId");
+  }
+
+  override toObject(): Dict {
+    return {
+      ...this,
+      byok: this.byok.toObject(),
+      account: this.account.toObject(),
     };
   }
 }
@@ -487,18 +554,86 @@ export class ContextCompactionConfig extends Base {
 
 export class ProviderConfig extends Base {
   apiKey: string | null;
-  apiBase: string | null;
-  apiType: ProviderApiType;
+  extraHeaders: Dict<string> | null;
+  extraBody: Dict | null;
+  ownerAccountId: string | null;
+  endpoints: Dict<ModelEndpointConfig>;
+
+  constructor(init: Dict = {}) {
+    for (const legacy of ["api_key", "api_base", "api_type", "extra_headers", "extra_body", "apiBase", "apiType"]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`providers current contract does not accept legacy field '${legacy}'`);
+      }
+    }
+    super(init);
+    this.apiKey = pick(init, ["apiKey"], null);
+    this.extraHeaders = pick(init, ["extraHeaders"], null);
+    this.extraBody = pick(init, ["extraBody"], null);
+    this.ownerAccountId = pick(init, ["ownerAccountId"], null);
+    this.endpoints = Object.fromEntries(Object.entries(pick(init, ["endpoints"], {})).map(([id, value]) => [
+      id,
+      value instanceof ModelEndpointConfig ? value : new ModelEndpointConfig(value as Dict),
+    ]));
+  }
+
+  /** Compatibility projection used only until all Provider consumers resolve an explicit endpoint. */
+  get apiBase(): string | null {
+    return this.chatEndpoint()?.apiBase ?? Object.values(this.endpoints)[0]?.apiBase ?? null;
+  }
+
+  get apiType(): ProviderApiType {
+    const protocol = this.chatEndpoint()?.protocol;
+    if (protocol === "openai-responses") return "responses";
+    if (protocol === "openai-chat-completions") return "chatCompletions";
+    return "auto";
+  }
+
+  private chatEndpoint(): ModelEndpointConfig | null {
+    return Object.values(this.endpoints).find((endpoint) => [
+      "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content", "memmy-account",
+    ].includes(endpoint.protocol)) ?? null;
+  }
+
+  override toObject(): Dict {
+    return omitUndefined({
+      ...this,
+      apiKey: this.apiKey ?? undefined,
+      extraHeaders: this.extraHeaders ?? undefined,
+      extraBody: this.extraBody ?? undefined,
+      ownerAccountId: this.ownerAccountId ?? undefined,
+      endpoints: Object.fromEntries(Object.entries(this.endpoints).map(([id, endpoint]) => [id, endpoint.toObject()])),
+    });
+  }
+}
+
+export class ModelEndpointConfig extends Base {
+  apiBase: string;
+  protocol: ModelEndpointProtocol;
+  apiKey: string | null;
   extraHeaders: Dict<string> | null;
   extraBody: Dict | null;
 
   constructor(init: Dict = {}) {
-    super();
-    this.apiKey = pick(init, ["apiKey", "api_key"], null);
-    this.apiBase = pick(init, ["apiBase", "api_base"], null);
-    this.apiType = normalizeProviderApiType(pick(init, ["apiType", "api_type"], "auto"));
-    this.extraHeaders = pick(init, ["extraHeaders", "extra_headers"], null);
-    this.extraBody = pick(init, ["extraBody", "extra_body"], null);
+    for (const legacy of ["api_key", "api_base", "api_type", "extra_headers", "extra_body"]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`provider endpoint current contract does not accept legacy field '${legacy}'`);
+      }
+    }
+    super(init);
+    this.apiBase = assertRequiredString("provider endpoint apiBase", init.apiBase);
+    this.protocol = assertOneOf("provider endpoint protocol", init.protocol, ENDPOINT_PROTOCOLS);
+    this.apiKey = pick(init, ["apiKey"], null);
+    this.extraHeaders = pick(init, ["extraHeaders"], null);
+    this.extraBody = pick(init, ["extraBody"], null);
+  }
+
+  override toObject(): Dict {
+    return omitUndefined({
+      ...this,
+      apiKey: this.apiKey ?? undefined,
+      extraHeaders: this.extraHeaders ?? undefined,
+      extraBody: this.extraBody ?? undefined,
+    });
   }
 }
 
@@ -516,26 +651,48 @@ export class BedrockProviderConfig extends ProviderConfig {
 
 export class ProvidersConfig extends Base {
   [key: string]: any;
+  #presentProviderIds: Set<string>;
   constructor(init: Dict = {}) {
     super();
-    const byNormalizedKey = normalizedKeyMap(init);
+    this.#presentProviderIds = new Set(Object.keys(init));
+    for (const legacy of ["openai_compatible", "google", "qwen", "kimi", "baidu", "doubao"]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`providers current contract requires canonical Provider ID instead of '${legacy}'`);
+      }
+    }
+    const byNormalizedKey = new Map(Object.entries(init));
     for (const { name } of PROVIDERS) {
       const cls = name === "bedrock" ? BedrockProviderConfig : ProviderConfig;
       const raw = byNormalizedKey.get(name) ?? {};
       this[name] = raw instanceof cls ? raw : new cls(raw);
     }
+    for (const [name, raw] of Object.entries(init)) {
+      if (name in this) continue;
+      this[name] = raw instanceof ProviderConfig ? raw : new ProviderConfig(isRecord(raw) ? raw : {});
+    }
   }
 
   override toObject(): Dict {
     const dump: Dict = {};
-    for (const spec of PROVIDERS) {
-      if (spec.isOauth) continue;
-      const value = this[spec.name];
-      if (value && typeof value.toObject === "function") dump[spec.name] = value.toObject();
-      else dump[spec.name] = value;
+    for (const [name, value] of Object.entries(this)) {
+      if (findByName(name)?.isOauth) continue;
+      if (!this.#presentProviderIds.has(name) && !providerConfigHasValues(value)) continue;
+      dump[name] = value && typeof value.toObject === "function"
+        ? value.toObject()
+        : value;
     }
     return dump;
   }
+}
+
+function providerConfigHasValues(value: any): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (optionalString(value.apiKey) || optionalString(value.ownerAccountId) || Object.keys(value.endpoints ?? {}).length > 0) return true;
+  if (isRecord(value.extraHeaders) && Object.keys(value.extraHeaders).length > 0) return true;
+  if (isRecord(value.extraBody) && Object.keys(value.extraBody).length > 0) return true;
+  if (optionalString(value.region) !== undefined || optionalString(value.profile) !== undefined) return true;
+  const known = new Set(["apiKey", "ownerAccountId", "endpoints", "extraHeaders", "extraBody", "region", "profile"]);
+  return Object.keys(value).some((key) => !known.has(key));
 }
 
 export class WebSearchConfig extends Base {
@@ -665,76 +822,12 @@ export class ExecToolConfig extends Base {
   }
 }
 
-export class ImageGenerationProfileConfig extends Base {
-  provider = "";
-  model = "";
-  apiKey = "";
-  apiBase = "";
-  extraHeaders: Dict<string> | null = null;
-  extraBody: Dict | null = null;
-
-  constructor(init: Dict = {}) {
-    super();
-    const provider = optionalString(pick(init, ["provider"], ""));
-    this.provider = provider ? normalizeImageGenerationProvider(provider) : "";
-    this.model = optionalString(pick(init, ["model"], "")) ?? "";
-    this.apiKey = pick(init, ["apiKey", "api_key"], "") ?? "";
-    this.apiBase = pick(init, ["apiBase", "api_base"], "") ?? "";
-    if (typeof this.apiKey !== "string")
-      throw new ValueError("tools.imageGeneration.profiles.apiKey must be a string");
-    if (typeof this.apiBase !== "string")
-      throw new ValueError("tools.imageGeneration.profiles.apiBase must be a string");
-    if (hasAnyKey(init, ["extraHeaders", "extra_headers"])) {
-      const value = pick(init, ["extraHeaders", "extra_headers"], null);
-      this.extraHeaders =
-        value === null
-          ? null
-          : assertStringRecord("tools.imageGeneration.profiles.extraHeaders", value);
-    }
-    if (hasAnyKey(init, ["extraBody", "extra_body"])) {
-      const value = pick(init, ["extraBody", "extra_body"], null);
-      this.extraBody =
-        value === null
-          ? null
-          : assertPlainObject("tools.imageGeneration.profiles.extraBody", value);
-    }
-  }
-
-  complete(): boolean {
-    return Boolean(this.provider && this.model);
-  }
-
-  override toObject(): Dict {
-    return omitUndefined({
-      provider: this.provider || undefined,
-      model: this.model || undefined,
-      apiKey: this.apiKey || undefined,
-      apiBase: this.apiBase || undefined,
-      extraHeaders: this.extraHeaders ?? undefined,
-      extraBody: this.extraBody ?? undefined,
-    });
-  }
-}
-
-function hasAnyKey(data: Dict, names: string[]): boolean {
-  return names.some((name) => Object.prototype.hasOwnProperty.call(data, name));
-}
-
-function pickImageGenerationProfiles(value: any): Partial<Record<ImageGenerationProfileName, ImageGenerationProfileConfig>> {
-  if (!isRecord(value)) return {};
-  const profiles: Partial<Record<ImageGenerationProfileName, ImageGenerationProfileConfig>> = {};
-  for (const name of ["account", "byok"] as const) {
-    if (isRecord(value[name])) profiles[name] = new ImageGenerationProfileConfig(value[name]);
-  }
-  return profiles;
-}
-
 export function isValidImageGenerationMaxImagesPerTurn(value: unknown): value is number | null {
   return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 1);
 }
 
 export class ImageGenerationToolConfig extends Base {
-  enabled = false;
+  enabled = true;
   provider = "openai";
   model = "gpt-image-2";
   apiKey = "";
@@ -745,48 +838,37 @@ export class ImageGenerationToolConfig extends Base {
   saveDir = "generated";
   extraHeaders: Dict<string> = {};
   extraBody: Dict = {};
-  activeProfile: ImageGenerationProfileName | null = null;
-  profiles: Partial<Record<ImageGenerationProfileName, ImageGenerationProfileConfig>> = {};
   profileMode = false;
 
   constructor(init: Dict = {}) {
     super();
-    this.enabled = pick(init, ["enabled"], false);
-    this.activeProfile = imageGenerationProfileName(pick(init, ["activeProfile", "active_profile"], null));
-    this.profiles = pickImageGenerationProfiles(pick(init, ["profiles"], {}));
-    this.profileMode = this.activeProfile !== null || Object.keys(this.profiles).length > 0;
-    this.provider = normalizeImageGenerationProvider(pick(init, ["provider"], this.provider));
-    this.model = assertRequiredString("tools.imageGeneration.model", pick(init, ["model"], this.model));
-    this.apiKey = pick(init, ["apiKey", "api_key"], this.apiKey) ?? "";
-    this.apiBase = pick(init, ["apiBase", "api_base"], this.apiBase) ?? "";
+    for (const legacy of [
+      "activeProfile", "active_profile", "profiles", "provider", "model", "apiKey", "api_key", "apiBase", "api_base",
+      "extraHeaders", "extra_headers", "extraBody", "extra_body", "default_aspect_ratio", "default_image_size",
+      "max_images_per_turn", "save_dir",
+    ]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`tools.imageGeneration current contract does not accept legacy model field '${legacy}'`);
+      }
+    }
+    this.enabled = pick(init, ["enabled"], true);
+    this.profileMode = false;
     this.defaultAspectRatio = pick(
       init,
-      ["defaultAspectRatio", "default_aspect_ratio"],
+      ["defaultAspectRatio"],
       this.defaultAspectRatio,
     );
     this.defaultImageSize = pick(
       init,
-      ["defaultImageSize", "default_image_size"],
+      ["defaultImageSize"],
       this.defaultImageSize,
     );
     this.maxImagesPerTurn = pick(
       init,
-      ["maxImagesPerTurn", "max_images_per_turn"],
+      ["maxImagesPerTurn"],
       this.maxImagesPerTurn,
     );
-    this.saveDir = pick(init, ["saveDir", "save_dir"], this.saveDir);
-    this.extraHeaders = assertStringRecord(
-      "tools.imageGeneration.extraHeaders",
-      pick(init, ["extraHeaders", "extra_headers"], {}),
-    );
-    this.extraBody = assertPlainObject(
-      "tools.imageGeneration.extraBody",
-      pick(init, ["extraBody", "extra_body"], {}),
-    );
-    if (typeof this.apiKey !== "string")
-      throw new ValueError("tools.imageGeneration.apiKey must be a string");
-    if (typeof this.apiBase !== "string")
-      throw new ValueError("tools.imageGeneration.apiBase must be a string");
+    this.saveDir = pick(init, ["saveDir"], this.saveDir);
     if (typeof this.defaultAspectRatio !== "string" || !this.defaultAspectRatio.trim())
       throw new ValueError("tools.imageGeneration.defaultAspectRatio must be a non-empty string");
     if (typeof this.defaultImageSize !== "string" || !this.defaultImageSize.trim())
@@ -800,87 +882,27 @@ export class ImageGenerationToolConfig extends Base {
     }
   }
 
-  effectiveImageGenerationProfile(): ImageGenerationProfileConfig | null {
-    if (this.profileMode) {
-      if (!this.activeProfile) return null;
-      return this.profiles[this.activeProfile] ?? null;
-    }
-    return new ImageGenerationProfileConfig({
-      provider: this.provider,
-      model: this.model,
-      apiKey: this.apiKey,
-      apiBase: this.apiBase,
-      extraHeaders: this.extraHeaders,
-      extraBody: this.extraBody,
-    });
+  effectiveImageGenerationProfile(): null {
+    return null;
   }
 
   hasCompleteEffectiveProfile(): boolean {
-    return Boolean(this.effectiveImageGenerationProfile()?.complete());
+    return false;
   }
 
   effectiveImageGenerationConfig(): ImageGenerationToolConfig {
-    const profile = this.effectiveImageGenerationProfile();
-    return new ImageGenerationToolConfig({
-      enabled: this.enabled && Boolean(profile?.complete()),
-      provider: profile?.provider || this.provider,
-      model: profile?.model || this.model,
-      apiKey: profile?.apiKey ?? "",
-      apiBase: profile?.apiBase ?? "",
-      defaultAspectRatio: this.defaultAspectRatio,
-      defaultImageSize: this.defaultImageSize,
-      maxImagesPerTurn: this.maxImagesPerTurn,
-      saveDir: this.saveDir,
-      extraHeaders: profile?.extraHeaders ?? this.extraHeaders,
-      extraBody: profile?.extraBody ?? this.extraBody,
-    });
+    return this;
   }
 
   override toObject(): Dict {
-    const base = {
+    return {
       enabled: this.enabled,
       defaultAspectRatio: this.defaultAspectRatio,
       defaultImageSize: this.defaultImageSize,
       maxImagesPerTurn: this.maxImagesPerTurn,
       saveDir: this.saveDir,
-      extraHeaders: this.extraHeaders,
-      extraBody: this.extraBody,
-    };
-    if (this.profileMode) {
-      const profiles = Object.fromEntries(
-        (["account", "byok"] as const)
-          .filter((name) => this.profiles[name])
-          .map((name) => [name, this.profiles[name]!.toObject()]),
-      );
-      return omitUndefined({
-        ...base,
-        activeProfile: this.activeProfile ?? undefined,
-        profiles: Object.keys(profiles).length ? profiles : undefined,
-      });
-    }
-    return {
-      ...base,
-      provider: this.provider,
-      model: this.model,
-      apiKey: this.apiKey,
-      apiBase: this.apiBase,
     };
   }
-}
-
-function normalizeImageGenerationProvider(value: any): string {
-  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
-  const legacy: Record<string, string> = {
-    baidu: "qianfan",
-    doubao: "volcengine",
-    qwen: "dashscope",
-  };
-  const provider = legacy[raw] ?? raw;
-  if (!provider) throw new ValueError("tools.imageGeneration.provider must be a non-empty string");
-  if (!IMAGE_GENERATION_PROVIDERS.has(provider)) {
-    throw new ValueError(`tools.imageGeneration.provider '${provider}' is not supported`);
-  }
-  return provider;
 }
 
 export class MCPServerConfig extends Base {
@@ -1051,41 +1073,72 @@ export class GatewayConfig extends Base {
 export class MemmyMemoryConfig extends Base {
   enabled = true;
   userId = "local-user";
-  activeProfile?: MemoryProfileName;
-  profiles?: Dict;
   version?: number;
   storage?: Dict;
+  roleRouting?: Dict;
+  retrievalLayers?: Array<"L1" | "L2" | "L3" | "Skill">;
   summary?: Dict;
   evolution?: Dict;
   embedding?: Dict;
   algorithm?: Dict;
+  telemetry?: Dict;
+  hub?: Dict;
+  agentAccess?: Dict;
+  private readonly additional: Dict;
 
   constructor(init: Dict = {}, options: { userId?: string } = {}) {
     super();
-    this.enabled = pick(init, ["enabled", "enable"], true);
+    for (const legacy of ["enable", "activeProfile", "profiles"]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`memmyMemory current contract does not accept legacy field '${legacy}'`);
+      }
+    }
+    this.additional = { ...init };
+    for (const key of [
+      "enabled", "userId", "version", "storage", "roleRouting", "retrievalLayers", "summary", "evolution",
+      "embedding", "algorithm", "logging", "telemetry", "hub", "agentAccess"
+    ]) delete this.additional[key];
+    this.enabled = pick(init, ["enabled"], true);
     this.userId = options.userId ?? pick(init, ["userId"], this.userId);
-    this.activeProfile = memoryProfileName(init.activeProfile);
-    this.profiles = pickMemoryProfiles(init.profiles);
     this.version = pick<number | undefined>(init, ["version"], undefined);
     this.storage = pick<Dict | undefined>(init, ["storage"], undefined);
+    const retrievalLayers = pick<unknown>(init, ["retrievalLayers"], undefined);
+    this.retrievalLayers = retrievalLayers === undefined
+      ? undefined
+      : [...new Set(assertStringArray("memmyMemory.retrievalLayers", retrievalLayers).map((layer, index) =>
+          assertOneOf(`memmyMemory.retrievalLayers[${index}]`, layer, ["L1", "L2", "L3", "Skill"] as const)
+        ))];
+    this.roleRouting = pick<Dict | undefined>(init, ["roleRouting"], undefined);
     this.summary = pick<Dict | undefined>(init, ["summary"], undefined);
     this.evolution = pick<Dict | undefined>(init, ["evolution"], undefined);
     this.embedding = pick<Dict | undefined>(init, ["embedding"], undefined);
-    this.algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    const algorithm = pick<Dict | undefined>(init, ["algorithm"], undefined);
+    if (algorithm) {
+      const supportedAlgorithm = { ...algorithm };
+      delete supportedAlgorithm.lightweightMemory;
+      this.algorithm = supportedAlgorithm;
+    }
+    this.telemetry = pick<Dict | undefined>(init, ["telemetry"], undefined);
+    this.hub = pick<Dict | undefined>(init, ["hub"], undefined);
+    this.agentAccess = pick<Dict | undefined>(init, ["agentAccess"], undefined);
   }
 
   override toObject(): Dict {
     return omitUndefined({
+      ...this.additional,
       enabled: this.enabled,
-      userId: this.profiles ? undefined : this.userId,
-      activeProfile: this.activeProfile,
-      profiles: this.profiles,
+      userId: this.userId,
       version: this.version,
       storage: this.storage,
+      roleRouting: this.roleRouting,
+      retrievalLayers: this.retrievalLayers,
       summary: this.summary,
       evolution: this.evolution,
       embedding: this.embedding,
       algorithm: this.algorithm,
+      telemetry: this.telemetry,
+      hub: this.hub,
+      agentAccess: this.agentAccess,
     });
   }
 }
@@ -1119,11 +1172,23 @@ export class Config extends Base {
   fileMemory: FileMemoryConfig;
   memmyMemory: MemmyMemoryConfig;
   modelPresets: Dict<ModelPresetConfig>;
+  modelAssignments: ModelAssignmentsConfig;
   sessionDag: SessionDagConfig;
   contextCompaction: ContextCompactionConfig;
 
   constructor(init: Dict = {}) {
     super();
+    for (const legacy of ["agent", "model", "uuid", "identity"]) {
+      if (Object.prototype.hasOwnProperty.call(init, legacy)) {
+        throw new ValueError(`config current contract does not accept legacy root '${legacy}'`);
+      }
+    }
+    const rawTools = isRecord(init.tools) ? init.tools : {};
+    for (const legacy of ["my", "myEnabled", "mySet"]) {
+      if (Object.prototype.hasOwnProperty.call(rawTools, legacy)) {
+        throw new ValueError(`config current contract does not accept legacy tools.${legacy}`);
+      }
+    }
     const rawApp = pick<unknown>(init, ["app"], {});
     this.app =
       rawApp && typeof rawApp === "object" && !Array.isArray(rawApp) ? { ...(rawApp as Dict) } : {};
@@ -1169,9 +1234,7 @@ export class Config extends Base {
       init.memmyMemory instanceof MemmyMemoryConfig
         ? init.memmyMemory
         : new MemmyMemoryConfig(init.memmyMemory ?? {}, { userId: appUserId });
-    if (!this.memmyMemory.profiles) {
-      this.memmyMemory.userId = appUserId ?? this.memmyMemory.userId ?? "local-user";
-    }
+    this.memmyMemory.userId = appUserId ?? this.memmyMemory.userId ?? "local-user";
     this.sessionDag =
       init.sessionDag instanceof SessionDagConfig
         ? init.sessionDag
@@ -1187,6 +1250,9 @@ export class Config extends Base {
         return [name, cfg instanceof ModelPresetConfig ? cfg : new ModelPresetConfig(cfg as Dict)];
       }),
     );
+    this.modelAssignments = init.modelAssignments instanceof ModelAssignmentsConfig
+      ? init.modelAssignments
+      : new ModelAssignmentsConfig(init.modelAssignments ?? {});
     const active = this.agents.defaults.modelPreset;
     if (active && active !== "default" && !(active in this.modelPresets)) {
       throw new ValueError(`modelPreset '${active}' not found in modelPresets`);
@@ -1196,11 +1262,7 @@ export class Config extends Base {
         throw new ValueError(`fallbackModels entry '${fallback}' not found in modelPresets`);
       }
     }
-    for (const [name, provider] of Object.entries(this.providers)) {
-      if (name !== "openai" && provider instanceof ProviderConfig && provider.apiType !== "auto") {
-        throw new ValueError(`providers.${name}.apiType is only supported for providers.openai`);
-      }
-    }
+    this.validateModelCatalog();
     if (this.contextCompaction.summaryMode === "dag" && !this.sessionDag.enabled) {
       throw new ValueError("contextCompaction.summaryMode=dag requires sessionDag.enabled=true");
     }
@@ -1211,8 +1273,11 @@ export class Config extends Base {
     if (!target || target === "default") {
       const d = this.agents.defaults;
       return new ModelPresetConfig({
+        endpoint: "default",
         model: d.model,
         provider: d.provider,
+        source: "byok",
+        capabilities: ["agent"],
         maxTokens: d.maxTokens,
         contextWindowTokens: d.contextWindowTokens,
         temperature: d.temperature,
@@ -1222,6 +1287,64 @@ export class Config extends Base {
     const preset = this.modelPresets[target];
     if (!preset) throw new KeyError(`modelPreset '${target}' not found`);
     return preset;
+  }
+
+  private validateModelCatalog(): void {
+    const textProtocols = new Set<ModelEndpointProtocol>([
+      "openai-chat-completions", "openai-responses", "anthropic-messages", "gemini-generate-content", "memmy-account",
+    ]);
+    const protocolsByCapability: Readonly<Record<ModelCapability, ReadonlySet<ModelEndpointProtocol>>> = {
+      agent: textProtocols,
+      memory_summary: textProtocols,
+      memory_evolution: textProtocols,
+      embedding: new Set(["openai-embeddings", "memmy-account"]),
+      asr: new Set(["dashscope-input-audio-chat", "memmy-account"]),
+      image_generation: new Set(["openai-images", "dashscope-multimodal-generation", "memmy-account"]),
+    };
+    for (const [presetId, preset] of Object.entries(this.modelPresets)) {
+      const provider = (this.providers as Dict<ProviderConfig>)[preset.provider];
+      const endpoint = provider?.endpoints[preset.endpoint];
+      if (!endpoint) throw new ValueError(`modelPresets.${presetId} references missing provider endpoint`);
+      for (const capability of preset.capabilities) {
+        if (!protocolsByCapability[capability].has(endpoint.protocol)) {
+          throw new ValueError(`modelPresets.${presetId} capability ${capability} is incompatible with ${endpoint.protocol}`);
+        }
+      }
+      if (preset.source === "account" && preset.ownerAccountId !== provider.ownerAccountId) {
+        throw new ValueError(`modelPresets.${presetId} ownerAccountId does not match its Provider`);
+      }
+    }
+    this.validateAssignment("byok", this.modelAssignments.byok);
+    this.validateAssignment("account", this.modelAssignments.account);
+  }
+
+  private validateAssignment(
+    namespace: "byok" | "account",
+    assignment: ModelAssignmentConfig,
+  ): void {
+    const validate = (presetId: string | null, capability: ModelCapability): void => {
+      if (!presetId) return;
+      const preset = this.modelPresets[presetId];
+      if (!preset) {
+        if (namespace === "account" && assignment.ownerAccountId) return;
+        throw new ValueError(`modelAssignments.${namespace} references missing preset '${presetId}'`);
+      }
+      if (namespace === "byok" && preset.source !== "byok") {
+        throw new ValueError("modelAssignments.byok may only reference BYOK presets");
+      }
+      if (preset.source === "account" && assignment.ownerAccountId !== preset.ownerAccountId) {
+        throw new ValueError("modelAssignments.account owner does not match platform preset");
+      }
+      if (!preset.capabilities.includes(capability)) {
+        throw new ValueError(`modelAssignments.${namespace} preset '${presetId}' lacks capability ${capability}`);
+      }
+    };
+    for (const presetId of assignment.agent.candidates) validate(presetId, "agent");
+    validate(assignment.memorySummary, "memory_summary");
+    validate(assignment.memoryEvolution, "memory_evolution");
+    validate(assignment.embedding, "embedding");
+    validate(assignment.asr, "asr");
+    validate(assignment.imageGeneration, "image_generation");
   }
 
   resolveDefaultPreset(): ModelPresetConfig {
@@ -1325,9 +1448,7 @@ export class Config extends Base {
     const appUserId = optionalString(this.app.userId);
     delete this.app.cloud_uuid;
     delete this.app.user_id;
-    if (!this.memmyMemory.profiles) {
-      this.memmyMemory.userId = appUserId ?? this.memmyMemory.userId ?? "local-user";
-    }
+    this.memmyMemory.userId = appUserId ?? this.memmyMemory.userId ?? "local-user";
     const data: Dict = {
       agents: this.agents,
       providers: this.providers,
@@ -1340,6 +1461,7 @@ export class Config extends Base {
       sessionDag: this.sessionDag,
       contextCompaction: this.contextCompaction,
       modelPresets: this.modelPresets,
+      modelAssignments: this.modelAssignments,
     };
     if (Object.keys(this.app).length > 0) data.app = this.app;
     return plain(data);

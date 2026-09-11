@@ -16,6 +16,8 @@ describe("HttpMemoryClient", () => {
     expect(Object.values(MEMORY_LAYER_PATHS)).toEqual([
       "/api/v1/health",
       "/api/v1/admin/reload-config",
+      "/api/v1/admin/export",
+      "/api/v1/admin/data",
       "/api/v1/sessions/open",
       "/api/v1/sessions/:sessionId/close",
       "/api/v1/turns/start",
@@ -24,6 +26,7 @@ describe("HttpMemoryClient", () => {
       "/api/v1/memory/add",
       "/api/v1/memory/:id",
       "/api/v1/memory/:id",
+      "/api/v1/memory/recalls/:queryId",
       "/api/v1/worker/run",
       "/api/v1/worker/import-summaries/enqueue",
       "/api/v1/memory/processing/status",
@@ -49,6 +52,7 @@ describe("HttpMemoryClient", () => {
       path: string;
       authorization: string | undefined;
       timeZone: string | undefined;
+      userId: string | undefined;
       body: unknown;
     }> = [];
     const baseUrl = await startServer(async (request, response) => {
@@ -58,6 +62,7 @@ describe("HttpMemoryClient", () => {
         path: new URL(request.url ?? "/", "http://localhost").pathname,
         authorization: request.headers.authorization,
         timeZone: request.headers["x-memmy-time-zone"] as string | undefined,
+        userId: request.headers["x-memmy-user-id"] as string | undefined,
         body
       });
       sendJson(response, fixtureFor(request.method ?? "", new URL(request.url ?? "/", "http://localhost").pathname, body));
@@ -71,9 +76,13 @@ describe("HttpMemoryClient", () => {
 
     await expect(client.health()).resolves.toMatchObject({ ok: true });
     await expect(client.reloadConfig({ reason: "profile_switched" })).resolves.toMatchObject({
-      activeProfile: "byok",
-      changed: true
+      changed: true,
+      models: {
+        summary: { routing: "fixed" }
+      }
     });
+    await expect(client.exportBundle!()).resolves.toMatchObject({ manifest: { service: "memmy-memory-service" } });
+    await expect(client.clearAllData!()).resolves.toMatchObject({ ok: true, cleared: {} });
     await expect(client.openSession(openSessionInput())).resolves.toMatchObject({ status: "open" });
     await expect(client.closeSession(closeSessionInput())).resolves.toMatchObject({ status: "closed" });
     await expect(client.startTurn(startTurnInput())).resolves.toMatchObject({ status: [] });
@@ -83,18 +92,29 @@ describe("HttpMemoryClient", () => {
     await expect(client.addMemory(addMemoryInput())).resolves.toMatchObject({ id: "memory-1" });
     await expect(client.getMemory({ memoryId: "memory-1" })).resolves.toMatchObject({ item: { id: "memory-1" } });
     await expect(client.deleteMemory({ memoryId: "memory-1", source: "codex" })).resolves.toMatchObject({ status: "deleted" });
+    await expect(client.recallEvidence("turn-1")).resolves.toMatchObject({
+      queryId: "turn-1",
+      hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      }
+    });
     await expect(
       client.memoryApiLogs({ tools: ["memory_add", "memory_search"], limit: 20, offset: 0 })
     ).resolves.toMatchObject({ logs: [] });
     await expect(client.panelOverview({ timeZone: "Asia/Shanghai" })).resolves.toMatchObject({ counts: { memories: 0 } });
     await expect(client.panelAnalysis()).resolves.toMatchObject({ metrics: { avgRecallScore: 0 } });
-    await expect(client.panelItems(panelItemsInput())).resolves.toMatchObject({ items: [] });
+    await expect(client.panelItems(panelItemsInput(), { userId: "account-user-1" })).resolves.toMatchObject({ items: [] });
     await expect(client.panelTasks({ page: 1 })).resolves.toMatchObject({ tasks: [] });
     await expect(client.deletePanelTask("episode-1")).resolves.toMatchObject({ ok: true, id: "episode-1" });
 
     expect(requests.map((request) => `${request.method} ${request.path}`)).toEqual([
       "GET /api/v1/health",
       "POST /api/v1/admin/reload-config",
+      "GET /api/v1/admin/export",
+      "DELETE /api/v1/admin/data",
       "POST /api/v1/sessions/open",
       "POST /api/v1/sessions/session-1/close",
       "POST /api/v1/turns/start",
@@ -104,6 +124,7 @@ describe("HttpMemoryClient", () => {
       "POST /api/v1/memory/add",
       "GET /api/v1/memory/memory-1",
       "DELETE /api/v1/memory/memory-1",
+      "GET /api/v1/memory/recalls/turn-1",
       "GET /api/v1/memory/logs",
       "GET /api/v1/panel/overview",
       "GET /api/v1/panel/analysis",
@@ -114,6 +135,8 @@ describe("HttpMemoryClient", () => {
     expect(requests.every((request) => request.authorization === "Bearer memory-token")).toBe(true);
     expect(requests.find((request) => request.path === "/api/v1/panel/overview")?.timeZone)
       .toBe("+08:00");
+    expect(requests.find((request) => request.path === "/api/v1/panel/items")?.userId)
+      .toBe("account-user-1");
     expect(
       requests
         .filter((request) => requestBodySource(request.body) !== undefined)
@@ -205,6 +228,19 @@ describe("HttpMemoryClient", () => {
     });
   });
 
+  it("does not replay a worker request after a server failure", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.runWorker({ limit: 20 })).rejects.toThrow("memory layer 5xx");
+    expect(calls).toBe(1);
+  });
+
   it("retries 5xx responses and succeeds before max retries is exhausted", async () => {
     let calls = 0;
     const baseUrl = await startServer(async (_request, response) => {
@@ -221,6 +257,20 @@ describe("HttpMemoryClient", () => {
 
     await expect(client.health()).resolves.toMatchObject({ ok: true });
     expect(calls).toBe(3);
+  });
+
+  it("does not repeat expensive panel reads after a 5xx response", async () => {
+    let calls = 0;
+    const baseUrl = await startServer(async (_request, response) => {
+      calls += 1;
+      response.writeHead(500, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    const client = createHttpMemoryClient({ baseUrl, token: "", timeoutMs: 500, maxRetries: 3 });
+
+    await expect(client.panelOverview()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
+    await expect(client.panelAnalysis()).rejects.toMatchObject({ code: "memory_layer_unavailable" });
+    expect(calls).toBe(2);
   });
 
   it("throws memory_layer_unavailable when 5xx retries are exhausted", async () => {
@@ -378,6 +428,12 @@ function requestBodySource(body: unknown): string | undefined {
 function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "GET" && path === "/api/v1/health") return healthOutput();
   if (method === "POST" && path === "/api/v1/admin/reload-config") return reloadConfigOutput();
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    return { manifest: { service: "memmy-memory-service" }, tables: {} };
+  }
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    return { ok: true, cleared: {}, clearedAt: now(), serverTime: now() };
+  }
   if (method === "POST" && path === "/api/v1/sessions/open") return openSessionOutput();
   if (method === "POST" && path === "/api/v1/sessions/session-1/close") return closeSessionOutput();
   if (method === "POST" && path === "/api/v1/turns/start") return startTurnOutput(body);
@@ -386,6 +442,21 @@ function fixtureFor(method: string, path: string, body: unknown): unknown {
   if (method === "POST" && path === "/api/v1/memory/add") return addMemoryOutput(body);
   if (method === "GET" && path === "/api/v1/memory/memory-1") return getMemoryOutput();
   if (method === "DELETE" && path === "/api/v1/memory/memory-1") return deleteMemoryOutput();
+  if (method === "GET" && path === "/api/v1/memory/recalls/turn-1") {
+    return {
+      recallEventId: "recall-1",
+      queryId: "turn-1",
+      query: "remember",
+      hits: [],
+      diagnostics: {
+        candidateMemoryIds: ["memory-1"],
+        injectedMemoryIds: ["memory-1"],
+        capture: { status: "completed" }
+      },
+      createdAt: now(),
+      serverTime: now()
+    };
+  }
   if (method === "GET" && path === "/api/v1/memory/logs") return memoryApiLogsOutput();
   if (method === "GET" && path === "/api/v1/panel/overview") return panelOverviewOutput();
   if (method === "GET" && path === "/api/v1/panel/analysis") return panelAnalysisOutput();
@@ -406,7 +477,6 @@ function healthOutput() {
     mode: "local",
     storage: { backend: "sqlite", schemaVersion: "3", ready: true },
     capabilities: { routes: ["/api/v1/health"], tools: [], memoryLayers: ["L1", "L2", "L3", "Skill"], supportsCli: true },
-    activeProfile: "byok",
     models: modelStatuses(),
     serverTime: now()
   };
@@ -414,7 +484,6 @@ function healthOutput() {
 
 function reloadConfigOutput() {
   return {
-    activeProfile: "byok",
     changed: true,
     requiresRestart: false,
     models: modelStatuses(),
@@ -424,9 +493,9 @@ function reloadConfigOutput() {
 
 function modelStatuses() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" }
   };
 }
 
@@ -537,7 +606,7 @@ function memoryApiLogsOutput() {
 }
 
 function panelOverviewOutput() {
-  return { counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 }, dailyActivity: panelDays(), sourceDistribution: [] };
+  return { counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 }, dailyActivity: panelDays(), sourceDistribution: [] };
 }
 
 function panelAnalysisOutput() {

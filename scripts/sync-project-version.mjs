@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const checkOnly = process.argv.includes("--check");
+const checkOnly = process.argv.includes("--check") || process.env.MEMMY_VERSION_SYNC_CHECK_ONLY === "1";
 const rootManifestPath = join(root, "package.json");
 const rootManifest = await readJson(rootManifestPath);
 const version = rootManifest.version;
@@ -13,8 +13,6 @@ if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.tes
 }
 
 const derivedManifests = [
-  "Memory/package.json",
-  "Memory/src/cli/npm/package.json",
   "App/memmy-agent/package.json",
   "App/shell/desktop/package.json",
 ];
@@ -26,10 +24,14 @@ for (const relativePath of derivedManifests) {
   });
 }
 
+await updateText(
+  "App/backend/src/project-version.ts",
+  `/** Generated from the root package.json by scripts/sync-project-version.mjs. */\nexport const MEMMY_VERSION = ${JSON.stringify(version)};\n`
+);
+
 await updateJson("package-lock.json", (json) => {
   json.version = version;
   json.packages[""].version = version;
-  json.packages.Memory.version = version;
   json.packages["App/shell/desktop"].version = version;
 });
 
@@ -50,6 +52,17 @@ async function updateJson(relativePath, update) {
   const json = JSON.parse(currentText);
   update(json);
   const nextText = `${JSON.stringify(json, null, 2)}\n`;
+  if (nextText === currentText) return;
+  if (checkOnly) {
+    staleFiles.push(relativePath);
+    return;
+  }
+  await writeFile(absolutePath, nextText, "utf8");
+}
+
+async function updateText(relativePath, nextText) {
+  const absolutePath = join(root, relativePath);
+  const currentText = await readFile(absolutePath, "utf8");
   if (nextText === currentText) return;
   if (checkOnly) {
     staleFiles.push(relativePath);

@@ -5,6 +5,7 @@ import {
   AccountProfileViewSchema,
   AccountSessionViewSchema,
   SendCodeResponseSchema,
+  type AccountChannel,
   type AccountInvitationView,
   type AccountLoginResultView,
   type AccountProfileView,
@@ -19,6 +20,7 @@ import type {
   AccountSessionProfileInput,
   AccountSessionRepository
 } from "../infrastructure/app-state-store/repositories/account-session-repo.js";
+import type { BootstrapRepository } from "../infrastructure/app-state-store/repositories/bootstrap-repo.js";
 import type { MemmyConfigWriter, RuntimeProjectionResult } from "../infrastructure/memmy-config/index.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
 import type { OkResponse } from "@memmy/local-api-contracts";
@@ -40,12 +42,16 @@ export interface CreateAccountServiceOptions {
   cloudClient: CloudClient;
   /** Account session repository. */
   accountSessionRepository: AccountSessionRepository;
+  /** Bootstrap repository used to preserve machine-level onboarding across logout. */
+  bootstrapRepository: Pick<BootstrapRepository, "preserveCompletedOnboardingForLocalByok">;
   /** Memmy config writer. */
   memmyConfigWriter?: MemmyConfigWriter;
   /** Memory client. */
   memoryClient?: Pick<MemoryClient, "reloadConfig">;
   /** Now. */
   now?: () => Date;
+  /** Verification channel supported by the current desktop package. */
+  accountChannel?: AccountChannel;
 }
 
 /** Creates create account service. */
@@ -54,6 +60,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
   return {
     async sendCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
       const key = toCodeKey(input);
       const sentAt = options.accountSessionRepository.getLastCodeSentAt(key);
       const remaining = getRemainingResendSeconds(sentAt, now());
@@ -79,6 +86,7 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
     },
 
     async verifyCode(input) {
+      assertExpectedAccountChannel(input.channel, options.accountChannel);
       const loginResult = await options.cloudClient.login({
         ...(input.email ? { email: input.email } : {}),
         ...(input.phoneNumber ? { phoneNumber: input.phoneNumber } : {}),
@@ -100,7 +108,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
           profile: toSessionProfileInput(loginResult.profile),
           uuid: loginResult.accountUuid,
           cloudUuid: loginResult.uuid,
-          isNewUser: loginResult.isNewUser
+          isNewUser: loginResult.isNewUser,
+          authChannel: input.channel
         })
       );
 
@@ -168,6 +177,8 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
 
     async logout() {
       const uuid = options.accountSessionRepository.getCloudUuid();
+      const session = options.accountSessionRepository.get();
+      options.bootstrapRepository.preserveCompletedOnboardingForLocalByok();
       if (uuid) {
         try {
           await options.cloudClient.logout({ uuid });
@@ -176,28 +187,49 @@ export function createAccountService(options: CreateAccountServiceOptions): Acco
         }
       }
 
-      const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.();
-      options.accountSessionRepository.clear();
-      await reloadMemoryConfigIfNeeded(projection, options);
+      await clearLocalAccountState(
+        options,
+        session.authenticated ? session.profile.userId : undefined,
+        true,
+        uuid ?? undefined
+      );
       return { ok: true };
     },
 
     async getSession() {
       const session = AccountSessionViewSchema.parse(options.accountSessionRepository.get());
+      const cloudUuid = session.authenticated ? options.accountSessionRepository.getCloudUuid() : null;
       return refreshCloudGuideState({
         cloudClient: options.cloudClient,
         accountSessionRepository: options.accountSessionRepository,
-        session
+        session,
+        cloudUuid: cloudUuid ?? undefined,
+        onAuthenticationInvalid: () => clearLocalAccountState(
+          options,
+          session.authenticated ? session.profile.userId : undefined,
+          false,
+          cloudUuid ?? undefined
+        )
       });
     }
   };
+}
+
+function assertExpectedAccountChannel(
+  actualChannel: AccountChannel,
+  expectedChannel: AccountChannel | undefined
+): void {
+  if (!expectedChannel || actualChannel === expectedChannel) return;
+  throw Object.assign(new Error(`Account channel ${actualChannel} is not supported by this desktop package`), {
+    code: "invalid_argument" as const
+  });
 }
 
 async function reloadMemoryConfigIfNeeded(
   projection: RuntimeProjectionResult | undefined,
   options: CreateAccountServiceOptions
 ): Promise<void> {
-  if (!projection?.changed || !projection.activeProfileAffected || !options.memoryClient) {
+  if (!projection?.changed || !projection.memoryConfigAffected || !options.memoryClient) {
     return;
   }
 
@@ -208,12 +240,32 @@ async function reloadMemoryConfigIfNeeded(
   }
 }
 
+async function clearLocalAccountState(
+  options: CreateAccountServiceOptions,
+  ownerAccountId?: string,
+  syncSelectedByokToLocal = false,
+  expectedCloudUuid?: string
+): Promise<void> {
+  const projection = await options.memmyConfigWriter?.clearAccountModelProjection?.({
+    ownerAccountId,
+    syncSelectedByokToLocal,
+    expectedCloudUuid
+  });
+  if (expectedCloudUuid) {
+    options.accountSessionRepository.clearIfCloudUuid(expectedCloudUuid);
+  } else {
+    options.accountSessionRepository.clear();
+  }
+  await reloadMemoryConfigIfNeeded(projection, options);
+}
+
 /** Handles refresh cloud guide state. */
 async function refreshCloudGuideState(input: {
   cloudClient: CloudClient;
   accountSessionRepository: AccountSessionRepository;
   session: AccountSessionView;
   cloudUuid?: string;
+  onAuthenticationInvalid?: () => Promise<void>;
 }): Promise<AccountSessionView> {
   if (!input.session.authenticated) {
     return input.session;
@@ -224,13 +276,25 @@ async function refreshCloudGuideState(input: {
     return input.session;
   }
 
-  const cloudProfile = await input.cloudClient.getAccountInfo({ uuid: cloudUuid });
+  let cloudProfile: CloudAccountProfile;
+  try {
+    cloudProfile = await input.cloudClient.getAccountInfo({ uuid: cloudUuid });
+  } catch (error) {
+    if (isUnauthorized(error) && input.onAuthenticationInvalid) {
+      await input.onAuthenticationInvalid();
+    }
+    throw error;
+  }
   return AccountSessionViewSchema.parse(
     input.accountSessionRepository.upsert({
       profile: toSessionProfileInput(cloudProfile),
       isNewUser: input.session.isNewUser
     })
   );
+}
+
+function isUnauthorized(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "unauthorized");
 }
 
 /** Handles to code key. */

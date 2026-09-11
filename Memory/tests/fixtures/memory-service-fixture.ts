@@ -28,6 +28,7 @@ export function createMemoryServiceFixture(): {
   };
 } {
   const roots: string[] = [];
+  const databases: MemoryDb[] = [];
 
   function createTestRoot(prefix = "mindock-memory-"): string {
     const root = mkdtempSync(join(tmpdir(), prefix));
@@ -40,6 +41,7 @@ export function createMemoryServiceFixture(): {
   ): MemoryService {
     return new MemoryService({
       ...options,
+      skillLlm: options.skillLlm ?? options.llm,
       embedder: options.embedder ?? createCapturingEmbedder([])
     });
   }
@@ -59,6 +61,7 @@ export function createMemoryServiceFixture(): {
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
     });
+    databases.push(db);
     return {
       root,
       db,
@@ -74,8 +77,13 @@ export function createMemoryServiceFixture(): {
   }
 
   function cleanup(): void {
+    for (const database of databases.splice(0)) {
+      if (database.db.open) {
+        database.close();
+      }
+    }
     for (const root of roots.splice(0)) {
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   }
 
@@ -140,10 +148,14 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
   const apiKey = "cloud-uuid";
   return {
     ...DEFAULT_MEMMY_CONFIG,
-    activeProfile: "account",
+    roleRouting: {
+      summary: "follow",
+      evolution: "follow"
+    },
     summary: {
       ...DEFAULT_MEMMY_CONFIG.summary,
       provider: "openai_compatible",
+      sourceProvider: "memmy_account",
       endpoint,
       model: "memory_summary",
       apiKey
@@ -151,12 +163,15 @@ export function accountRuntimeConfig(): typeof DEFAULT_MEMMY_CONFIG {
     evolution: {
       ...DEFAULT_MEMMY_CONFIG.evolution,
       provider: "openai_compatible",
+      sourceProvider: "memmy_account",
       endpoint,
       model: "memory_evolution",
       apiKey
     },
     embedding: {
       ...DEFAULT_MEMMY_CONFIG.embedding,
+      mode: "cloud",
+      sourceProvider: "memmy_account",
       provider: "openai_compatible",
       endpoint,
       model: "embedding",
@@ -298,8 +313,16 @@ export function createBatchReflectionLlm(calls: Array<{
         } as unknown as T;
       }
       if (options.operation === "capture.summarize") {
+        const decisionCall = messages[0]?.content.includes("Judge L1 and User Memory") === true;
+        if (!decisionCall) return { summary: captureSummary } as unknown as T;
+        const payload = messages.find((message) => message.role === "user")?.content ?? "";
+        const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
         return {
-          summary: captureSummary
+          l1: {
+            summary: captureSummary,
+            evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+          },
+          user: null
         } as unknown as T;
       }
       return {

@@ -24,6 +24,24 @@ describe("auth flow pages", () => {
     ["welcome-page.tsx"],
     ["token-detail-page.tsx"],
     ["login-page.tsx"]
+  ])("%s 登录已成功但本地配置刷新失败时只重试登录后续流程", (fileName) => {
+    const source = readSource(fileName);
+    const submitIndex = source.indexOf("async function submitLogin()");
+    const pendingRetryIndex = source.indexOf("if (pendingAccountOnboarding)", submitIndex);
+    const cloudLoginIndex = source.indexOf("await verificationCodeAuth.login(", submitIndex);
+    const rememberIndex = source.indexOf("setPendingAccountOnboarding(onboardingPatch)", cloudLoginIndex);
+    const clearIndex = source.indexOf("setPendingAccountOnboarding(null)", rememberIndex);
+
+    expect(pendingRetryIndex).toBeGreaterThan(submitIndex);
+    expect(pendingRetryIndex).toBeLessThan(cloudLoginIndex);
+    expect(rememberIndex).toBeGreaterThan(cloudLoginIndex);
+    expect(clearIndex).toBeGreaterThan(rememberIndex);
+  });
+
+  it.each([
+    ["welcome-page.tsx"],
+    ["token-detail-page.tsx"],
+    ["login-page.tsx"]
   ])("%s 对无效账号或验证码给出可见错误", (fileName) => {
     const source = readSource(fileName);
     const hookSource = readFileSync(resolve(__dirname, "../../components/use-verification-code-auth.ts"), "utf8");
@@ -31,7 +49,7 @@ describe("auth flow pages", () => {
     expect(source).toContain("feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}");
     expect(source).toContain("sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}");
     expect(source).toContain("sendCodeLabel={verificationCodeAuth.sendCodeLabel}");
-    expect(source).toContain("disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}");
+    expect(source).toContain("disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}");
     expect(hookSource).toContain("validateAuthIdentifier(channel, rawIdentifier)");
     expect(hookSource).toContain("resolveIdentifierValidationMessage(channel, validation.reason, t)");
     expect(hookSource).toContain('"login.error.invalidPhone"');
@@ -111,19 +129,21 @@ describe("auth flow pages", () => {
     const source = readSource(fileName);
 
     expect(source).toContain("buildAccountOnboardingStartPatch");
-    expect(source).toContain("const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();");
+    expect(source).toContain("const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);");
+    expect(source).toContain("!shouldShowFirstEncounterReport(state.bootstrap.onboarding)");
     expect(source).not.toContain("const shouldContinueOnboarding = !onboarding?.completed;");
   });
 
   it("欢迎页 BYOK 入口经 resolveByokEntry 守卫，已完成引导时不重置 completed", () => {
     const source = readSource("welcome-page.tsx");
     const handlerIndex = source.indexOf("async function useOwnApiKey()");
-    const guardIndex = source.indexOf("const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });", handlerIndex);
+    const guardIndex = source.indexOf("const byokEntry = resolveByokEntry({", handlerIndex);
     const persistIndex = source.indexOf("onboarding: byokEntry.onboardingPatch", handlerIndex);
     const navigateIndex = source.indexOf("dispatch(appActions.navigate(byokEntry.nextRoute));", handlerIndex);
 
     expect(handlerIndex).toBeGreaterThanOrEqual(0);
     expect(guardIndex).toBeGreaterThan(handlerIndex);
+    expect(source.slice(guardIndex, persistIndex)).toContain("modelConfig: state.modelConfig");
     expect(persistIndex).toBeGreaterThan(guardIndex);
     expect(navigateIndex).toBeGreaterThan(persistIndex);
     expect(source).not.toContain("const onboardingPatch = buildByokOnboardingSetupPatch();");

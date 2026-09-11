@@ -7,11 +7,12 @@ import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
-import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute } from "../app/routes.js";
+import { buildAccountOnboardingStartPatch, resolveByokEntry, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton } from "../components/language-toggle-button.js";
 import { Memmy } from "../components/mascot/memmy.js";
 import { useVerificationCodeAuth } from "../components/use-verification-code-auth.js";
+import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { getLegalLinkUrl } from "../legal/legal-links.js";
 import { openExternalUrl } from "../utils/open-url.js";
@@ -32,6 +33,7 @@ export function WelcomePage() {
   const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [pendingAccountOnboarding, setPendingAccountOnboarding] = useState<Partial<OnboardingStateDto> | null>(null);
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const canContinue = Boolean(identifier.trim() && code.trim());
@@ -45,6 +47,7 @@ export function WelcomePage() {
     setCode("");
     setInviteCode("");
     setModePersistenceFeedback(null);
+    setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
   }, [channel, verificationCodeAuth.resetInteractionState]);
 
@@ -59,10 +62,15 @@ export function WelcomePage() {
 
   /** Handles submit login. */
   async function submitLogin() {
-    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
+    if (pendingAccountOnboarding) {
+      await continueAfterAccountEntry(pendingAccountOnboarding);
+      return;
+    }
+    if (!canContinue) return;
 
     const loginResult = await verificationCodeAuth.login(
       channel,
@@ -74,6 +82,8 @@ export function WelcomePage() {
       return;
     }
     const session = loginResult.session;
+    // Set before the signup event so it is attributed to the cloud account.
+    setAnalyticsUserId(session.profile.userId);
     const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
     if (invitationToastKind) {
       dispatch(appActions.showInvitationToast(invitationToastKind));
@@ -86,33 +96,32 @@ export function WelcomePage() {
     }));
 
     dispatch(appActions.accountUpdated({
+      userId: session.profile.userId,
       email: session.profile.email ?? "",
       phoneNumber: session.profile.phoneNumber,
       nickname: session.profile.nickname,
       registeredAt: session.profile.registeredAt
     }));
 
-    if (session.profile.hasFinishedGuide) {
-      await continueAfterAccountEntry({
+    const onboardingPatch: Partial<OnboardingStateDto> =
+      session.profile.hasFinishedGuide && state.bootstrap && !shouldShowFirstEncounterReport(state.bootstrap.onboarding)
+      ? {
         completed: true,
         currentStep: "completed",
         completedAt: new Date().toISOString(),
         hasAcceptedTerms: true
-      });
-      return;
-    }
-
-    // Welcome page module.
-    // Welcome page module.
-    await continueAfterAccountEntry();
+      }
+      : buildAccountOnboardingStartPatch(state.bootstrap?.onboarding);
+    setPendingAccountOnboarding(onboardingPatch);
+    await continueAfterAccountEntry(onboardingPatch);
   }
 
   /** Handles continue after account entry. */
   async function continueAfterAccountEntry(forcedOnboarding?: Partial<OnboardingStateDto>) {
     const onboarding = state.bootstrap?.onboarding;
-    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();
+    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);
     const nextOnboarding = {
-      ...buildAccountOnboardingStartPatch(),
+      ...buildAccountOnboardingStartPatch(onboarding),
       ...onboarding,
       ...onboardingPatch
     };
@@ -126,6 +135,7 @@ export function WelcomePage() {
         userMode: "account",
         onboarding: onboardingPatch
       });
+      setPendingAccountOnboarding(null);
       dispatch(appActions.navigate(nextRoute));
     } catch (error) {
       console.error("persist account mode failed", error);
@@ -142,7 +152,10 @@ export function WelcomePage() {
     }
 
     // Definition for byok entry.
-    const byokEntry = resolveByokEntry({ onboarding: state.bootstrap?.onboarding });
+    const byokEntry = resolveByokEntry({
+      onboarding: state.bootstrap?.onboarding,
+      modelConfig: state.modelConfig
+    });
 
     track({ name: "byok_started", params: { user_mode: "byok" }, consentTier: "basic" });
     setModePersistenceFeedback(null);
@@ -207,7 +220,7 @@ export function WelcomePage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
                 sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
                 sendCodeLabel={verificationCodeAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}
