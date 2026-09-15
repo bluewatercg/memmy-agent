@@ -370,6 +370,7 @@ describe("memoryPanelHtml", () => {
       profileId: "default"
     });
   });
+interface DecisionDetailFixture {
   session: { id?: string; topicId?: string; state: string; version: number };
   snapshots?: Array<{ id: string; payload: { roster: Array<{ id: string }> } }>;
   positions?: Array<{ agentId: string; snapshotId?: string; missingInformation?: string[] }>;
@@ -833,4 +834,5 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }
+});
 });
