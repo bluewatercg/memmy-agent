@@ -744,13 +744,24 @@ describe("memoryPanelHtml", () => {
     await flushPromises();
 
     const rows = harness.element("memoryRows").querySelectorAll("tr");
-    await rows[0]!.onclick!();
-    await rows[1]!.onclick!();
+    rows[0]!.onclick!();
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.resolveDetail("memory-1", { item: listItem("memory-1", "First memory") });
+    await flushPromises();
+    rows[1]!.onclick!();
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.resolveDetail("memory-2", { item: listItem("memory-2", "Second memory") });
+    await flushPromises();
     expect(harness.element("detailTitle").textContent).toContain("Second memory");
-    await rows[0]!.onclick!();
+    rows[0]!.onclick!();
+    await Promise.resolve();
+    await Promise.resolve();
+    harness.resolveDetail("memory-1", { item: listItem("memory-1", "First memory") });
+    await flushPromises();
     expect(harness.element("detailTitle").textContent).toContain("First memory");
   });
-
   it("uses a fragment token for API requests without leaving it in the address bar", async () => {
     const harness = createViewerHarness();
     const stored = new Map<string, string>();
