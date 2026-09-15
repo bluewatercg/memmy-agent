@@ -851,6 +851,9 @@ export class MemoryService {
     models: {
       summary: ModelProbeResult;
       evolution: ModelProbeResult;
+    };
+  }> {
+    return this.modelTester.testModels();
   }
 
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
@@ -1167,9 +1170,14 @@ export class MemoryService {
     };
   }
 
-  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<TurnStartResponse> {
-    return this.sessionTurns.startTurn(request);
-  }
+  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
+    sessionId: string;
+    turnId: string;
+    context: string;
+    memorySnapshot: {
+      summary: string;
+      sourceTurnIds: string[];
+      sourceMemoryIds: string[];
       tokenEstimate?: number;
     };
     contextPacketId: string;
@@ -2856,8 +2864,10 @@ export class MemoryService {
       const memory = this.requireExistingMemory(memoryId);
       return this.enqueueJob({
         jobType: "l2_induction", userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
-        payload: { sourceMemoryId: memory.id, r
-    };
+        payload: { sourceMemoryId: memory.id, reason: "manual_candidate_promotion" }, createdAt: nowIso()
+      });
+    });
+    return { accepted: jobs.length, candidateCount: candidates.length, memoryIds, jobs: jobs.map(jobToRef), serverTime: nowIso() };
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {

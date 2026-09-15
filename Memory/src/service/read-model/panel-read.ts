@@ -1041,6 +1041,12 @@ export class PanelReadModel {
     }
   }
 
+  private memoryMatchesRequest(memory: Parameters<Repositories["memories"]["toListItem"]>[0], input: RequestEnvelope & { userId?: string }): boolean {
+    if (input.userId && memory.userId !== input.userId) return false;
+    return !input.namespace || sameProjectScope(namespaceForMemory(memory), input.namespace);
+  }
+}
+
 function panelWorldModelScope(scope: L3WorldModelScopeRecord): WorldModelScope {
   if (!scope.projectId) return { kind: "general" };
   const display = workspaceUriDisplay(scope.workspaceUri);
@@ -1072,11 +1078,6 @@ export function workspaceUriDisplay(workspaceUri?: string): {
     return { projectLabel, workspaceDisplayPath };
   } catch {
     return { projectLabel: null, workspaceDisplayPath: null };
-  }
-
-  private memoryMatchesRequest(memory: Parameters<Repositories["memories"]["toListItem"]>[0], input: RequestEnvelope & { userId?: string }): boolean {
-    if (input.userId && memory.userId !== input.userId) return false;
-    return !input.namespace || sameProjectScope(namespaceForMemory(memory), input.namespace);
   }
 }
 

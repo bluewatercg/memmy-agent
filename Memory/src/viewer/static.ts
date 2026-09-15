@@ -1728,3 +1728,4 @@ export function memoryPanelHtml(): string {
   </script>
 </body>
 </html>`;
+}

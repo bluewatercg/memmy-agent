@@ -864,14 +864,20 @@ async function routeRequest(
     const request = rawRequest.l3WorldModelProtocolVersion === 2
       ? parseV2OpenSessionRequest(strictEnvelopeWithPrincipal(rawRequest, principal))
       : envelopeWithPrincipal(rawRequest, principal) as SessionOpenRequest;
-    const publicRequest: SessionOpenRequest = request.l3WorldModelProtocolVersion === 2
-      ? request
-      : {
+    const publicRequest: SessionOpenRequest = {
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
       source: request.source ?? request.namespace?.source,
-    );
+      profileId: request.profileId ?? request.namespace?.profileId,
+      projectId: request.namespace?.projectId,
+      workspaceId: request.namespace?.workspaceId,
+      sessionId: request.sessionId,
+      workspacePath: request.workspacePath ?? request.namespace?.workspacePath,
+      meta: isRecord(request.meta) ? request.meta : undefined,
+      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
+      provenance: isRecord(request.provenance) ? request.provenance : undefined
+    };
     if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
     return publicOpenSessionResponse(result);
   }
@@ -914,7 +920,8 @@ async function routeRequest(
     return service.importDshHistory({
       root: optionalString(request.root),
       maxSessionsPerRun: optionalPositiveInteger(request.maxSessionsPerRun, "dsh.import.maxSessionsPerRun"),
-
+    });
+  }
   if (method === "POST" && path === "/api/v1/turns/start") {
     requireMemoryRead(principal);
     const request = requestWithPrincipal<TurnStartRequest>(body, "turn.start", principal);
