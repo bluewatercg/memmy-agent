@@ -520,7 +520,6 @@ export function memoryPanelHtml(): string {
           </section>
         </section>
 
-
         <section id="viewMemories" class="view" role="tabpanel">
           <div class="toolbar" aria-label="记忆筛选">
             <input id="query" aria-label="搜索记忆" placeholder="搜索标题、内容或 ID">
@@ -1622,6 +1621,7 @@ export function memoryPanelHtml(): string {
       const topic = findTopic(topicId); if (!topic) return; const evidenceIds = prompt("输入要拆出的 Memory ID，多个用逗号分隔"); if (!evidenceIds) return; const title = prompt("新主题标题"); if (!title) return; const summary = prompt("新主题摘要", "") || "";
       await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
     }
+    async function topicActionRequest(path, input, success) { try { await api(path, { method: "POST", body: JSON.stringify(input) }); showToast(success); state.topicEvidence = {}; await loadTopicInbox(); } catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } }
     function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "", button) : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
 
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }

@@ -230,7 +230,6 @@ describe("memoryPanelHtml", () => {
     expect(memoryPanelHtml()).toContain("Approve proposal");
   });
 
-
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);
@@ -501,6 +500,10 @@ function createViewerHarness() {
     "copyAuditPacks",
     "query",
     "layer",
+    "topicInboxProject",
+    "refreshTopicInbox",
+    "topicInboxSummary",
+    "topicInboxList",
     "status",
     "topicInboxProject",
     "refreshTopicInbox",

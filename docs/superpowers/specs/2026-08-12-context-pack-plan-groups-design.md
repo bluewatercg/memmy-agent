@@ -242,7 +242,6 @@ interface ProjectContextTimelineEntry {
 This borrows the useful `compiled_truth + timeline` reading pattern from [brain.md](https://github.com/mindmuxai/brain.md) without claiming protocol compatibility. brain.md stores a rewritable truth and append-only timeline in each repository page; Memmy keeps SQLite records and immutable evidence as authority, so both tracks here are read-model projections. Supersession connected components and stable fact/Plan identifiers define identity. `memoryKind + tags` similarity may suggest a candidate but cannot merge independent truths. Multiple active heads or equal-coverage contradictions remain explicit conflicts rather than being concatenated into a false consensus.
 
 Context-pack summaries include `compiledTruth` and only the newest timeline entries that fit after all higher-priority group summaries. Group detail and the read-only group audit projection expose the complete available timeline. Existing general memory Markdown import/export remains byte-structure compatible and is not repurposed for this view. Prompt injection does not include raw memories or full timelines by default.
-
 Progress is emitted only when at least one non-archived Work Item exists. It is the unweighted ratio `completed Work Items / non-archived Work Items`; when the denominator is zero, the `progress` object is omitted. The system must not invent a percentage from message counts, token use, elapsed time, file churn, priority, or estimated effort.
 
 ## 5. Agent Activity Standard
