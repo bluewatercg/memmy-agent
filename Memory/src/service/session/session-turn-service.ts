@@ -1197,12 +1197,15 @@ export class SessionTurnService {
       ? this.deps.requireEpisode(existingRawTurn.episodeId)
       : endTopicDecision
         ? this.ensureEpisode(session)
-        : await this.ensureEpisodeForTurnWithLlm(session, undefined, request.query, "turn.start");
-    const closedEpisodeIds = closedEpisodeIdsFromBoundary(
-      latestEpisodeBefore,
-      episode,
-      latestEpisodeBefore ? this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id) : undefined
-    );
+        : this.ensureEpisode(session);
+    const closedEpisodeIds: string[] = (() => {
+      if (!latestEpisodeBefore) return [];
+      const refreshed = this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id);
+      if (refreshed && refreshed.id !== episode.id && refreshed.status === "closed") {
+        return [refreshed.id];
+      }
+      return [];
+    })();
     const latestEpisode = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     const routeProposalPromise = this.proposeEpisodeRouteWithLlm(
       latestEpisode,
@@ -1233,6 +1236,7 @@ export class SessionTurnService {
       injectedContextQuery: request.query,
       turnIntentDecision: intentDecision
     });
+    const search = await searchPromise;
     const supplementalMarkdown = search.injectedContext.markdown.trim();
     const combinedMarkdown = supplementalMarkdown
       ? `${projectContext.markdown}\n\n${supplementalMarkdown}`
@@ -1251,7 +1255,7 @@ export class SessionTurnService {
             droppedById.set(hit.id, {
               id: hit.id,
               kind: hit.kind,
-              memoryLayer: hit.memoryLayer,
+              memoryLayer: hit.memoryLayer as MemoryLayer,
               reason: "token_budget",
               ...(section?.tokenEstimate === undefined ? {} : { tokenEstimate: section.tokenEstimate })
             });
@@ -1269,6 +1273,7 @@ export class SessionTurnService {
       tokenEstimate: includeSupplemental ? combinedTokenEstimate : projectTokenEstimate
     };
     const contextPacketId = `ctx_${stableHash(`${session.id}:${episode.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
+    const routeProposal = await routeProposalPromise;
     const response: TurnStartResponse = {
       contextPacketId,
       turnId,
@@ -2736,7 +2741,7 @@ export class SessionTurnService {
       )
       .filter((rawTurn) => isRecord(rawTurn.messagePayload?.turn_complete))
       .filter((rawTurn) => !endTopicDecisionFromRawTurn(rawTurn))
-      .filter((rawTurn) => this.deps.llm.isConfigured() || !rawTurnIsExcludedFromL1(rawTurn))
+      .filter((rawTurn) => this.deps.llm.isConfigured() || !rawTurnIsExcludedFromMemory(rawTurn))
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
     return rawTurns.flatMap((rawTurn) =>
       captureTurnSteps({

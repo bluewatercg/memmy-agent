@@ -34,7 +34,6 @@ import {
 import { createMemoryLogger, memoryErrorFields } from "../../logging/logger.js";
 import type { Embedder, LlmClient } from "../../model/types.js";
 import {
-  isStrictL3WorldModelV2Memory,
   kindFromMemory,
   Repositories,
   type EpisodeRecord
@@ -1801,7 +1800,8 @@ export class RetrievalService {
       : semanticLayers.length === 0
       ? 0
       : this.candidatePool.retrievalCandidateCount({
-          layers,
+          userId: context.userId,
+          layers: semanticLayers,
           tags: request.tags,
           scope
         });
@@ -1809,15 +1809,16 @@ export class RetrievalService {
     // Turn-start recall runs inside agent hook deadlines. Keep it to one LLM stage:
     // filtering actual candidates is more useful here than extracting the query first.
     const queryExtract = candidateCount > 0 && retrievalMode !== "turn_start"
-      ? await this.extractRetrievalQuery(retrievalQuery)
+      ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
     const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
     const retrievalOutput = await this.retrieveSearchMemories({
+      userId: context.userId,
       query: retrievalQuery,
       queryVectorText,
       queryExtract,
-      layers,
+      layers: semanticLayers,
       tags: request.tags,
       limit: retrievalLimit,
       mode: retrievalMode,
@@ -1825,22 +1826,8 @@ export class RetrievalService {
       targetSkillId: request.targetSkillId,
       scope
     });
-    const retrieval = retrievalOutput.retrieval;
     const memories = retrievalOutput.memories;
-    const rerankAt = Date.now();
-    const filteredHits = await this.filterRecallHits(queryVectorText, retrieval.hits, {
-      allowModelFallback: retrievalMode !== "turn_start"
-    });
-    const hits = filterL1TraceSpanRecallHits(filteredHits.hits,memories);
-    const contextPacket = buildInjectedContext(
-      hits,
-      request.contextBudget ?? 1800,
-      contextMemoriesForRecallHits(hits, memories),
-      retrievalMode,
-      request.contextHints,
-      request.injectedContextQuery ?? request.query,
-      tuning
-    );
+    const timeFilter = queryExtract?.timeFilter ?? null;
     const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
     const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
       const episodeId = traceMetaFromMemory(memory)?.episodeId;
@@ -1874,7 +1861,7 @@ export class RetrievalService {
       ? { hits: retrieval.hits, status: ["first_report_handoff:latest_only"] }
       : timeFilter
       ? { hits: retrieval.hits, status: ["time_filter:l1"] }
-      : await this.filterRecallHits(queryVectorText, merged.hits);
+      : await this.filterRecallHits(queryVectorText, merged.hits, { allowModelFallback: true });
     const hits = onboardingFirstReportHit || timeFilter
       ? filteredHits.hits
       : mmrRecallHits(filteredHits.hits, retrievalLimit, tuning.mmrLambda);
@@ -1950,7 +1937,7 @@ export class RetrievalService {
         query: request.query,
         queryHash: stableHash(request.query),
         queryId,
-        layers,
+        layers: semanticLayers,
         candidateMemoryIds,
         userMemoryCandidateIds,
         l1CandidateIds,
@@ -2017,7 +2004,7 @@ export class RetrievalService {
         query: request.query,
         sessionId: request.sessionId,
         episodeId: episode?.id,
-        layers,
+        layers: semanticLayers,
         retrievalMode,
         ...(timeFilter ? { timeFilter } : {}),
         timeZone

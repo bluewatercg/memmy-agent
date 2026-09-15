@@ -1729,3 +1729,25 @@ export function memoryPanelHtml(): string {
 </body>
 </html>`;
 }
+
+export interface ViewerAsset {
+  contentType: string;
+  body: Buffer;
+  cacheControl: string;
+}
+
+export function isMemoryViewerPath(pathname: string): boolean {
+  return pathname === "/" || pathname === "/index.html" || pathname.startsWith("/assets/");
+}
+
+export function memoryViewerAsset(pathname: string): ViewerAsset | undefined {
+  if (pathname === "/" || pathname === "/index.html") {
+    const html = memoryPanelHtml();
+    return {
+      contentType: "text/html; charset=utf-8",
+      body: Buffer.from(html, "utf-8"),
+      cacheControl: "no-cache"
+    };
+  }
+  return undefined;
+}

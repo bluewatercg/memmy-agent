@@ -43,7 +43,6 @@ import type { MemoryDb } from "../storage/db.js";
 import {
   MemoryVersionConflictError,
   Repositories,
-  isStrictL3WorldModelV2Memory,
   jobToRef,
   kindFromMemory,
   type ChangeLogRecord,
@@ -243,6 +242,17 @@ function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmMode
     { modelRole }
   );
 }
+function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
+  return config.summary.provider === config.evolution.provider &&
+    config.summary.model === config.evolution.model &&
+    config.summary.endpoint === config.evolution.endpoint;
+}
+
+function isStrictL3WorldModelV2Memory(memory: { memoryLayer?: string; properties?: { internal_info?: { schema_version?: unknown } } }): boolean {
+  return memory.memoryLayer === "L3" &&
+    memory.properties?.internal_info?.schema_version === 2;
+}
+
 
 export interface MemoryServiceOptions {
   db?: MemoryDb;
@@ -445,10 +455,7 @@ export class MemoryService {
     // while selecting the model assigned by the decision roster.
     const createTopicDecisionLlm = options.createLlmClient ?? ((model: string) => createLlmClient(
       { ...resolveEvolutionConfig(this.config), model, enableThinking: false },
-      {
-        modelRole: "memory_evolution",
-        agentRegion: resolveMemoryAgentRegion(this.config.activeProfile)
-      }
+      { modelRole: "memory_evolution" }
     ));
 
     this.projectContext = new ProjectContextService({ repositories: this.repos });
@@ -467,7 +474,7 @@ export class MemoryService {
     });
     this.candidateReviews = new CandidateReviewService({
       repos: this.repos,
-      reviewers: () => this.config.topicReviewModels.map((model) => createLlmClient({ ...resolveEvolutionConfig(this.config), model }, { modelRole: "memory_evolution", agentRegion: resolveMemoryAgentRegion(this.config.activeProfile) }))
+      reviewers: () => this.config.topicReviewModels.map((model) => createLlmClient({ ...resolveEvolutionConfig(this.config), model }, { modelRole: "memory_evolution" }))
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -853,7 +860,12 @@ export class MemoryService {
       evolution: ModelProbeResult;
     };
   }> {
-    return this.modelTester.testModels();
+    const checkedAt = nowIso();
+    const [summary, evolution] = await Promise.all([
+      probeLlm(this.llm, "model_test"),
+      probeLlm(this.skillLlm, "model_test")
+    ]);
+    return { ok: summary.ok && evolution.ok, checkedAt, models: { summary, evolution } };
   }
 
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
@@ -917,13 +929,6 @@ export class MemoryService {
     const idempotencyKey = request.adapterId && request.requestId ? `${operation}:${namespaceScope}:${request.adapterId}:${request.requestId}` : undefined;
     if (!idempotencyKey) return run();
     const legacyKey = request.adapterId && request.requestId ? `${operation}:${request.adapterId}:${request.requestId}` : undefined;
-  }
-
-  private withTimeZone<T extends RequestEnvelope>(request: T): T {
-    return {
-      ...request,
-      timeZone: resolveTimeZone(this.config.timeZone ?? request.timeZone)
-    };
     const requestHash = stableHash({ operation, fingerprint });
     if (legacyKey && legacyKey !== idempotencyKey && !this.repos.runtime.getIdempotency(idempotencyKey)) {
       let legacy = this.repos.runtime.claimLegacyIdempotency(legacyKey, idempotencyKey, requestHash);
@@ -946,6 +951,13 @@ export class MemoryService {
         const response = await run(); this.repos.runtime.completeIdempotency(idempotencyKey, requestHash, response); return response;
       } catch (error) { this.repos.runtime.abandonIdempotency(idempotencyKey, requestHash); throw error; }
     } finally { release(); if (this.idempotencyLocks.get(idempotencyKey) === entry) this.idempotencyLocks.delete(idempotencyKey); }
+  }
+
+  private withTimeZone<T extends RequestEnvelope>(request: T): T {
+    return {
+      ...request,
+      timeZone: resolveTimeZone(this.config.timeZone ?? request.timeZone)
+    };
   }
 
   adapterActivate(request: RequestEnvelope & {
@@ -1170,24 +1182,7 @@ export class MemoryService {
     };
   }
 
-  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<{
-    sessionId: string;
-    turnId: string;
-    context: string;
-    memorySnapshot: {
-      summary: string;
-      sourceTurnIds: string[];
-      sourceMemoryIds: string[];
-      tokenEstimate?: number;
-    };
-    contextPacketId: string;
-    rawTurnId?: string;
-    l1MemoryId?: string;
-    changeSeq?: number;
-    syncCursor?: string;
-    jobs: JobRef[];
-    serverTime: string;
-  }> {
+  async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<TurnStartResponse> {
     return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
   }
 
@@ -3193,6 +3188,8 @@ export class MemoryService {
       contextPacketId: `ctx_${stableHash(`${request.sessionId}:unbound:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
+      episodeId: "",
+      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: {
@@ -3201,7 +3198,7 @@ export class MemoryService {
       },
       projectContext,
       sourceMemoryIds: uniq([...projectContext.sourceMemoryIds, ...search.sourceMemoryIds]),
-      droppedDueToBudget: search.droppedDueToBudget,
+      droppedDueToBudget: search.droppedDueToBudget as TurnStartResponse["droppedDueToBudget"],
       status: uniq([...search.status, "memory_add:disabled:no_turn_write"]),
       serverTime: nowIso()
     };

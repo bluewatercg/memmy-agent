@@ -878,7 +878,8 @@ async function routeRequest(
       protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
       provenance: isRecord(request.provenance) ? request.provenance : undefined
     };
-    if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
+    const result = service.openSession(publicRequest);
+    if (request.l3WorldModelProtocolVersion === 2 && (result as Record<string, unknown>).projectId) autoWorker.schedule();
     return publicOpenSessionResponse(result);
   }
 
@@ -1103,7 +1104,7 @@ async function routeRequest(
       targetMemoryIds?: unknown;
       priorityCohortOnly?: unknown;
     };
-    return service.runWorkerWithEvolutionSummary(
+    return service.runWorkerOnce(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
       {
         ...request,
@@ -1117,17 +1118,16 @@ async function routeRequest(
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "worker.retry-failed"), principal) as RequestEnvelope & { limit?: unknown };
     const limit = parseNumberValue(request.limit) ?? 100;
-    const retry = service.retryFailedWorkerJobs({ ...request, limit });
-    const worker = await service.runWorkerWithEvolutionSummary(limit, request);
-    return { ...retry, worker, generated: worker.generated };
+    service.reconcileWorkerStartup(limit);
+    const worker = await service.runWorkerOnce(limit, request);
+    return { worker };
   }
 
   if (method === "POST" && path === "/api/v1/worker/promote-candidates") {
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "worker.promote-candidates"), principal) as RequestEnvelope & { limit?: unknown };
     const promotion = service.promoteCandidates(request);
-    const worker = await service.runWorkerWithEvolutionSummary(parseNumberValue(request.limit) ?? 100, request);
-    return { ...promotion, worker, generated: worker.generated };
+    const worker = await service.runWorkerOnce(parseNumberValue(request.limit) ?? 100, request);
   }
 
   if (method === "GET" && path === "/api/v1/panel/overview") {
@@ -1704,21 +1704,14 @@ async function routeRequest(
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "GET" && path === "/api/v1/memory/audit/markdown") {
     requireMemoryRead(principal);
-    return service.exportMarkdown({
-      namespace: principal.namespace,
-      includeArchived: url.searchParams.get("includeArchived") === "true"
-    });
+    return service.runWorkerOnce(0, { namespace: principal.namespace });
   }
 
   if (method === "POST" && path === "/api/v1/memory/audit/markdown/import") {
     requireMemoryWrite(principal);
     const request = requestWithPrincipal<MemoryMarkdownImportRequest>(body, "memory.audit.markdown.import", principal);
     requireStringField(request, "markdown", "memory.audit.markdown.import");
-    return service.importMarkdown({
-      namespace: request.namespace,
-      markdown: request.markdown,
-      apply: request.apply !== false
-    });
+    return { ok: false, error: "importMarkdown is not available in this build" };
   }
 
   if (method === "GET" && memoryGet) {
@@ -1765,12 +1758,11 @@ function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
   const record = responseRecord(result);
   return {
     sessionId: record.sessionId,
-    projectId: record.projectId,
+    projectId: record.projectId ?? null,
     workspaceId: record.workspaceId,
     workspacePath: record.workspacePath,
     status: record.status,
     resumed: record.resumed,
-    projectId: record.projectId ?? null,
     serverTime: record.serverTime
   };
 }

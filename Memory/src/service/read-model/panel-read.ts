@@ -809,7 +809,7 @@ export class PanelReadModel {
       input.sourceAgent,
     );
     return {
-      tasks: pageEpisodes.map((episode) => ({
+      tasks: episodes.map((episode) => ({
         id: episode.id,
         episode: this.deps.episodeRef(episode),
         memoryIds: episode.l1MemoryIds.filter((memoryId) => Boolean(this.deps.repos.memories.get(memoryId))),
@@ -1039,6 +1039,7 @@ export class PanelReadModel {
       rows.push(...batch);
       if (batch.length < pageSize) break;
     }
+    return rows;
   }
 
   private memoryMatchesRequest(memory: Parameters<Repositories["memories"]["toListItem"]>[0], input: RequestEnvelope & { userId?: string }): boolean {

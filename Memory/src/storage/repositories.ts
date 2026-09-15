@@ -5747,6 +5747,203 @@ function assetRewardEvidenceFromSql(row: AssetRewardEvidenceSqlRow | undefined):
   } : undefined;
 }
 
+// ── L3 World Model SQL types & helpers ──────────────────────────────────────
+interface SqlL3WorldModelScopeRow {
+  scope_key: string;
+  user_id: string;
+  project_id: string | null;
+  workspace_uri: string | null;
+  memory_id: string | null;
+  next_scope_seq: number;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelInputTraceRow {
+  session_id: string;
+  trace_seq: number;
+  l1_memory_id: string;
+  raw_turn_id: string;
+  episode_id: string | null;
+  created_at: string;
+}
+
+interface SqlL3WorldModelEvidenceBatchRow {
+  id: string;
+  scope_key: string;
+  scope_seq: number;
+  user_id: string;
+  project_id: string | null;
+  session_id: string;
+  trigger: L3WorldModelBatchTrigger;
+  start_trace_seq: number;
+  end_trace_seq: number;
+  l1_memory_ids_json: string;
+  raw_turn_ids_json: string;
+  feedback_ids_json: string;
+  payload_hash: string;
+  terminal_outcome: L3WorldModelEvidenceBatchRecord["terminalOutcome"] | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface SqlL3WorldModelBatchTargetRow {
+  batch_id: string;
+  target_field: L3WorldModelTargetField;
+  field_scope_key: string;
+  scope_seq: number;
+  status: L3WorldModelBatchTargetRecord["status"];
+  no_change: number;
+  applied_at: string | null;
+  updated_at: string;
+}
+
+function l3WorldModelScopeKey(userId: string, projectId?: string | null): string {
+  return projectId ? `${userId}:${projectId}` : userId;
+}
+
+function l3WorldModelFieldScopeKey(scopeKey: string, targetField: L3WorldModelTargetField): string {
+  return `${scopeKey}:${targetField}`;
+}
+
+function l3WorldModelMemoryKey(userId: string, projectId?: string | null): string {
+  return projectId ? `l3wm:${userId}:${projectId}` : `l3wm:${userId}`;
+}
+
+function l3WorldModelScopeFromSql(row: SqlL3WorldModelScopeRow): L3WorldModelScopeRecord {
+  return {
+    scopeKey: row.scope_key,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    workspaceUri: (row.workspace_uri ?? undefined) as WorkspaceUri | undefined,
+    memoryId: row.memory_id ?? undefined,
+    nextScopeSeq: row.next_scope_seq,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelInputTraceFromSql(row: SqlL3WorldModelInputTraceRow): L3WorldModelInputTraceRecord {
+  return {
+    sessionId: row.session_id,
+    traceSeq: row.trace_seq,
+    l1MemoryId: row.l1_memory_id,
+    rawTurnId: row.raw_turn_id,
+    episodeId: row.episode_id ?? undefined,
+    createdAt: row.created_at
+  };
+}
+
+function l3WorldModelEvidenceBatchFromSql(row: SqlL3WorldModelEvidenceBatchRow): L3WorldModelEvidenceBatchRecord {
+  return {
+    id: row.id,
+    scopeKey: row.scope_key,
+    scopeSeq: row.scope_seq,
+    userId: row.user_id,
+    projectId: row.project_id ?? undefined,
+    sessionId: row.session_id,
+    trigger: row.trigger,
+    startTraceSeq: row.start_trace_seq,
+    endTraceSeq: row.end_trace_seq,
+    l1MemoryIds: asStringArray(parseJson(row.l1_memory_ids_json, [])),
+    rawTurnIds: asStringArray(parseJson(row.raw_turn_ids_json, [])),
+    feedbackIds: asStringArray(parseJson(row.feedback_ids_json, [])),
+    payloadHash: row.payload_hash,
+    terminalOutcome: row.terminal_outcome ?? undefined,
+    completedAt: row.completed_at ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function l3WorldModelBatchTargetFromSql(row: SqlL3WorldModelBatchTargetRow): L3WorldModelBatchTargetRecord {
+  return {
+    batchId: row.batch_id,
+    targetField: row.target_field,
+    fieldScopeKey: row.field_scope_key,
+    scopeSeq: row.scope_seq,
+    status: row.status,
+    noChange: Boolean(row.no_change),
+    appliedAt: row.applied_at ?? undefined,
+    updatedAt: row.updated_at
+  };
+}
+
+function validateL3WorldModelMemory(memory: MemoryRow, userId: string, projectId?: string | null): void {
+  const expectedKey = l3WorldModelMemoryKey(userId, projectId);
+  if (memory.userId !== userId || memory.memoryKey !== expectedKey) {
+    throw new Error(`corrupt L3 World Model memory ownership: ${memory.id}`);
+  }
+}
+
+function emptyL3WorldModelFields(): L3WorldModelFields {
+  return { generalRulesAndSafetyConstraints: null, projectEnvironmentProfile: null, projectContract: null, domainKnowledge: null };
+}
+
+function fieldsFromL3WorldModelMemory(memory: MemoryRow): L3WorldModelFields {
+  const raw = memory.memoryValue;
+  const gcMatch = raw.match(/<!--general_rules_and_safety_constraints-->([\s\S]*?)(?=<!--(?:project_environment_profile|project_contract|domain_knowledge)-->|$)/);
+  const pepMatch = raw.match(/<!--project_environment_profile-->([\s\S]*?)(?=<!--(?:general_rules_and_safety_constraints|project_contract|domain_knowledge)-->|$)/);
+  const pcMatch = raw.match(/<!--project_contract-->([\s\S]*?)(?=<!--(?:general_rules_and_safety_constraints|project_environment_profile|domain_knowledge)-->|$)/);
+  const dkMatch = raw.match(/<!--domain_knowledge-->([\s\S]*?)(?=<!--(?:general_rules_and_safety_constraints|project_environment_profile|project_contract)-->|$)/);
+  return {
+    generalRulesAndSafetyConstraints: gcMatch?.[1]?.trim() || null,
+    projectEnvironmentProfile: pepMatch?.[1]?.trim() || null,
+    projectContract: pcMatch?.[1]?.trim() || null,
+    domainKnowledge: dkMatch?.[1]?.trim() || null
+  };
+}
+
+const L3_FIELD_PROPERTY_MAP: Record<L3WorldModelFieldName, keyof L3WorldModelFields> = {
+  general_rules_and_safety_constraints: "generalRulesAndSafetyConstraints",
+  project_environment_profile: "projectEnvironmentProfile",
+  project_contract: "projectContract",
+  domain_knowledge: "domainKnowledge"
+};
+
+function l3WorldModelFieldProperty(targetField: L3WorldModelFieldName): keyof L3WorldModelFields {
+  return L3_FIELD_PROPERTY_MAP[targetField];
+}
+
+function normalizeL3WorldModelFieldValue(value: string | null): string | null {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function l3WorldModelSourceMemoryIds(memory: MemoryRow | undefined): string[] {
+  if (!memory) return [];
+  const ids = memory.info.source_memory_ids;
+  return Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [];
+}
+
+function assertL3WorldModelFieldOwnership(projectId: string | null, targetField: L3WorldModelFieldName): void {
+  if (projectId === null && targetField !== "general_rules_and_safety_constraints") {
+    throw new Error(`target field ${targetField} requires a project scope`);
+  }
+  if (projectId !== null && targetField === "general_rules_and_safety_constraints") {
+    throw new Error(`target field general_rules_and_safety_constraints requires no-project scope`);
+  }
+}
+
+function splitL3TracesByRawTurn(traces: L3WorldModelInputTraceRecord[], maxChunkSize: number): L3WorldModelInputTraceRecord[][] {
+  const chunks: L3WorldModelInputTraceRecord[][] = [];
+  let current: L3WorldModelInputTraceRecord[] = [];
+  let currentTurns = new Set<string>();
+  for (const trace of traces) {
+    const wouldExceed = current.length >= maxChunkSize;
+    const newTurn = !currentTurns.has(trace.rawTurnId);
+    if (wouldExceed && newTurn && current.length > 0) {
+      chunks.push(current);
+      current = [];
+      currentTurns = new Set();
+    }
+    current.push(trace);
+    currentTurns.add(trace.rawTurnId);
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+
 export class L3WorldModelScopeWorkspaceConflictError extends Error {
   constructor() {
     super("l3_world_model_scope_workspace_conflict");
@@ -7375,11 +7572,12 @@ function buildMemoryWhere(filter: MemoryFilter): { where: string; params: SqlVal
     }
     clauses.push(`${effectiveWorkspace} = ?`);
     params.push(workspaceId);
+  }
+
   function addRangeClause(column: string, operator: ">=" | "<", value: string | undefined): void {
     if (value === undefined) return;
     clauses.push(`${column} ${operator} ?`);
     params.push(value);
-  }
   }
 
   function addAgentIdClause(value: string | undefined, excludedValues: string[] | undefined): void {
