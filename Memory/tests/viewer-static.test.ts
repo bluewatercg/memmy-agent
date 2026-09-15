@@ -1,6 +1,80 @@
 import { Script, createContext, type Context } from "node:vm";
 import { describe, expect, it } from "vitest";
 import { isMemoryViewerPath, memoryPanelHtml, memoryViewerAsset } from "../src/viewer/static.js";
+interface DecisionDetailFixture {
+  session: { id?: string; topicId?: string; state: string; version: number };
+  snapshots?: Array<{ id: string; payload: { roster: Array<{ id: string }> } }>;
+  positions?: Array<{ agentId: string; snapshotId?: string; missingInformation?: string[] }>;
+  debateRounds?: Array<{ id: string }>;
+  proposals?: Array<{ id: string }>;
+  evidenceRequests?: Array<{ id: string; question: string; status: string; metadata?: { key?: string } }>;
+}
+
+type FakeRow = FakeElement & {
+  dataset: { id: string };
+  onclick: () => Promise<void>;
+};
+
+type DetailResolver = (body: unknown) => void;
+
+interface ViewerHarnessRuntime {
+  document: object;
+  fetch: (path: string, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+}
+
+class FakeElement {
+  html = "";
+  innerHTML = "";
+  textContent = "";
+  value = "";
+  disabled = false;
+  onclick: unknown;
+  onkeydown: unknown;
+  onfocus: unknown;
+  onchange: unknown;
+  childRows: FakeRow[] = [];
+  private inputCache: { html: string; elements: FakeRow[] } | undefined;
+  dataset: Record<string, string> = {};
+  className = "";
+  classList = {
+    add: () => undefined,
+    remove: () => undefined,
+    toggle: () => undefined
+  };
+
+  querySelectorAll(selector: string): FakeRow[] {
+    if (selector === "tr") return this.childRows;
+    if (selector === "input[data-decision-answer]") {
+      if (this.inputCache?.html === this.innerHTML) return this.inputCache.elements;
+      const elements = [...this.innerHTML.matchAll(/<input data-decision-answer="([^"]+)">/g)].map((match) => {
+        const input = new FakeElement() as FakeRow;
+        input.dataset = { id: "", decisionAnswer: decodeHtml(match[1] || "") };
+        return input;
+      });
+      this.inputCache = { html: this.innerHTML, elements };
+      return elements;
+    }
+    const matches = [...this.innerHTML.matchAll(/<button[^>]*data-(decision|topic)-action="([^"]+)"[^>]*>/g)];
+    return matches.map((match) => {
+      const button = new FakeElement() as FakeRow;
+      const action = match[2] || "";
+      button.dataset = match[1] === "decision" ? { id: "", decisionAction: action } : { id: "", topicAction: action };
+      button.onclick = async () => undefined;
+      return button;
+    });
+  }
+  select(): void {
+    return undefined;
+  }
+
+  focus(): void {
+    return undefined;
+  }
+
+  setAttribute(): void {
+    return undefined;
+  }
+}
 
 describe("memoryPanelHtml", () => {
   it("uses an inline favicon so the protected server does not receive browser favicon requests", () => {
@@ -370,27 +444,6 @@ describe("memoryPanelHtml", () => {
       profileId: "default"
     });
   });
-interface DecisionDetailFixture {
-  session: { id?: string; topicId?: string; state: string; version: number };
-  snapshots?: Array<{ id: string; payload: { roster: Array<{ id: string }> } }>;
-  positions?: Array<{ agentId: string; snapshotId?: string; missingInformation?: string[] }>;
-  debateRounds?: Array<{ id: string }>;
-  proposals?: Array<{ id: string }>;
-  evidenceRequests?: Array<{ id: string; question: string; status: string; metadata?: { key?: string } }>;
-}
-
-type FakeRow = FakeElement & {
-  dataset: { id: string };
-  onclick: () => Promise<void>;
-};
-
-type DetailResolver = (body: unknown) => void;
-
-interface ViewerHarnessRuntime {
-  document: object;
-  fetch: (path: string, options?: { headers?: Record<string, string> }) => Promise<unknown>;
-}
-
 function runViewerScript(
   harness: ViewerHarnessRuntime,
   browserContext: Record<string, unknown> = {}
@@ -734,59 +787,6 @@ function createViewerHarness() {
   };
 }
 
-class FakeElement {
-  html = "";
-  innerHTML = "";
-  textContent = "";
-  value = "";
-  disabled = false;
-  onclick: unknown;
-  onkeydown: unknown;
-  onfocus: unknown;
-  onchange: unknown;
-  childRows: FakeRow[] = [];
-  private inputCache: { html: string; elements: FakeRow[] } | undefined;
-  dataset: Record<string, string> = {};
-  className = "";
-  classList = {
-    add: () => undefined,
-    remove: () => undefined,
-    toggle: () => undefined
-  };
-
-  querySelectorAll(selector: string): FakeRow[] {
-    if (selector === "tr") return this.childRows;
-    if (selector === "input[data-decision-answer]") {
-      if (this.inputCache?.html === this.innerHTML) return this.inputCache.elements;
-      const elements = [...this.innerHTML.matchAll(/<input data-decision-answer="([^"]+)">/g)].map((match) => {
-        const input = new FakeElement() as FakeRow;
-        input.dataset = { id: "", decisionAnswer: decodeHtml(match[1] || "") };
-        return input;
-      });
-      this.inputCache = { html: this.innerHTML, elements };
-      return elements;
-    }
-    const matches = [...this.innerHTML.matchAll(/<button[^>]*data-(decision|topic)-action="([^"]+)"[^>]*>/g)];
-    return matches.map((match) => {
-      const button = new FakeElement() as FakeRow;
-      const action = match[2] || "";
-      button.dataset = match[1] === "decision" ? { id: "", decisionAction: action } : { id: "", topicAction: action };
-      button.onclick = async () => undefined;
-      return button;
-    });
-  }
-  select(): void {
-    return undefined;
-  }
-
-  focus(): void {
-    return undefined;
-  }
-
-  setAttribute(): void {
-    return undefined;
-  }
-}
 
 function listItem(id: string, title: string) {
   return {
