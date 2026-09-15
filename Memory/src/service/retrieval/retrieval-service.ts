@@ -1132,7 +1132,7 @@ function injectedHeaderForMode(mode: RetrievalMode, standaloneMathFinalAnswer = 
     return "# Memory search results\n\n" +
       "The memory tool returned candidate methods and prior examples. Verify fit before using them.";
   }
-  if (mode === "turn_start") return recalledEvidenceHeader();
+  if (mode === "turn_start") return "";
   if (mode === "skill_invoke") {
     return "# Invoked skill\n\n" +
       "Follow the procedure below; the verification step tells you when you're done.";
@@ -1791,7 +1791,10 @@ export class RetrievalService {
       ? requestedSemanticLayers.filter((layer) => layer !== "L1")
       : requestedSemanticLayers;
     const searchAt = Date.now();
-    const includeUserMemory = !onboardingFirstReportHit && semanticLayers.includes("L1");
+    const includeUserMemory = !onboardingFirstReportHit && (
+      semanticLayers.includes("L1") ||
+      (retrievalMode === "turn_start" && semanticLayers.includes("Skill"))
+    );
     const userMemoryCount = includeUserMemory
       ? this.deps.repos.userMemories.listActive(context.userId).length
       : 0;
@@ -1804,30 +1807,49 @@ export class RetrievalService {
           layers: semanticLayers,
           tags: request.tags,
           scope
-        });
+        }) + userMemoryCount;
     const retrievalQuery = focusResearchRetrievalQuery(request.query, tuning.domain).text;
-    // Turn-start recall runs inside agent hook deadlines. Keep it to one LLM stage:
-    // filtering actual candidates is more useful here than extracting the query first.
-    const queryExtract = candidateCount > 0 && retrievalMode !== "turn_start"
+    const queryExtract = !onboardingFirstReportHit && semanticLayers.length > 0 &&
+      (retrievalMode !== "turn_start" || Boolean(request.episodeId))
       ? await this.extractRetrievalQuery(retrievalQuery, timeZone)
       : null;
     const queryVectorText = queryExtract?.queryVecText?.trim() || retrievalQuery;
-    const retrievalLimit = request.limit ?? this.deps.turnStartRetrievalLimit();
-    const retrievalOutput = await this.retrieveSearchMemories({
-      userId: context.userId,
-      query: retrievalQuery,
-      queryVectorText,
-      queryExtract,
-      layers: semanticLayers,
-      tags: request.tags,
-      limit: retrievalLimit,
-      mode: retrievalMode,
-      excludeTraceRawTurnIds: recentRawTurnIds,
-      targetSkillId: request.targetSkillId,
-      scope
-    });
-    const memories = retrievalOutput.memories;
-    const timeFilter = queryExtract?.timeFilter ?? null;
+    const timeFilter = semanticLayers.includes("L1") ? queryExtract?.timeFilter : undefined;
+    const layers: MemoryLayer[] = onboardingFirstReportHit || timeFilter ? ["L1"] : semanticLayers;
+    const retrievalLimit = timeFilter
+      ? TIME_FILTERED_TRACE_LIMIT
+      : request.limit ?? this.deps.turnStartRetrievalLimit();
+    const agentLaneLimit = includeUserMemory
+      ? parallelMemoryLaneLimit(retrievalLimit)
+      : retrievalLimit;
+    const retrievalOutput = onboardingFirstReportHit && onboardingFirstReportMemory
+      ? {
+          retrieval: directRetrievalResult(onboardingFirstReportHit),
+          memories: [onboardingFirstReportMemory]
+        }
+      : timeFilter
+      ? this.retrieveTimeFilteredTraceMemories({
+          timeFilter,
+          tags: request.tags,
+          limit: retrievalLimit
+        })
+      : await this.retrieveSearchMemories({
+          userId: context.userId,
+          query: retrievalQuery,
+          queryVectorText,
+          queryExtract,
+          layers,
+          tags: request.tags,
+          limit: agentLaneLimit,
+          mode: retrievalMode,
+          excludeTraceRawTurnIds: recentRawTurnIds,
+          targetSkillId: request.targetSkillId,
+          scope,
+          currentAgentId: context.namespace.source
+        });
+    const memories = retrievalOutput.memories.filter((memory) =>
+      !memoryUsesStalePolicy(memory, stalePolicyIds)
+    );
     const allowedMemoryIds = new Set(memories.map((memory) => memory.id));
     const allowedEpisodeIds = new Set(memories.flatMap((memory) => {
       const episodeId = traceMetaFromMemory(memory)?.episodeId;

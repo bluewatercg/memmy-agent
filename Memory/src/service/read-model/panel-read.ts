@@ -28,6 +28,7 @@ import type {
   MemoryFilter,
   MemoryKind,
   MemoryLayer,
+  MemoryStatus,
   MemoryListItem,
   PanelMemoryListItem,
   RecallMemoryLayer,
@@ -396,7 +397,7 @@ export class PanelReadModel {
     namespaceDistribution: Array<{ tenantId: string; projectId: string; workspaceId?: string; workspacePath?: string; label: string; count: number; percentage: number }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    const memories = this.listAllMemoriesForStats(input);
+    const memories = this.listMemoryStats(input);
     const userId = input.userId ?? input.namespace?.userId;
     const timeZone = resolveTimeZone(input.timeZone);
     const dates = panelDateKeys(this.now(), PANEL_DAILY_ACTIVITY_DAYS, timeZone);
@@ -987,7 +988,7 @@ export class PanelReadModel {
     };
   }
 
-  private memoryLayerCounts(memories: ReturnType<Repositories["memories"]["list"]>): Record<MemoryLayer, number> {
+  private memoryLayerCounts(memories: Array<{ memoryLayer: MemoryLayer }>): Record<MemoryLayer, number> {
     return {
       L1: memories.filter((memory) => memory.memoryLayer === "L1").length,
       L2: memories.filter((memory) => memory.memoryLayer === "L2").length,
@@ -996,7 +997,7 @@ export class PanelReadModel {
     };
   }
 
-  private memoryStatusCounts(memories: ReturnType<Repositories["memories"]["list"]>): Record<"activated" | "resolving" | "archived" | "deleted", number> {
+  private memoryStatusCounts(memories: Array<{ status: MemoryStatus }>): Record<"activated" | "resolving" | "archived" | "deleted", number> {
     return {
       activated: memories.filter((memory) => memory.status === "activated").length,
       resolving: memories.filter((memory) => memory.status === "resolving").length,
@@ -1024,6 +1025,15 @@ export class PanelReadModel {
         .filter((retry) => this.embeddingRetryMatchesNamespace(retry, input.namespace)).length;
     }
     return counts;
+  }
+
+  private listMemoryStats(input: RequestEnvelope & { userId?: string } = {}) {
+    const context = input.namespace ? this.deps.resolveContext(input) : undefined;
+    const filter: MemoryFilter = {
+      ...(context ? memoryFilterForNamespace(context.namespace) : {}),
+      ...(input.userId ?? context?.userId ? { userId: input.userId ?? context?.userId } : {})
+    };
+    return this.deps.repos.memories.listStats(filter);
   }
 
   private listAllMemoriesForStats(input: RequestEnvelope & { userId?: string } = {}) {

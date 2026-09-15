@@ -335,7 +335,7 @@ export class WorkerRunner {
       normalizedLimit,
       60,
       targetMemoryIds,
-      request.priorityCohortOnly
+      request.priorityCohortOnly === true
     );
     const retryCapacity = Math.max(0, normalizedLimit - jobs.length);
     const results: WorkerJobRunResult[] = [];

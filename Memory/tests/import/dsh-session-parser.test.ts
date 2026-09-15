@@ -1,10 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isZstdBuffer, decompressZstdFrames, findZstdFrameRanges } from "../../src/service/import/dsh/zstd-decoder.js";
 import { parseDshSessionBuffer, parseDshSessionLines, type DshTurn } from "../../src/service/import/dsh/session-parser.js";
 
 // A real DSH session artifact (current workspace session) for integration checks.
 const REAL_SESSION = "/root/.dsh/sessions/--mnt-d-Project-Miller-memmy-agent--/session-9a3105b3-a8fb-426d-a5b0-6a5212fbaf78/session.jsonl.zstd";
+const realSessionIt = existsSync(REAL_SESSION) ? it : it.skip;
 
 describe("dsh zstd decoder", () => {
   it("detects zstd magic", () => {
@@ -13,7 +14,7 @@ describe("dsh zstd decoder", () => {
     expect(isZstdBuffer(Buffer.from("plain jsonl\n"))).toBe(false);
   });
 
-  it("decompresses a real multi-frame DSH session log", () => {
+  realSessionIt("decompresses a real multi-frame DSH session log", () => {
     const buf = readFileSync(REAL_SESSION);
     const frames = findZstdFrameRanges(buf);
     expect(frames.length).toBeGreaterThan(10); // header + many append frames
@@ -22,7 +23,7 @@ describe("dsh zstd decoder", () => {
     expect(decoded.completeFrames).toBe(frames.length);
     expect(decoded.skippedTail).toBe(false);
   });
-  it("decodes only frames after a committed offset", () => {
+  realSessionIt("decodes only frames after a committed offset", () => {
     const buf = readFileSync(REAL_SESSION);
     const frames = findZstdFrameRanges(buf);
     const committed = frames[2];
@@ -32,7 +33,7 @@ describe("dsh zstd decoder", () => {
     expect(decoded.lines.length).toBeGreaterThan(0);
   });
 
-  it("tolerates a truncated tail frame", () => {
+  realSessionIt("tolerates a truncated tail frame", () => {
     const buf = readFileSync(REAL_SESSION);
     const truncated = buf.subarray(0, buf.length - 40); // cut into last frame
     const decoded = decompressZstdFrames(truncated);
@@ -41,7 +42,7 @@ describe("dsh zstd decoder", () => {
 });
 
 describe("dsh session parser", () => {
-  it("parses header and turns from a real session", () => {
+  realSessionIt("parses header and turns from a real session", () => {
     const buf = readFileSync(REAL_SESSION);
     const parsed = parseDshSessionBuffer(buf);
     expect(parsed.header.type).toBe("session");
@@ -57,7 +58,7 @@ describe("dsh session parser", () => {
     expect(first.startSeq).toBeGreaterThanOrEqual(0);
   });
 
-  it("captures user messages and tool calls", () => {
+  realSessionIt("captures user messages and tool calls", () => {
     const buf = readFileSync(REAL_SESSION);
     const parsed = parseDshSessionBuffer(buf);
     const hasUser = parsed.turns.some((t) => t.userMessages.length > 0);
@@ -66,7 +67,7 @@ describe("dsh session parser", () => {
     expect(hasTools).toBe(true);
   });
 
-  it("marks completed turns", () => {
+  realSessionIt("marks completed turns", () => {
     const buf = readFileSync(REAL_SESSION);
     const parsed = parseDshSessionBuffer(buf);
     // At least one turn should be complete (turn/end seen) in a real session.
@@ -99,7 +100,7 @@ describe("dsh session parser error handling", () => {
     expect(() => parseDshSessionBuffer(Buffer.from(lines.join("\n")))).toThrow(/header/);
   });
 
-  it("skips corrupt lines without blocking", () => {
+  realSessionIt("skips corrupt lines without blocking", () => {
     const buf = readFileSync(REAL_SESSION);
     const text = decompressZstdFrames(buf).lines.join("\n");
     // inject a corrupt line after the header

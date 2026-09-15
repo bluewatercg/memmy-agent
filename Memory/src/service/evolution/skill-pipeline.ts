@@ -255,7 +255,7 @@ export class SkillPipeline {
         targetSkillId,
         job.payload.reason !== "policy.skill_fanout"
       );
-      if (this.isSkillCrystallizationInCooldown(policy, at)) {
+      if (job.payload.reason !== "policy.skill_fanout" && this.isSkillCrystallizationInCooldown(policy, at)) {
         logEvolutionDecision(job, "skill_crystallization", "cooldown", {
           policyId: policy.id,
           existingSkillId: existingSkill?.id
@@ -411,17 +411,20 @@ export class SkillPipeline {
         const persisted = this.deps.upsertEvolutionMemory(skill);
         const projectId = projectIdFromMemory(persisted.memory);
         const skillSignals = skillApplicabilitySignals(verifiedDraft.procedureJson, policy.trigger);
+        const namespaceId = this.deps.namespaceIdFromMemory(persisted.memory);
+        const stableKey = persisted.memory.memoryKey ?? verifiedDraft.key;
+        const existingAsset = this.deps.repos.assets.getByStableKey(namespaceId, stableKey);
         this.deps.upsertSkillAssetCandidate({
-          namespaceId: this.deps.namespaceIdFromMemory(persisted.memory),
+          namespaceId,
           assetType: "skill",
-          stableKey: persisted.memory.memoryKey ?? verifiedDraft.key,
+          stableKey,
           title: verifiedDraft.name,
           summary: firstString(verifiedDraft.procedureJson.summary) ?? verifiedDraft.invocationGuide,
           contentRef: `memory://${persisted.memory.id}/v${persisted.memory.version}`,
           ownerId: persisted.memory.userId,
           visibility: "restricted",
           allowedAgentIds: persisted.memory.agentId ? [persisted.memory.agentId] : [],
-          sourceMemoryIds: verifiedDraft.sourcePolicyIds,
+          sourceMemoryIds: [stableKey.replace(/^skill:/, "")],
           sourceEpisodeIds: uniq(policy.sourceEpisodeIds),
           sourceTraceIds: uniq(verifiedDraft.evidenceAnchorIds),
           sourceTopicIds: [],
@@ -450,7 +453,7 @@ export class SkillPipeline {
             eta: verifiedDraft.eta,
             trialProvenance: []
           }
-        }, persisted.memory.version);
+        }, existingAsset ? persisted.memory.version : 1);
         return persisted;
       });
       for (const episodeId of uniq(evidenceTraces.map((trace) => trace.episodeId).filter((id): id is string => Boolean(id)))) {

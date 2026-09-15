@@ -166,7 +166,12 @@ describe("MemoryService / session / turn capture", () => {
     expect(first.injectedContext.markdown.indexOf("<memmy_project_context")).toBeLessThan(first.injectedContext.markdown.indexOf("Supplemental unrelated question guidance"));
     expect(first.sourceMemoryIds).toEqual([...new Set(first.sourceMemoryIds)]);
     expect(first.sourceMemoryIds.filter((id) => id === supplemental.id)).toHaveLength(1);
-    const raw = db.db.prepare("SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE session_id = ? AND turn_id = ?").get(session.sessionId, first.turnId) as { source_memory_ids_json: string; message_payload_json: string };
+    const completed = service.completeTurn(first.turnId, {
+      sessionId: session.sessionId,
+      query: "Supplemental unrelated question guidance",
+      answer: "Use the authoritative project context before supplemental guidance."
+    });
+    const raw = db.db.prepare("SELECT source_memory_ids_json, message_payload_json FROM raw_turns WHERE id = ?").get(completed.rawTurnId) as { source_memory_ids_json: string; message_payload_json: string };
     const payload = JSON.parse(raw.message_payload_json) as { turn_start: Record<string, unknown> };
     expect(JSON.parse(raw.source_memory_ids_json)).toEqual(first.sourceMemoryIds);
     expect(payload.turn_start).toMatchObject({ projectContextVersion: first.projectContext.version, projectContextStatus: first.projectContext.status, sourceMemoryIds: first.sourceMemoryIds });

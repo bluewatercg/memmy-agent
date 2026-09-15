@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { parentPort, workerData } from "node:worker_threads";
-import { ProjectTopicRepository } from "../../src/storage/repositories.ts";
+import { tsImport } from "tsx/esm/api";
+const { ProjectTopicRepository } = await tsImport("../../src/storage/repositories.ts", import.meta.url);
 
 const barrier = new Int32Array(workerData.barrier);
 const ABORT_INDEX = 3;

@@ -523,6 +523,10 @@ export interface MemoryStatsRow {
   sessionId?: string;
   agentId?: string;
   appId?: string;
+  tenantId?: string;
+  projectId?: string;
+  workspaceId?: string;
+  workspacePath?: string;
   status: MemoryStatus;
   memoryLayer: MemoryLayer;
   createdAt: IsoTime;
@@ -727,8 +731,8 @@ export interface TurnStartResponse {
   contextPacketId: string;
   turnId: string;
   sessionId: string;
-  episodeId: string;
-  closedEpisodeIds: string[];
+  episodeId?: string;
+  closedEpisodeIds?: string[];
   searchEventId: string;
   hits: RecallHit[];
   injectedContext: InjectedContext;

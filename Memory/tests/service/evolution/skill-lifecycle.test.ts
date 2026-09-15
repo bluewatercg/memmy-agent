@@ -1250,9 +1250,9 @@ describe("MemoryService / evolution / skill lifecycle", () => {
     expect(JSON.parse(assetRow.provenance_json)).toMatchObject({
       skillMemoryId: skillRow.id,
       skillMemoryVersion: skillRow.version,
-      sourcePolicyIds: [skillRow.memory_key.replace(/^skill:/, "")]
+      sourcePolicyIds: [policyId]
     });
-    const sourcePolicyId = skillRow.memory_key.replace(/^skill:/, "");
+    const sourcePolicyId = policyId;
     const policyRow = db.db.prepare(
       `SELECT id, properties_json
        FROM memories

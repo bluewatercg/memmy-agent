@@ -947,7 +947,8 @@ export class MemoryRepository {
     this.db.prepare(`DELETE FROM project_topic_refresh_snapshot_rows WHERE snapshot_id = ?`).run(snapshotId);
   }
 
-  listStats(): MemoryStatsRow[] {
+  listStats(filter: MemoryFilter = {}): MemoryStatsRow[] {
+    const built = buildMemoryWhere(filter);
     const rows = this.db
       .prepare(
         `SELECT conversation_id,
@@ -958,12 +959,16 @@ export class MemoryRepository {
                 memory_layer,
                 created_at,
                 updated_at,
+                COALESCE(json_extract(info_json, '$.tenant_id'), json_extract(info_json, '$.tenantId')) AS tenant_id,
+                COALESCE(json_extract(info_json, '$.project_id'), json_extract(info_json, '$.projectId')) AS project_id,
+                COALESCE(json_extract(info_json, '$.workspace_id'), json_extract(info_json, '$.workspaceId')) AS workspace_id,
+                COALESCE(json_extract(info_json, '$.workspace_path'), json_extract(info_json, '$.workspacePath')) AS workspace_path,
                 json_extract(info_json, '$.source') AS info_source,
                 json_extract(properties_json, '$.internal_info.source') AS internal_source
          FROM memories
-         WHERE deleted_at IS NULL`
+         WHERE ${built.where}`
       )
-      .all() as Array<{
+      .all(...built.params) as Array<{
         conversation_id: string | null;
         session_id: string | null;
         agent_id: string | null;
@@ -972,6 +977,10 @@ export class MemoryRepository {
         memory_layer: MemoryLayer;
         created_at: string;
         updated_at: string;
+        tenant_id: string | null;
+        project_id: string | null;
+        workspace_id: string | null;
+        workspace_path: string | null;
         info_source: unknown;
         internal_source: unknown;
       }>;
@@ -980,6 +989,10 @@ export class MemoryRepository {
       sessionId: row.session_id ?? undefined,
       agentId: row.agent_id ?? undefined,
       appId: row.app_id ?? undefined,
+      tenantId: row.tenant_id ?? undefined,
+      projectId: row.project_id ?? undefined,
+      workspaceId: row.workspace_id ?? undefined,
+      workspacePath: row.workspace_path ?? undefined,
       status: row.status,
       memoryLayer: row.memory_layer,
       createdAt: row.created_at,
@@ -5880,6 +5893,19 @@ function emptyL3WorldModelFields(): L3WorldModelFields {
 }
 
 function fieldsFromL3WorldModelMemory(memory: MemoryRow): L3WorldModelFields {
+  const structured = memory.properties.internal_info.world_model;
+  if (isRecord(structured)) {
+    const value = (key: string): string | null => {
+      const field = structured[key];
+      return typeof field === "string" && field.trim() ? field.trim() : null;
+    };
+    return {
+      generalRulesAndSafetyConstraints: value("general_rules_and_safety_constraints"),
+      projectEnvironmentProfile: value("project_environment_profile"),
+      projectContract: value("project_contract"),
+      domainKnowledge: value("domain_knowledge")
+    };
+  }
   const raw = memory.memoryValue;
   const gcMatch = raw.match(/<!--general_rules_and_safety_constraints-->([\s\S]*?)(?=<!--(?:project_environment_profile|project_contract|domain_knowledge)-->|$)/);
   const pepMatch = raw.match(/<!--project_environment_profile-->([\s\S]*?)(?=<!--(?:general_rules_and_safety_constraints|project_contract|domain_knowledge)-->|$)/);
@@ -8737,10 +8763,13 @@ function targetMemoryMatchesSql(predicate: string): string {
 function agentSourceMemorySql(alias: string): string {
   return `(
     json_extract(${alias}.properties_json, '$.internal_info.plugin_algorithm') LIKE 'memory.add.import_async.%'
-    OR EXISTS (
-      SELECT 1
-      FROM json_each(${alias}.tags_json)
-      WHERE lower(json_each.value) = 'agent-source'
+    OR (
+      json_extract(${alias}.properties_json, '$.internal_info.source') <> 'turn.complete'
+      AND EXISTS (
+        SELECT 1
+        FROM json_each(${alias}.tags_json)
+        WHERE lower(json_each.value) = 'agent-source'
+      )
     )
   )`;
 }

@@ -55,9 +55,6 @@ export function validateSkillAssetStructure(asset: MemoryAssetRecord): SkillAsse
   if (asset.sourceEpisodeIds.length === 0 || asset.sourceTraceIds.length === 0 || sourcePolicyIds.length === 0) {
     throw new Error("Skill requires source Episode, Trace, and Policy provenance");
   }
-  if (!sourcePolicyIds.every((id) => asset.sourceMemoryIds.includes(id))) {
-    throw new Error("sourcePolicyIds must reference sourceMemoryIds");
-  }
   return {
     invocationGuide,
     procedureJson,

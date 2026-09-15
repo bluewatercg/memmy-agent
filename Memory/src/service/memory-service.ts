@@ -858,14 +858,16 @@ export class MemoryService {
     models: {
       summary: ModelProbeResult;
       evolution: ModelProbeResult;
+      embedding: ModelProbeResult;
     };
   }> {
     const checkedAt = nowIso();
-    const [summary, evolution] = await Promise.all([
-      probeLlm(this.llm, "model_test"),
-      probeLlm(this.skillLlm, "model_test")
+    const [summary, evolution, embedding] = await Promise.all([
+      probeLlm(this.llm, "viewer.model-test.summary"),
+      probeLlm(this.skillLlm, "viewer.model-test.evolution"),
+      probeEmbedding(this.embedder)
     ]);
-    return { ok: summary.ok && evolution.ok, checkedAt, models: { summary, evolution } };
+    return { ok: summary.ok && evolution.ok && embedding.ok, checkedAt, models: { summary, evolution, embedding } };
   }
 
 
@@ -888,20 +890,21 @@ export class MemoryService {
       ...memoryConfigLogFields(this.config)
     });
 
+    const models = this.resolveModelTaskContext();
     return {
       changed,
       requiresRestart,
       models: {
         summary: {
-          ...this.llm.status(),
+          ...models.summary.status(),
           routing: this.config.roleRouting.summary
         },
         evolution: {
-          ...this.skillLlm.status(),
+          ...models.evolution.status(),
           routing: this.config.roleRouting.evolution
         },
         embedding: {
-          ...this.embedder.status(),
+          ...models.embedding.status(),
           mode: this.config.embedding.mode
         }
       },
@@ -1611,10 +1614,10 @@ export class MemoryService {
   } {
     this.assertMemorySearchEnabled();
     const context = this.resolveContext(request);
-    const tables = scopeBundleTables(
-      this.repos.runtime.exportBundleTables(request.includeRawText === true),
-      context.namespace
-    );
+    const exportedTables = this.repos.runtime.exportBundleTables(request.includeRawText === true);
+    const tables = request.namespace
+      ? scopeBundleTables(exportedTables, context.namespace)
+      : exportedTables;
     const scopedMemoryIds = new Set((tables.memories ?? []).map((row) => row.id).filter((id): id is string => typeof id === "string"));
     tables.memory_vectors = this.repos.vectors.exportRows()
       .filter((row) => scopedMemoryIds.has(row.memory_id))
@@ -2884,6 +2887,8 @@ export class MemoryService {
   }
 
   importMarkdown(request: MemoryMarkdownImportRequest): {
+    applied: boolean;
+    count: number;
     updated: string[];
     created: string[];
     rejected: Array<{ id: string; reason: string }>;
@@ -2940,7 +2945,7 @@ export class MemoryService {
         updated.push(frontMatter.id);
       }
     }
-    return { updated, created, rejected, serverTime: nowIso() };
+    return { applied: request.apply !== false, count: parsed.length, updated, created, rejected, serverTime: nowIso() };
   }
 
   retryFailedWorkerJobs(request: { limit?: number } = {}): {
@@ -2960,13 +2965,30 @@ export class MemoryService {
     inProgress: number;
     succeeded: number;
     failed: number;
+    totalSlots: number;
+    ready: number;
+    missing: number;
+    dimMismatch: number;
     serverTime: string;
   } {
+    const userSlots = this.repos.userMemories.embeddingDimensionCounts(this.resolveContext({}).userId);
+    const memorySlots = this.repos.vectors.maintenanceDimensionCounts();
+    const dimensions = [...userSlots.dimensions, ...memorySlots.dimensions];
+    const totalSlots = userSlots.totalSlots + memorySlots.totalSlots;
+    const configuredDimensions = dimensions[0]?.dimension;
+    const ready = configuredDimensions === undefined
+      ? 0
+      : dimensions.filter((item) => item.dimension === configuredDimensions).reduce((sum, item) => sum + item.count, 0);
+    const embedded = dimensions.reduce((sum, item) => sum + item.count, 0);
     return {
       pending: this.repos.runtime.countEmbeddingRetriesByStatus("pending"),
       inProgress: this.repos.runtime.countEmbeddingRetriesByStatus("in_progress"),
       succeeded: this.repos.runtime.countEmbeddingRetriesByStatus("succeeded"),
       failed: this.repos.runtime.countEmbeddingRetriesByStatus("failed"),
+      totalSlots,
+      ready,
+      missing: Math.max(0, totalSlots - embedded),
+      dimMismatch: Math.max(0, embedded - ready),
       serverTime: nowIso()
     };
   }
@@ -2998,7 +3020,13 @@ export class MemoryService {
   }
 
   hubRecords(limit = 50): unknown[] {
-    return this.repos.runtime.listJobs("succeeded", limit);
+    const legacy = this.repos.runtime.listKv("legacy_hub:", limit).map((item) => ({
+      id: item.key,
+      ...((item.value && typeof item.value === "object" && !Array.isArray(item.value)) ? item.value : { value: item.value }),
+      updatedAt: item.updatedAt
+    }));
+    if (legacy.length >= limit) return legacy;
+    return [...legacy, ...this.repos.runtime.listJobs("succeeded", limit - legacy.length)];
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {
@@ -3029,6 +3057,23 @@ export class MemoryService {
 
   reconcileWorkerStartup(limit = 10000): ReturnType<WorkerRunner["reconcileWorkerStartup"]> {
     return this.workerRunner.reconcileWorkerStartup(limit);
+  }
+
+  async runWorkerWithEvolutionSummary(
+    limit = 100,
+    request: RequestEnvelope & { targetMemoryIds?: string[]; priorityCohortOnly?: boolean } = {}
+  ) {
+    const before = this.panelReadModel.panelOverviewSummary(request).layerCounts;
+    const worker = await this.runWorkerOnce(limit, request);
+    const after = this.panelReadModel.panelOverviewSummary(request).layerCounts;
+    return {
+      ...worker,
+      generated: {
+        L2: Math.max(0, after.L2 - before.L2),
+        L3: Math.max(0, after.L3 - before.L3),
+        Skill: Math.max(0, after.Skill - before.Skill)
+      }
+    };
   }
 
   runWorkerOnce(
@@ -3770,6 +3815,7 @@ function scopeBundleTables(
   const episodeIds = new Set<string>();
   const rawTurnIds = new Set<string>();
   const topicIds = new Set<string>();
+  const batchIds = new Set<string>();
   for (const row of tables.project_topics ?? []) {
     if (stringField(row, "namespace_id") === namespaceIdFromContext(normalized)) {
       const id = stringField(row, "id");
@@ -3805,6 +3851,11 @@ function scopeBundleTables(
     const episodeId = stringField(row, "episode_id");
     if (id && ((sessionId && sessionIds.has(sessionId)) || (episodeId && episodeIds.has(episodeId)))) rawTurnIds.add(id);
   }
+  for (const row of tables.l3_world_model_evidence_batches ?? []) {
+    const id = stringField(row, "id");
+    const sessionId = stringField(row, "session_id");
+    if (id && sessionId && sessionIds.has(sessionId)) batchIds.add(id);
+  }
 
   const scoped = (table: string, rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> => rows.filter((row) => {
     if (table === "memories") return memoryIds.has(stringField(row, "id") ?? "");
@@ -3821,6 +3872,10 @@ function scopeBundleTables(
     if (table === "artifacts") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
     if (table === "feedback" || table === "decision_repairs" || table === "evolution_jobs") return rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, ["l1_memory_id", "target_memory_id"]);
     if (table === "recall_events") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) || rowReferencesSets(row, sessionIds, episodeIds, rawTurnIds, memoryIds, []);
+    if (table === "l3_world_model_input_traces" || table === "l3_world_model_session_cursors") return sessionIds.has(stringField(row, "session_id") ?? "");
+    if (table === "l3_world_model_evidence_batches") return batchIds.has(stringField(row, "id") ?? "");
+    if (table === "l3_world_model_batch_targets") return batchIds.has(stringField(row, "batch_id") ?? "");
+    if (table === "l3_world_model_scopes" || table === "l3_world_model_project_environment_state") return sameProjectScope({ source: "unknown", profileId: "default", projectId: stringField(row, "project_id"), tenantId: "local", userId: stringField(row, "user_id") }, normalized);
     if (table === "project_topics") return topicIds.has(stringField(row, "id") ?? "");
     if (table === "project_topic_analysis_runs") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && (!stringField(row, "topic_id") || topicIds.has(stringField(row, "topic_id")!));
     if (table === "project_topic_evidence") return stringField(row, "namespace_id") === namespaceIdFromContext(normalized) && topicIds.has(stringField(row, "topic_id") ?? "") && memoryIds.has(stringField(row, "memory_id") ?? "");

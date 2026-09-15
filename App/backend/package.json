@@ -26,7 +26,7 @@
     "@memmy/agent-source-core": "0.0.0",
     "@memmy/local-api-contracts": "0.0.0",
     "@memmy/migrations": "0.0.0",
-    "@memmy/memory": "1.0.4",
+    "@memmy/memory": "2.1.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "dotenv": "^16.6.1",
     "fastify": "^5.8.5",

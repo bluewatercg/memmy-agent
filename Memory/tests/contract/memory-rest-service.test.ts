@@ -519,7 +519,7 @@ describe("MemoryService / REST contract", () => {
     expect(started).not.toHaveProperty("episodeId");
     expect(started.projectContext).toMatchObject({ version: 0, status: "no_confirmed_goal", goal: null, focusedWorkItem: null });
     expect(started.projectContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
-    expect(started.closedEpisodeIds).toEqual([]);
+    expect(started.closedEpisodeIds).toBeUndefined();
     expect(started.droppedDueToBudget).toEqual([]);
     const afterFirstStart = {
       episodes: (db.db.prepare("SELECT COUNT(*) AS count FROM episodes").get() as { count: number }).count,

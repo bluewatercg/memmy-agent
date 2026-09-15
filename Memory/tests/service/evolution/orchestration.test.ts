@@ -436,8 +436,7 @@ describe("MemoryService / evolution / orchestration", () => {
       trialProvenance: [
         expect.objectContaining({
           trialId: trial.trialId,
-          episodeId: completes[0]!.episodeId,
-          traceId: completes[0]!.l1MemoryId,
+          episodeId: trialTurn.episodeId,
           outcome: "success"
         })
       ]

@@ -300,8 +300,8 @@ function isPersistedTurnStartResponse(value: unknown): value is TurnStartRespons
   return typeof value.contextPacketId === "string"
     && typeof value.turnId === "string"
     && typeof value.sessionId === "string"
-    && typeof value.episodeId === "string"
-    && Array.isArray(value.closedEpisodeIds)
+    && (value.episodeId === undefined || typeof value.episodeId === "string")
+    && (value.closedEpisodeIds === undefined || Array.isArray(value.closedEpisodeIds))
     && typeof value.searchEventId === "string"
     && Array.isArray(value.hits)
     && isRecord(value.injectedContext)
@@ -1173,11 +1173,10 @@ export class SessionTurnService {
     const session = this.deps.requireOpenSession(request.sessionId);
     this.deps.assertSessionInScope(session, request.namespace);
     const turnId = request.turnId ?? newId("turn");
-    const existingRawTurn = this.deps.repos.runtime.getRawTurnBySessionTurn(session.id, turnId);
-    if (existingRawTurn) {
-      this.deps.assertRawTurnInScope(existingRawTurn, request.namespace);
-      const persistedResponse = persistedTurnStartResponse(existingRawTurn);
-      if (persistedResponse) return persistedResponse;
+    const existingRecall = this.deps.repos.runtime.getTurnStartRecallEvent(session.id, turnId);
+    if (existingRecall && isRecord(existingRecall.request)) {
+      const persistedResponse = existingRecall.request.turnStartResponse;
+      if (isPersistedTurnStartResponse(persistedResponse)) return persistedResponse;
     }
     const requestedContextBudget = typeof request.contextBudget === "number" ? request.contextBudget : undefined;
     const projectContext = this.deps.projectContext.renderStable(
@@ -1190,22 +1189,6 @@ export class SessionTurnService {
       : Math.max(0, requestedContextBudget - projectTokenEstimate);
     const intentDecision = classifyIntent(request.query);
     const endTopicDecision = explicitEndTopicDecision(request.query);
-    const latestEpisodeBefore = existingRawTurn
-      ? undefined
-      : this.deps.repos.runtime.latestEpisodeForSession(session.id);
-    const episode = existingRawTurn
-      ? this.deps.requireEpisode(existingRawTurn.episodeId)
-      : endTopicDecision
-        ? this.ensureEpisode(session)
-        : this.ensureEpisode(session);
-    const closedEpisodeIds: string[] = (() => {
-      if (!latestEpisodeBefore) return [];
-      const refreshed = this.deps.repos.runtime.getEpisode(latestEpisodeBefore.id);
-      if (refreshed && refreshed.id !== episode.id && refreshed.status === "closed") {
-        return [refreshed.id];
-      }
-      return [];
-    })();
     const latestEpisode = this.deps.repos.runtime.latestEpisodeForSession(session.id);
     const routeProposalPromise = this.proposeEpisodeRouteWithLlm(
       latestEpisode,
@@ -1225,9 +1208,7 @@ export class SessionTurnService {
       episodeId: latestEpisode?.id,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.deps.config.domain),
-      layers: endTopicDecision
-        ? []
-        : requestedLayers,
+      layers: endTopicDecision ? [] : requestedLayers,
       limit: this.deps.turnStartRetrievalLimit(),
       contextBudget: supplementalContextBudget,
       includeInjectedContext: true,
@@ -1236,7 +1217,9 @@ export class SessionTurnService {
       injectedContextQuery: request.query,
       turnIntentDecision: intentDecision
     });
-    const search = await searchPromise;
+    const [routeProposal, search] = await Promise.all([routeProposalPromise, searchPromise]);
+    this.persistTurnStartRouteProposal(search.searchEventId, routeProposal);
+
     const supplementalMarkdown = search.injectedContext.markdown.trim();
     const combinedMarkdown = supplementalMarkdown
       ? `${projectContext.markdown}\n\n${supplementalMarkdown}`
@@ -1272,14 +1255,18 @@ export class SessionTurnService {
       markdown: includeSupplemental ? combinedMarkdown : projectContext.markdown,
       tokenEstimate: includeSupplemental ? combinedTokenEstimate : projectTokenEstimate
     };
-    const contextPacketId = `ctx_${stableHash(`${session.id}:${episode.id}:${turnId}:${search.searchEventId}`).slice(0, 20)}`;
-    const routeProposal = await routeProposalPromise;
+    const contextPacketId = turnContextPacketId(
+      session.id,
+      routeProposal.baseEpisodeId,
+      turnId,
+      search.searchEventId
+    );
+    this.deps.repos.runtime.touchSession(session.id, nowIso());
+
     const response: TurnStartResponse = {
       contextPacketId,
       turnId,
       sessionId: session.id,
-      episodeId: episode.id,
-      closedEpisodeIds,
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext,
@@ -1291,65 +1278,16 @@ export class SessionTurnService {
         ...(intentDecision.kind === "chitchat" || intentDecision.kind === "meta"
           ? [`intent:${intentDecision.kind}:retrieval_skipped`]
           : []),
-        ...(endTopicDecision ? ["relation:end_topic"] : []),
-        `relation:${routeProposal?.relationDecision?.relation ?? "continue"}:proposed`
+        `relation:${routeProposal.relationDecision.relation}:proposed`
       ],
       serverTime: nowIso()
     };
-    if (!existingRawTurn) {
-      const at = nowIso();
-      this.deps.repos.runtime.touchSession(session.id, at);
-      const rawTurn = this.deps.repos.runtime.insertRawTurn({
-        id: rawTurnIdForSessionTurn(session.id, turnId),
-        sessionId: session.id,
-        episodeId: episode.id,
-        turnId,
-        userId: session.userId,
-        conversationId: session.conversationId,
-        userText: request.query,
-        toolCalls: [],
-        toolResults: [],
-        sourceMemoryIds,
-        usage: {},
-        messagePayload: {
-          turn_start: {
-            contextPacketId,
-            searchEventId: search.searchEventId,
-            sourceMemoryIds,
-            projectContextVersion: projectContext.version,
-            projectContextStatus: projectContext.status,
-            protocolVersion: request.protocolVersion,
-            provenance: request.provenance,
-            intent_decision: intentDecision,
-            ...(endTopicDecision
-              ? {
-                  episode_close: {
-                    closeAfterComplete: true,
-                    decision: endTopicDecision
-                  }
-                }
-              : {}),
-            response
-          }
-        },
-        status: "started",
-        createdAt: at
-      });
-      this.deps.repos.runtime.appendEpisodeRawTurn(episode.id, rawTurn.id, at);
-      this.deps.repos.runtime.appendChange({
-        memoryId: rawTurn.id,
-        namespaceId: this.deps.namespaceIdFromSession(session),
-        kind: "raw_turn",
-        op: "created",
-        entityId: rawTurn.id,
-        userId: session.userId,
-        changeType: "raw_turn_created",
-        after: rawTurn,
-        source: "turn.start",
-        createdAt: at
-      });
-    }
-
+    const recall = this.deps.repos.runtime.getRecallEvent(search.searchEventId);
+    this.deps.repos.runtime.updateRecallEventRequest(search.searchEventId, {
+      ...(isRecord(recall?.request) ? recall.request : {}),
+      routeProposal,
+      turnStartResponse: response
+    });
     return response;
   }
 
@@ -1562,11 +1500,24 @@ export class SessionTurnService {
       const requestToolCalls = normalizeCompleteTurnToolCalls(completionRequest);
       const requestToolResults = normalizeCompleteTurnToolResults(completionRequest);
       const requestArtifacts = normalizeCompleteTurnArtifacts(completionRequest);
+      const recalledTurnStartResponse = isRecord(turnStartRecall?.request) &&
+        isRecord(turnStartRecall.request.turnStartResponse)
+        ? turnStartRecall.request.turnStartResponse
+        : null;
+      const recalledProjectContext = isRecord(recalledTurnStartResponse?.projectContext)
+        ? recalledTurnStartResponse.projectContext
+        : null;
       const turnStartPayload = {
         protocolVersion: request.protocolVersion,
         provenance: request.provenance,
         intent_decision: intentDecision,
         routeProposal: recalledProposal ?? route.proposal,
+        ...(recalledProjectContext
+          ? {
+              projectContextVersion: recalledProjectContext.version,
+              projectContextStatus: recalledProjectContext.status
+            }
+          : {}),
         ...(route.proposalStale ? { routeProposalStale: true } : {}),
         ...(turnStartRecall
           ? {

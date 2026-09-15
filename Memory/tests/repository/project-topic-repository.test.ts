@@ -173,7 +173,7 @@ describe("project topic repository", () => {
       // Promise executors are required here because this package targets ES2022, before Promise.withResolvers.
       const readySignal = new Promise<void>((resolve, reject) => { markReady = resolve; rejectReady = reject; });
       const resultSignal = new Promise<AnalysisRunResult[]>((resolve, reject) => { resolveResults = resolve; rejectResults = reject; });
-      const worker = new Worker(workerUrl, { execArgv: ["--import", "tsx"], workerData: { barrier, now: NOW, path, rounds, writer: writerId } });
+      const worker = new Worker(workerUrl, { workerData: { barrier, now: NOW, path, rounds, writer: writerId } });
       let receivedResults = false;
       const exitSignal = new Promise<void>((resolve, reject) => {
         worker.once("exit", (code) => {

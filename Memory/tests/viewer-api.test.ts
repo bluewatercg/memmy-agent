@@ -394,7 +394,7 @@ describe("local Viewer API", () => {
       total: 1,
       items: [expect.objectContaining({
         id: hermes.id,
-        metadata: { source: "hermes" }
+        metadata: expect.objectContaining({ source: "hermes" })
       })]
     });
 

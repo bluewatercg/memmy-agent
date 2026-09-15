@@ -737,7 +737,9 @@ async function ingestStagedMessages(
   let latestSeenAt: string | null = null;
   const errors: string[] = [];
   let errorCount = 0;
+  const total = store.count(sourceId);
   let activeConversationId: string | null = null;
+  let activeConversationSelected = true;
   let activeConversationFailed = false;
   const commitConversation = () => {
     if (!activeConversationId || activeConversationFailed) return;
@@ -778,10 +780,10 @@ async function ingestStagedMessages(
     if (turn.conversationId !== activeConversationId) {
       commitConversation();
       activeConversationId = turn.conversationId;
+      activeConversationSelected = store.getConversationMeta(sourceId, turn.conversationId)?.selected !== false;
       activeConversationFailed = false;
     }
-    const conversationMeta = store.getConversationMeta(sourceId, turn.conversationId);
-    if (conversationMeta?.selected === false) continue;
+    if (!activeConversationSelected) continue;
     const selectedTurn = store.getTurnMeta(sourceId, turn.conversationId, stableTurnIdentity(turn));
     if (selectedTurn && !selectedTurn.selected) continue;
     let succeeded = true;
@@ -810,7 +812,7 @@ async function ingestStagedMessages(
       flush();
     }
     processed += turn.messages.length;
-    onProgress({ sourceId, phase: "add", current: processed, total: store.count(sourceId), message: "Adding raw memories" });
+    onProgress({ sourceId, phase: "add", current: processed, total, message: "Adding raw memories" });
   }
   flush(true);
   commitConversation();

@@ -2,6 +2,7 @@
 // Spawns the real bridge script and drives it over stdio (MCP protocol).
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,13 +11,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const BRIDGE = resolve(__dirname, "../../../scripts/mcp/memmy-mcp-bridge.mjs");
 const NODE_PATH = "/root/.dsh/profiles/web/node_modules";
 const TOKEN = process.env.MEMMY_MEMORY_TOKEN ?? "cg276686433";
+const URL = process.env.MEMMY_URL ?? process.env.MEMMY_MEMORY_URL ?? "http://127.0.0.1:39000";
 const TEST_SOURCE = `deepseek_harness_test_${process.pid}`;
 const TEST_SESSION_ID = `bridge-test-session-${process.pid}`;
 const SIGNAL_SESSION_ID = `signal-test-${process.pid}`;
 
 function spawnBridge(env: Record<string, string> = {}): { child: ChildProcess; rpc: (method: string, params: Record<string, unknown>) => Promise<unknown>; close: () => void } {
   const child = spawn("node", [BRIDGE], {
-    env: { ...process.env, NODE_PATH, MEMMY_SOURCE: TEST_SOURCE, MEMMY_USER_ID: `test-${process.pid}`, MEMMY_TOKEN: TOKEN, ...env },
+    env: { ...process.env, NODE_PATH, MEMMY_URL: URL, MEMMY_SOURCE: TEST_SOURCE, MEMMY_USER_ID: `test-${process.pid}`, MEMMY_TOKEN: TOKEN, ...env },
   });
   let nextId = 1;
   const pending = new Map<number, (v: unknown) => void>();
@@ -91,13 +93,24 @@ describe("memmy MCP bridge", () => {
   });
 
   it("fails cleanly with a bad token", async () => {
-    const bad = spawnBridge({ MEMMY_TOKEN: "wrong-token-xyz" });
+    const unauthorized = createServer((_request, response) => {
+      response.writeHead(401, { "content-type": "application/json" });
+      response.end(JSON.stringify({ error: { message: "invalid memory service token" } }));
+    });
+    await new Promise<void>((resolve) => unauthorized.listen(0, "127.0.0.1", resolve));
+    const address = unauthorized.address();
+    const bad = spawnBridge({
+      MEMMY_TOKEN: "wrong-token-xyz",
+      MEMMY_URL: `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`
+    });
     try {
       await bad.rpc("initialize", { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } });
       const search = await bad.rpc("tools/call", { name: "memmy_search", arguments: { query: "x", limit: 1 } }) as { isError?: boolean; content?: Array<{ text: string }> };
       expect(search.isError).toBe(true);
+      expect(search.content?.[0]?.text).toContain("401: invalid memory service token");
     } finally {
       bad.close();
+      await new Promise<void>((resolve, reject) => unauthorized.close((error) => error ? reject(error) : resolve()));
     }
   });
 

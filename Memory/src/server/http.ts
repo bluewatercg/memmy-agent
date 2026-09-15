@@ -864,20 +864,22 @@ async function routeRequest(
     const request = rawRequest.l3WorldModelProtocolVersion === 2
       ? parseV2OpenSessionRequest(strictEnvelopeWithPrincipal(rawRequest, principal))
       : envelopeWithPrincipal(rawRequest, principal) as SessionOpenRequest;
-    const publicRequest: SessionOpenRequest = {
-      requestId: request.requestId,
-      adapterId: request.adapterId,
-      namespace: request.namespace,
-      source: request.source ?? request.namespace?.source,
-      profileId: request.profileId ?? request.namespace?.profileId,
-      projectId: request.namespace?.projectId,
-      workspaceId: request.namespace?.workspaceId,
-      sessionId: request.sessionId,
-      workspacePath: request.workspacePath ?? request.namespace?.workspacePath,
-      meta: isRecord(request.meta) ? request.meta : undefined,
-      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
-      provenance: isRecord(request.provenance) ? request.provenance : undefined
-    };
+    const publicRequest: SessionOpenRequest = request.l3WorldModelProtocolVersion === 2
+      ? request
+      : {
+          requestId: request.requestId,
+          adapterId: request.adapterId,
+          namespace: request.namespace,
+          source: request.source ?? request.namespace?.source,
+          profileId: request.profileId ?? request.namespace?.profileId,
+          projectId: request.namespace?.projectId,
+          workspaceId: request.namespace?.workspaceId,
+          sessionId: request.sessionId,
+          workspacePath: request.workspacePath ?? request.namespace?.workspacePath,
+          meta: isRecord(request.meta) ? request.meta : undefined,
+          protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
+          provenance: isRecord(request.provenance) ? request.provenance : undefined
+        };
     const result = service.openSession(publicRequest);
     if (request.l3WorldModelProtocolVersion === 2 && (result as Record<string, unknown>).projectId) autoWorker.schedule();
     return publicOpenSessionResponse(result);
@@ -902,6 +904,50 @@ async function routeRequest(
       createL1: request.createL1 !== false
     });
   }
+  const l3TraceHead = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-trace-head$/);
+  if (method === "GET" && l3TraceHead) {
+    requireMemoryRead(principal);
+    const sessionId = decodeMatchSegment(l3TraceHead, 1);
+    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
+      requestId,
+      adapterId: url.searchParams.get("adapterId"),
+      source: url.searchParams.get("source") ?? undefined,
+      namespace: principal.namespace
+    }, principal));
+    return service.l3WorldModelTraceHead(sessionId, request);
+  }
+
+  const l3Boundary = match(path, /^\/api\/v1\/sessions\/([^/]+)\/l3-world-model-boundary$/);
+  if (method === "POST" && l3Boundary) {
+    requireMemoryWrite(principal);
+    const sessionId = decodeMatchSegment(l3Boundary, 1);
+    const request = L3WorldModelBoundaryRequestSchema.parse(
+      strictEnvelopeWithPrincipal(asObject(body, "l3-world-model.boundary"), principal)
+    );
+    const result = await service.idempotent(
+      "l3-world-model.boundary",
+      request,
+      { sessionId, request },
+      () => service.l3WorldModelBoundary(sessionId, request)
+    );
+    scheduleAutoWorkerForEvolution(result, autoWorker);
+    if (request.trigger === "token_compaction") autoWorker.schedule();
+    return result;
+  }
+
+  const l3Context = match(path, /^\/api\/v1\/l3-world-model\/sessions\/([^/]+)\/context$/);
+  if (method === "GET" && l3Context) {
+    requireMemoryRead(principal);
+    const sessionId = decodeMatchSegment(l3Context, 1);
+    const request = L3WorldModelRequestEnvelopeSchema.parse(strictEnvelopeWithPrincipal({
+      requestId,
+      adapterId: url.searchParams.get("adapterId"),
+      source: url.searchParams.get("source") ?? undefined,
+      namespace: principal.namespace
+    }, principal));
+    return service.l3WorldModelContext(sessionId, request);
+  }
+
 
   const sessionClose = match(path, /^\/api\/v1\/sessions\/([^/]+)\/close$/);
   if (method === "POST" && sessionClose) {
@@ -921,7 +967,39 @@ async function routeRequest(
     return service.importDshHistory({
       root: optionalString(request.root),
       maxSessionsPerRun: optionalPositiveInteger(request.maxSessionsPerRun, "dsh.import.maxSessionsPerRun"),
+      maxTurnsPerSession: optionalPositiveInteger(request.maxTurnsPerSession, "dsh.import.maxTurnsPerSession"),
+      maxSessionBytes: optionalPositiveInteger(request.maxSessionBytes, "dsh.import.maxSessionBytes"),
+      maxSessionTokens: optionalPositiveInteger(request.maxSessionTokens, "dsh.import.maxSessionTokens")
     });
+  }
+  if (method === "POST" && path === "/api/v1/dsh/claims") {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim");
+    const channel = request.channel;
+    if (channel !== "realtime" && channel !== "historical") throw new MemoryServiceError("invalid_argument", "dsh.claim channel must be realtime or historical");
+    return service.claimDshSession(requiredBodyString(request, "sessionId", "dsh.claim"), channel, requiredBodyString(request, "owner", "dsh.claim"));
+  }
+  if (method === "POST" && path === "/api/v1/dsh/claims/reap") {
+    requireMemoryWrite(principal);
+    return service.reapDshClaims();
+  }
+  const dshClaimHeartbeat = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)\/heartbeat$/);
+  if (method === "POST" && dshClaimHeartbeat) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim.heartbeat");
+    return service.renewDshClaim(decodeMatchSegment(dshClaimHeartbeat, 1), requiredBodyString(request, "owner", "dsh.claim.heartbeat"));
+  }
+  const dshClaim = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)$/);
+  if (method === "GET" && dshClaim) {
+    requireMemoryRead(principal);
+    const claim = service.getDshClaim(decodeMatchSegment(dshClaim, 1));
+    if (!claim) throw new MemoryServiceError("not_found", "dsh claim not found");
+    return { claim };
+  }
+  if (method === "DELETE" && dshClaim) {
+    requireMemoryWrite(principal);
+    const request = asObject(body, "dsh.claim.release");
+    return service.releaseDshClaim(decodeMatchSegment(dshClaim, 1), requiredBodyString(request, "owner", "dsh.claim.release"));
   }
   if (method === "POST" && path === "/api/v1/turns/start") {
     requireMemoryRead(principal);
@@ -1104,7 +1182,7 @@ async function routeRequest(
       targetMemoryIds?: unknown;
       priorityCohortOnly?: unknown;
     };
-    return service.runWorkerOnce(
+    return service.runWorkerWithEvolutionSummary(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
       {
         ...request,
@@ -1118,16 +1196,17 @@ async function routeRequest(
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "worker.retry-failed"), principal) as RequestEnvelope & { limit?: unknown };
     const limit = parseNumberValue(request.limit) ?? 100;
-    service.reconcileWorkerStartup(limit);
-    const worker = await service.runWorkerOnce(limit, request);
-    return { worker };
+    const retry = service.retryFailedWorkerJobs({ ...request, limit });
+    const worker = await service.runWorkerWithEvolutionSummary(limit, request);
+    return { ...retry, worker, generated: worker.generated };
   }
 
   if (method === "POST" && path === "/api/v1/worker/promote-candidates") {
     requireMemoryWrite(principal);
     const request = envelopeWithPrincipal(asObject(body, "worker.promote-candidates"), principal) as RequestEnvelope & { limit?: unknown };
     const promotion = service.promoteCandidates(request);
-    const worker = await service.runWorkerOnce(parseNumberValue(request.limit) ?? 100, request);
+    const worker = await service.runWorkerWithEvolutionSummary(parseNumberValue(request.limit) ?? 100, request);
+    return { ...promotion, worker, generated: worker.generated };
   }
 
   if (method === "GET" && path === "/api/v1/panel/overview") {
@@ -1393,6 +1472,26 @@ async function routeRequest(
     try {
       const run = await service.idempotent("topic-decision.approve", request, { sessionId, proposalId, request }, async () => {
         return service.approveProposal(request.namespace, sessionId, proposalId, request.expectedProposalVersion, decisionActor(request));
+      }, { exactReplay: true });
+      return publicTopicExecutionRun(run);
+    } catch (error) {
+      throw mapTopicDecisionError(error);
+    }
+  }
+
+  const topicDecisionResume = match(path, /^\/api\/v1\/topic-inbox\/decisions\/([^\/]+)\/executions\/([^\/]+)\/resume$/);
+  if (method === "POST" && topicDecisionResume) {
+    requirePanelWrite(principal);
+    const request = topicDecisionMutation(body, "topic-decision.resume", principal);
+    const sessionId = decodeMatchSegment(topicDecisionResume, 1);
+    const runId = decodeMatchSegment(topicDecisionResume, 2);
+    try {
+      const run = await service.idempotent("topic-decision.resume", request, { sessionId, runId, request }, async () => {
+        const detail = service.readTopicDecisionSession(request.namespace, sessionId);
+        if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) {
+          throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
+        }
+        return service.resumeExecution(request.namespace, runId);
       }, { exactReplay: true });
       return { result: publicTopicExecutionRun(run) };
     } catch (error) {
@@ -1704,14 +1803,21 @@ async function routeRequest(
   const memoryGet = match(path, /^\/api\/v1\/memory\/([^/]+)$/);
   if (method === "GET" && path === "/api/v1/memory/audit/markdown") {
     requireMemoryRead(principal);
-    return service.runWorkerOnce(0, { namespace: principal.namespace });
+    return service.exportMarkdown({
+      namespace: principal.namespace,
+      includeArchived: url.searchParams.get("includeArchived") === "true"
+    });
   }
 
   if (method === "POST" && path === "/api/v1/memory/audit/markdown/import") {
     requireMemoryWrite(principal);
     const request = requestWithPrincipal<MemoryMarkdownImportRequest>(body, "memory.audit.markdown.import", principal);
     requireStringField(request, "markdown", "memory.audit.markdown.import");
-    return { ok: false, error: "importMarkdown is not available in this build" };
+    return service.importMarkdown({
+      namespace: request.namespace,
+      markdown: request.markdown,
+      apply: request.apply !== false
+    });
   }
 
   if (method === "GET" && memoryGet) {
@@ -2013,6 +2119,14 @@ function authenticate(
   const auth = options.auth;
   const localToken = auth?.localServiceToken ?? options.apiKey;
   const candidate = tokenFromRequest(request, url);
+  if (
+    url.pathname === "/api/v1/admin/shutdown" &&
+    options.onShutdownRequested &&
+    !candidate &&
+    (!request.socket.remoteAddress || request.socket.remoteAddress === "127.0.0.1" || request.socket.remoteAddress === "::1" || request.socket.remoteAddress.startsWith("::ffff:127."))
+  ) {
+    return { kind: "anonymous", scopes: ["admin:write"] };
+  }
   if (localToken && candidate === localToken) {
     return {
       kind: "local",
@@ -2431,8 +2545,9 @@ function nullableString(value: unknown, routeName: string): string | null | unde
   if (typeof value !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} field must be a string or null`);
   return value;
 }
-function workItemStatus(value: unknown, routeName: string): "active" | "completed" | "archived" {
-  if (value === "active" || value === "completed" || value === "archived") return value;
+function workItemStatus(value: unknown, routeName: string): ProjectWorkItemCreateRequest["status"] | undefined {
+  if (value === undefined) return undefined;
+  if (value === "pending" || value === "active" || value === "blocked" || value === "completed" || value === "archived") return value;
   throw new MemoryServiceError("invalid_argument", `${routeName} status is invalid`);
 }
 function nullableWorkItemStatus(value: unknown, routeName: string): ProjectWorkItemUpdateRequest["status"] {

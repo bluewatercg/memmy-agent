@@ -100,14 +100,28 @@ export function panelNamespaceForMemory(memory: MemoryRow, session?: SessionReco
     label: panelNamespaceLabel(projectId, workspacePath, workspaceId)
   };
 }
+function panelNamespaceForStatsRow(memory: MemoryStatsRow, session?: SessionRecord): PanelNamespaceSummary {
+  const tenantId = firstString(session?.meta.tenant_id, session?.meta.tenantId, memory.tenantId) ?? "local";
+  const projectId = firstString(session?.projectId, memory.projectId, memory.appId) ?? "unscoped";
+  const workspaceId = firstString(session?.workspaceId, memory.workspaceId, memory.appId);
+  const workspacePath = firstString(session?.workspacePath, memory.workspacePath);
+  return {
+    tenantId,
+    projectId,
+    workspaceId,
+    workspacePath,
+    label: panelNamespaceLabel(projectId, workspacePath, workspaceId)
+  };
+}
+
 
 export function panelNamespaceDistribution(
-  memories: MemoryRow[],
-  sessionForMemory: (memory: MemoryRow) => SessionRecord | undefined
+  memories: MemoryStatsRow[],
+  sessionForMemory: (memory: MemoryStatsRow) => SessionRecord | undefined
 ): Array<PanelNamespaceSummary & { count: number; percentage: number }> {
   const counts = new Map<string, { namespace: PanelNamespaceSummary; count: number }>();
   for (const memory of memories) {
-    const namespace = panelNamespaceForMemory(memory, sessionForMemory(memory));
+    const namespace = panelNamespaceForStatsRow(memory, sessionForMemory(memory));
     const key = `${namespace.tenantId}:${namespace.projectId}:${namespace.workspaceId ?? ""}`;
     const current = counts.get(key);
     if (current) {

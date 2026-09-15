@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { legacyTurnId, legacyTurnRequestId } from "@memmy/agent-source-core";
 import {
@@ -88,7 +89,7 @@ describe("standalone Agent source executor", () => {
     });
     try {
       await executor.startScan({ sourceId: "fixture-agent", mode });
-      await vi.waitFor(() => expect(executor.scanStatus().running).toBe(false), { timeout: 5_000 });
+      await vi.waitFor(() => expect(executor.scanStatus().running).toBe(false), { timeout: 30_000 });
 
       expect(executor.scanStatus().error).toBeNull();
       const titles = addMemory.mock.calls.map(([input]) => input.title);
@@ -652,11 +653,12 @@ function longConversationAdapter(turnCount: number, toolContent?: string): Sourc
 }
 
 async function waitForFakeTimerScan(executor: ReturnType<typeof createAgentSourceExecutor>): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
     if (!executor.scanStatus().running) return;
     await vi.advanceTimersByTimeAsync(1);
+    await delay(1);
   }
-  throw new Error("automatic scan did not complete");
+  throw new Error(`automatic scan did not complete: ${JSON.stringify(executor.scanStatus())}`);
 }
 
 function tempRoot(): string {

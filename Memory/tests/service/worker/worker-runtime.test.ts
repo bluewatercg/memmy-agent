@@ -48,6 +48,7 @@ describe("MemoryService / worker / runtime", () => {
        GROUP BY memory_layer`
     ).all() as Array<{ layer: string; count: number }>;
     expect(layers).toEqual([{ layer: "L1", count: 5 }]);
+  });
   it("leases L3 World Model updates FIFO per field while allowing different fields in parallel", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
@@ -336,5 +337,4 @@ describe("MemoryService / worker / runtime", () => {
 
     db.close();
   });
-});
 });
