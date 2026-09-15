@@ -2035,7 +2035,7 @@ const table = computed<Record<string, string>>(() => (locale.value === "zh" ? zh
 export function t(key: TranslationKey, vars?: Record<string, string | number>): string {
   const raw = table.value[key] ?? (en as Record<string, string>)[key] ?? key;
   if (!vars) return raw;
-  return raw.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? `{${name}}`));
+  return raw.replace(/\{(\w+)\}/g, (_: string, name: string) => String(vars[name] ?? `{${name}}`));
 }
 
 export function setLocale(next: Locale): void {

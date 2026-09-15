@@ -5,8 +5,10 @@ import { access, lstat, readFile, readdir, realpath, stat } from "node:fs/promis
 import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, parse, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
-import createIgnore from "ignore";
+import type { Ignore } from "ignore";
+const createIgnore: () => Ignore = createRequire(import.meta.url)("ignore");
 import {
   canonicalJson,
   isLocalWorkspaceUri,

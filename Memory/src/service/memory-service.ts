@@ -868,6 +868,7 @@ export class MemoryService {
     return { ok: summary.ok && evolution.ok, checkedAt, models: { summary, evolution } };
   }
 
+
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
     const previousConfig = this.config;
     const loader = this.options.configLoader ?? loadMemmyConfig;
@@ -2863,6 +2864,141 @@ export class MemoryService {
       });
     });
     return { accepted: jobs.length, candidateCount: candidates.length, memoryIds, jobs: jobs.map(jobToRef), serverTime: nowIso() };
+  }
+
+  exportMarkdown(request: MemoryMarkdownExportRequest = {}): {
+    count: number;
+    markdown: string;
+    serverTime: string;
+  } {
+    const context = this.resolveContext(request);
+    const memories = this.repos.memories.list(
+      {
+        ...memoryFilterForNamespace(context.namespace),
+        ...(request.includeArchived ? {} : { status: "activated" })
+      },
+      10_000
+    );
+    const markdown = renderMemoryMarkdownBundle(memories);
+    return { count: memories.length, markdown, serverTime: nowIso() };
+  }
+
+  importMarkdown(request: MemoryMarkdownImportRequest): {
+    updated: string[];
+    created: string[];
+    rejected: Array<{ id: string; reason: string }>;
+    serverTime: string;
+  } {
+    const context = this.resolveContext(request);
+    const parsed = parseMemoryMarkdownBundle(request.markdown);
+    const updated: string[] = [];
+    const created: string[] = [];
+    const rejected: Array<{ id: string; reason: string }> = [];
+    const at = nowIso();
+    for (const { frontMatter, body } of parsed) {
+      const existing = this.repos.memories.get(frontMatter.id);
+      if (!existing) {
+        rejected.push({ id: frontMatter.id, reason: "memory not found" });
+        continue;
+      }
+      try {
+        this.assertMemoryInScope(existing, context.namespace);
+      } catch {
+        rejected.push({ id: frontMatter.id, reason: "memory not found" });
+        continue;
+      }
+      if (request.apply) {
+        this.repos.memories.update(
+          {
+            ...existing,
+            memoryValue: body,
+            info: { ...existing.info, title: frontMatter.title, tags: frontMatter.tags },
+            properties: {
+              ...existing.properties,
+              tags: frontMatter.tags,
+              info: { ...existing.properties.info, title: frontMatter.title, tags: frontMatter.tags }
+            },
+            tags: frontMatter.tags,
+            contentHash: stableHash(body),
+            updatedAt: at
+          },
+          existing.version
+        );
+        this.repos.runtime.insertAudit({
+          userId: existing.userId,
+          sessionId: existing.sessionId,
+          actor: request.namespace ? { ...request.namespace } : {},
+          action: "markdown_update",
+          targetKind: kindFromMemory(existing),
+          targetId: existing.id,
+          before: existing,
+          meta: { source: "markdown_import" },
+          createdAt: at
+        });
+        updated.push(frontMatter.id);
+      } else {
+        updated.push(frontMatter.id);
+      }
+    }
+    return { updated, created, rejected, serverTime: nowIso() };
+  }
+
+  retryFailedWorkerJobs(request: { limit?: number } = {}): {
+    retried: number;
+    serverTime: string;
+  } {
+    const limit = request.limit ?? 100;
+    const failedIds = this.repos.runtime.listJobs("failed", limit)
+      .concat(this.repos.runtime.listJobs("dead_letter", limit))
+      .map((job) => job.id);
+    const results = this.repos.runtime.retryFailedJobIds(failedIds);
+    return { retried: results.length, serverTime: nowIso() };
+  }
+
+  embeddingMaintenanceStats(): {
+    pending: number;
+    inProgress: number;
+    succeeded: number;
+    failed: number;
+    serverTime: string;
+  } {
+    return {
+      pending: this.repos.runtime.countEmbeddingRetriesByStatus("pending"),
+      inProgress: this.repos.runtime.countEmbeddingRetriesByStatus("in_progress"),
+      succeeded: this.repos.runtime.countEmbeddingRetriesByStatus("succeeded"),
+      failed: this.repos.runtime.countEmbeddingRetriesByStatus("failed"),
+      serverTime: nowIso()
+    };
+  }
+
+  rebuildEmbeddings(request: RequestEnvelope = {}): {
+    enqueued: number;
+    serverTime: string;
+  } {
+    const context = this.resolveContext(request);
+    const memories = this.repos.memories.list(
+      { ...memoryFilterForNamespace(context.namespace), status: "activated" },
+      10_000
+    );
+    let enqueued = 0;
+    const at = nowIso();
+    for (const memory of memories) {
+      this.repos.memories.deleteVector(memory.id, memory.memoryLayer === "L1" ? "vec_summary" : "vec");
+      this.workerHandlers.enqueueJob({
+        jobType: "embedding",
+        userId: memory.userId,
+        sessionId: memory.sessionId,
+        targetMemoryId: memory.id,
+        payload: { source: "rebuild", contentHash: memory.contentHash },
+        createdAt: at
+      });
+      enqueued++;
+    }
+    return { enqueued, serverTime: nowIso() };
+  }
+
+  hubRecords(limit = 50): unknown[] {
+    return this.repos.runtime.listJobs("succeeded", limit);
   }
 
   private restartFailedProcessing(at: string, limit = 10000): number {

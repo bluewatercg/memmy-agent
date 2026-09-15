@@ -1,10 +1,19 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
-import { insertActivePolicyMemory } from "../../fixtures/evolution-fixture.js";
+import {
+  insertActivePolicyMemory,
+  makeTraceEligibleForL2,
+  setPolicySignatureAndVectorForTest
+} from "../../fixtures/evolution-fixture.js";
+import { createCapturingL2Llm } from "./evolution-llm-stubs.js";
 
 const {
   cleanup: cleanupMemoryServiceFixture,
+  createTestMemoryService,
+  createTestRoot,
   createTestService
 } = createMemoryServiceFixture();
 

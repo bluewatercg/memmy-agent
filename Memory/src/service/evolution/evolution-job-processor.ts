@@ -29,6 +29,7 @@ import {
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { isInactiveEvolutionMemory } from "./evolution-memory-lifecycle.js";
 import { L3WorldModelTraceFieldPipeline } from "./l3-world-model-pipeline.js";
+import { WorldModelPipeline } from "./world-model-pipeline.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { AssetRewardService } from "./asset-reward-service.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
@@ -90,7 +91,6 @@ export class EvolutionJobProcessor {
   private readonly skill: SkillPipeline;
   private readonly span: SpanPipeline;
   private readonly bigTurnSpan: BigTurnSpanPipeline;
-  private readonly worldModel: WorldModelPipeline;
   private readonly assets: AssetLifecycleService;
   private readonly assetRewards: AssetRewardService;
   private readonly l3WorldModel: L3WorldModelTraceFieldPipeline;
@@ -142,14 +142,7 @@ export class EvolutionJobProcessor {
     });
     this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
-      get config() { return owner.deps.config; },
-      get skillLlm() { return owner.deps.skillLlm; },
-      traceMeta: deps.traceMeta,
-      buildMemory: deps.buildMemory,
-      upsertEvolutionMemory: this.upsertEvolutionMemory.bind(this),
-      isInactiveEvolutionMemory,
-      enqueueJob: deps.enqueueJob,
-      namespaceIdFromMemory: deps.namespaceIdFromMemory
+      skillLlm: deps.skillLlm
     });
     this.span = new SpanPipeline({
       repos: deps.repos,

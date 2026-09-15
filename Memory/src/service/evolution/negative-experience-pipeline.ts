@@ -270,12 +270,12 @@ export class NegativeExperiencePipeline {
     const repairId = text(job.payload.repairId);
     const feedback = feedbackId ? this.deps.repos.runtime.getFeedback(feedbackId) : undefined;
     const repair = repairId ? this.deps.repos.runtime.getDecisionRepair(repairId) : undefined;
-    const sourceMemory = feedback?.l1MemoryId
+    const feedbackSourceMemory = feedback?.l1MemoryId
       ? this.deps.repos.memories.get(feedback.l1MemoryId)
       : [...episode.l1MemoryIds].reverse()
           .map((id) => this.deps.repos.memories.get(id))
           .find((memory): memory is MemoryRow => Boolean(memory));
-    const sourceTrace = sourceMemory ? traceMetaFromMemory(sourceMemory) : null;
+    const sourceTrace = feedbackSourceMemory ? traceMetaFromMemory(feedbackSourceMemory) : null;
     const rawTurns = this.deps.repos.runtime.listRawTurnsByEpisode(episode.id);
     const trigger = text(job.payload.triggerCondition)
       ?? text(sourceTrace?.userText)
@@ -318,7 +318,7 @@ export class NegativeExperiencePipeline {
       sourceBasis,
       sourceEventId,
       episode,
-      sourceMemory,
+      sourceMemory: feedbackSourceMemory,
       feedback,
       repair,
       trigger: clip(trigger, 240),
