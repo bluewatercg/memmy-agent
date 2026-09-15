@@ -192,6 +192,11 @@ describe("MemoryService / REST contract", () => {
       expect((await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify({ namespace }) })).status).toBe(403);
       const refresh = await fetch(`${base}/api/v1/topic-inbox/refresh`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace }) });
       expect(await refresh.json()).toEqual({ jobId: "job-1", unchanged: true });
+      service.reviewProjectTopicCandidate = async (_namespace, candidateId, force) => ({ candidate: service.listProjectTopicInbox(namespace).topics[0]!.candidates[0]!, summary: { recommendation: "edit_and_approve", confidence: 0.86, summary: "Two reviewers support a scoped edit.", suggestedEdits: { title: "Use shared contracts" }, reviews: [] }, cached: !force });
+      expect((await fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/review`, { method: "POST", headers: { authorization: "Bearer reader", "content-type": "application/json" }, body: JSON.stringify({ namespace }) })).status).toBe(403);
+      const review = await fetch(`${base}/api/v1/topic-inbox/candidates/candidate-1/review`, { method: "POST", headers: { authorization: "Bearer writer", "content-type": "application/json" }, body: JSON.stringify({ namespace, force: true }) });
+      expect(review.status).toBe(200);
+      expect(await review.json()).toMatchObject({ candidateId: "candidate-1", recommendation: "edit_and_approve", suggestedEdits: { title: "Use shared contracts" }, cached: false });
       expect((await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=500`, { headers: { authorization: "Bearer reader" } })).status).toBe(400);
       const evidence = await fetch(`${base}/api/v1/topic-inbox/topics/topic-1/evidence?namespace=${encoded}&limit=100`, { headers: { authorization: "Bearer reader" } });
       const expanded = await evidence.json() as { items: unknown[]; limit: number }; expect(expanded.limit).toBe(100); expect(expanded.items).toHaveLength(100);

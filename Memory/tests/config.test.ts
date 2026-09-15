@@ -55,6 +55,15 @@ describe("memmy memory config", () => {
     expect(config.evolution.timeoutMs).toBe(180_000);
   });
 
+  it("loads distinct topic review models from the environment", () => {
+    const root = tempRoot();
+    const configPath = join(root, "config.yaml");
+    writeFileSync(configPath, YAML.stringify({ memmyMemory: {} }));
+    setEnv("MEMMY_TOPIC_REVIEW_MODELS", " MiniMax-M2.5, qwen3.7-plus,MiniMax-M2.5, glm-5 ");
+
+    expect(loadMemmyConfig(configPath).config.topicReviewModels).toEqual(["MiniMax-M2.5", "qwen3.7-plus", "glm-5"]);
+  });
+
   it("expands home-relative sqlite paths from config files", () => {
     const root = tempRoot();
     const configPath = join(root, "config.yaml");

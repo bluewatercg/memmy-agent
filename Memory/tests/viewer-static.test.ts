@@ -230,6 +230,16 @@ describe("memoryPanelHtml", () => {
     expect(memoryPanelHtml()).toContain("Approve proposal");
   });
 
+  it("exposes multi-AI review controls and recommendations in the topic inbox", () => {
+    const html = memoryPanelHtml();
+    expect(html).toContain('data-topic-action="ai-review"');
+    expect(html).toContain('data-topic-action="apply-ai-review"');
+    expect(html).toContain('/api/v1/topic-inbox/candidates/');
+    expect(html).toContain('/review');
+    expect(html).toContain('综合建议');
+    expect(html).toContain('采用 AI 建议');
+  });
+
   it("strips generated Summary prefixes from displayed memory titles", async () => {
     const harness = createViewerHarness();
     runViewerScript(harness);

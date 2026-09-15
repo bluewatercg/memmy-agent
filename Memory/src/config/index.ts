@@ -243,6 +243,7 @@ export interface MemmyConfig {
   summary: LlmConfig;
   evolution: LlmConfig;
   embedding: EmbeddingConfig;
+  topicReviewModels: string[];
   algorithm: AlgorithmConfig;
 }
 
@@ -298,6 +299,7 @@ export const DEFAULT_MEMMY_CONFIG: MemmyConfig = {
     cache: true,
     normalize: false
   },
+  topicReviewModels: ["MiniMax-M2.5", "qwen3.7-plus", "kimi-k2.5", "glm-5"],
   algorithm: {
     enableMemoryAdd: true,
     enableMemorySearch: true,
@@ -544,6 +546,7 @@ function configFromEnv(): Record<string, unknown> {
       timeoutMs: numberEnv("MEMMY_EMBEDDING_TIMEOUT_MS"),
       maxRetries: numberEnv("MEMMY_EMBEDDING_MAX_RETRIES")
     }),
+    topicReviewModels: process.env.MEMMY_TOPIC_REVIEW_MODELS?.split(",").map((model) => model.trim()).filter(Boolean),
     algorithm: compactRecord({
       enableMemoryAdd: booleanEnv("MEMMY_ENABLE_MEMORY_ADD"),
       enableMemorySearch: booleanEnv("MEMMY_ENABLE_MEMORY_SEARCH"),
@@ -577,6 +580,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
       }
     : normalizedEvolution;
   const embedding = normalizeEmbedding(asRecord(input.embedding));
+  const topicReviewModels = stringArrayValue(input.topicReviewModels, DEFAULT_MEMMY_CONFIG.topicReviewModels);
   const algorithm = normalizeAlgorithm(asRecord(input.algorithm));
   return {
     version: 1,
@@ -587,6 +591,7 @@ function normalizeConfig(input: Record<string, unknown>): MemmyConfig {
     summary,
     evolution,
     embedding,
+    topicReviewModels,
     algorithm
   };
 }
@@ -660,6 +665,12 @@ function normalizeLlm(input: Record<string, unknown>, defaults: LlmConfig): LlmC
     maxRetries: numberValue(input.maxRetries, defaults.maxRetries),
     malformedRetries: numberValue(input.malformedRetries, defaults.malformedRetries)
   };
+}
+
+function stringArrayValue(value: unknown, fallback: string[]): string[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const items = value.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
+  return items.length ? [...new Set(items)] : [...fallback];
 }
 
 function normalizeEmbedding(input: Record<string, unknown>): EmbeddingConfig {

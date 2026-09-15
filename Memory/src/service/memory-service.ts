@@ -202,6 +202,7 @@ import type { TopicCandidateDecision, TopicInboxQuery } from "./topic-inbox/topi
 import { TopicDecisionService } from "./topic-decision/topic-decision-service.js";
 import type { TopicDecisionStartInput, TopicDecisionStartResult, TopicDecisionDetail } from "./topic-decision/decision-types.js";
 import type { TopicAgentSpec, TopicExecutionRunRecord } from "../types.js";
+import { CandidateReviewService } from "./topic-inbox/candidate-review.js";
 
 const serviceLogger = createMemoryLogger("memory-service");
 
@@ -304,6 +305,7 @@ export class MemoryService {
   private readonly skillReadModel: SkillReadModel;
   private readonly topicInbox: ProjectTopicInboxService;
   private readonly topicDecisions: TopicDecisionService;
+  private readonly candidateReviews: CandidateReviewService;
   private readonly workerHandlers: ReturnType<typeof createWorkerJobHandlers>;
   private readonly workerRunner: WorkerRunner;
   private readonly repos: Repositories;
@@ -425,6 +427,10 @@ export class MemoryService {
       models: this.config.algorithm.topicDecisions.models,
       createLlmClient: createTopicDecisionLlm,
       projectContextService: this.projectContext
+    });
+    this.candidateReviews = new CandidateReviewService({
+      repos: this.repos,
+      reviewers: () => this.config.topicReviewModels.map((model) => createLlmClient({ ...resolveEvolutionConfig(this.config), model }, { modelRole: "memory_evolution", agentRegion: resolveMemoryAgentRegion(this.config.activeProfile) }))
     });
     const trialOwner = this;
     this.skillTrials = new SkillTrialResolver({
@@ -2000,6 +2006,11 @@ export class MemoryService {
   decideProjectTopicCandidate(namespace: RuntimeNamespace, candidateId: string, decision: TopicCandidateDecision) {
     this.assertProjectContextScope(namespace);
     return this.topicInbox.decide(namespace, candidateId, decision);
+  }
+
+  reviewProjectTopicCandidate(namespace: RuntimeNamespace, candidateId: string, force = false) {
+    this.assertProjectContextScope(namespace);
+    return this.candidateReviews.review(namespace, candidateId, force);
   }
 
   refreshProjectTopicInbox(namespace: RuntimeNamespace) {

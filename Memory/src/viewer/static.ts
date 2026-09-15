@@ -302,6 +302,11 @@ export function memoryPanelHtml(): string {
     .candidate-list { display: grid; gap: 8px; padding: 10px 12px; }
     .candidate-card { padding: 10px; border: 1px solid var(--line); border-radius: 6px; }
     .candidate-card p { margin: 7px 0; color: var(--ink-secondary); line-height: 1.5; }
+    .ai-review { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--line); }
+    .ai-review-head, .ai-review-row { display: grid; grid-template-columns: minmax(120px, 0.6fr) minmax(100px, 0.45fr) minmax(0, 2fr); gap: 8px; align-items: start; }
+    .ai-review-head { margin-bottom: 7px; }
+    .ai-review-row { padding: 6px 0; border-top: 1px solid var(--line); font-size: 12px; }
+    .ai-review-row span:last-child { color: var(--ink-secondary); overflow-wrap: anywhere; }
     .topic-evidence { padding: 0 12px 12px; }
     .evidence-item { padding: 9px 0; border-top: 1px solid var(--line); }
     .evidence-item p { margin-top: 4px; color: var(--ink-secondary); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -1583,9 +1588,22 @@ export function memoryPanelHtml(): string {
     function renderTopicCard(topic) {
       const candidates = (topic.candidates || []).filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
       const evidence = state.topicEvidence[topic.id];
+<<<<<<< Updated upstream
       const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
+=======
+      const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map(renderTopicCandidate).join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
+>>>>>>> Stashed changes
       const evidenceHtml = evidence ? '<div class="topic-evidence">' + (evidence.items || []).map((item) => '<article class="evidence-item"><div class="tag-list"><span class="pill mono">' + esc(item.memoryId) + '</span><span class="pill">' + esc(item.role) + '</span></div><p>' + esc(item.summary || item.rawText || "") + '</p></article>').join("") + '</div>' : '';
       return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="decision" data-topic-id="' + esc(topic.id) + '" class="primary">' + topicDecisionActionLabel(topic.id) + '</button><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
+    }
+    function topicReviewLabel(recommendation) { return { approve: "批准", edit_and_approve: "修改后批准", defer: "延后", reject: "拒绝" }[recommendation] || "失败"; }
+    function renderTopicCandidate(candidate) {
+      const review = candidate.aiReview;
+      const recommendation = review && review.recommendation;
+      const recommendationLabel = recommendation ? topicReviewLabel(recommendation) : "";
+      const reviewRows = review ? (review.reviews || []).map((item) => '<div class="ai-review-row"><strong>' + esc(item.model || "unknown") + '</strong><span class="pill">' + esc(topicReviewLabel(item.recommendation)) + ' ' + esc(Math.round(Number(item.confidence || 0) * 100)) + '%</span><span>' + esc(item.error || item.reasoning || "无评审说明") + '</span></div>').join("") : '';
+      const reviewHtml = review ? '<div class="ai-review"><div class="ai-review-head"><strong>综合建议</strong><span class="pill">' + esc(recommendationLabel) + ' ' + esc(Math.round(Number(review.confidence || 0) * 100)) + '%</span><span class="muted">' + esc(review.summary || "") + '</span></div>' + reviewRows + '</div>' : '';
+      return '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p>' + reviewHtml + '<div class="candidate-actions"><button data-topic-action="ai-review" data-candidate-id="' + esc(candidate.id) + '" class="ghost">' + (review ? '重新评审' : 'AI 评审') + '</button>' + (review ? '<button data-topic-action="apply-ai-review" data-candidate-id="' + esc(candidate.id) + '">采用 AI 建议</button>' : '') + '<button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="danger">拒绝</button></div></article>';
     }
     function selectedTopicNamespace() { const namespace = namespaceFromOption($("topicInboxProject").value); if (!namespace) throw new Error("请先选择项目 / Workspace"); return topicNamespace(namespace); }
     async function loadTopicInbox() {
@@ -1601,12 +1619,23 @@ export function memoryPanelHtml(): string {
     }
     function findTopic(topicId) { return (state.topicInbox.projects || []).flatMap((project) => project.topics || []).find((topic) => topic.id === topicId); }
     function findCandidate(candidateId) { for (const topic of (state.topicInbox.projects || []).flatMap((project) => project.topics || [])) { const candidate = (topic.candidates || []).find((item) => item.id === candidateId); if (candidate) return candidate; } }
-    async function decideTopicCandidate(action, candidateId) {
+    async function decideTopicCandidate(action, candidateId, defaults) {
       const namespace = selectedTopicNamespace(); const candidate = findCandidate(candidateId); if (!candidate) return;
       let input = { ...topicMutation(namespace), action, expectedVersion: candidate.version };
-      if (action === "edit_and_approve") { const title = prompt("候选标题", candidate.title); if (!title) return; const conclusion = prompt("候选结论", candidate.conclusion); if (!conclusion) return; const proposedLayer = prompt("目标层级：L2、L3 或 Skill", candidate.proposedLayer); if (!proposedLayer || !["L2", "L3", "Skill"].includes(proposedLayer)) return; input = { ...input, title, conclusion, proposedLayer }; }
-      if (action === "reject" || action === "defer") input.reason = prompt(action === "reject" ? "拒绝原因（可选）" : "延后原因（可选）", "") || undefined;
+      if (action === "edit_and_approve") { const title = prompt("候选标题", defaults && defaults.title || candidate.title); if (!title) return; const conclusion = prompt("候选结论", defaults && defaults.conclusion || candidate.conclusion); if (!conclusion) return; const proposedLayer = prompt("目标层级：L2、L3 或 Skill", defaults && defaults.proposedLayer || candidate.proposedLayer); if (!proposedLayer || !["L2", "L3", "Skill"].includes(proposedLayer)) return; input = { ...input, title, conclusion, proposedLayer }; }
+      if (action === "reject" || action === "defer") input.reason = prompt(action === "reject" ? "拒绝原因（可选）" : "延后原因（可选）", defaults && defaults.reason || "") || undefined;
       await topicActionRequest("/api/v1/topic-inbox/candidates/" + encodeURIComponent(candidateId) + "/decision", input, action === "approve" || action === "edit_and_approve" ? "候选已批准" : action === "defer" ? "候选已延后" : "候选已拒绝");
+    }
+    async function reviewTopicCandidate(candidateId, force) {
+      const result = await api("/api/v1/topic-inbox/candidates/" + encodeURIComponent(candidateId) + "/review", { method: "POST", body: JSON.stringify({ namespace: selectedTopicNamespace(), force: Boolean(force) }) });
+      showToast(result.cached ? "已加载现有 AI 评审" : "多 AI 评审已完成");
+      await loadTopicInbox();
+    }
+    async function applyTopicReview(candidateId) {
+      const candidate = findCandidate(candidateId); const review = candidate && candidate.aiReview; if (!review) return;
+      const edits = review.suggestedEdits || {};
+      const reason = review.summary || "";
+      await decideTopicCandidate(review.recommendation, candidateId, review.recommendation === "edit_and_approve" ? edits : { reason });
     }
     async function toggleTopicEvidence(topicId) {
       if (state.topicEvidence[topicId]) { delete state.topicEvidence[topicId]; renderTopicInbox(state.topicInbox); return; }
@@ -1622,7 +1651,11 @@ export function memoryPanelHtml(): string {
       await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
     }
     async function topicActionRequest(path, input, success) { try { await api(path, { method: "POST", body: JSON.stringify(input) }); showToast(success); state.topicEvidence = {}; await loadTopicInbox(); } catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } }
+<<<<<<< Updated upstream
     function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "", button) : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
+=======
+    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "evidence" ? toggleTopicEvidence(button.dataset.topicId) : action === "merge" ? mergeTopic(button.dataset.topicId) : action === "split" ? splitTopic(button.dataset.topicId) : action === "ai-review" ? reviewTopicCandidate(button.dataset.candidateId, button.textContent === "重新评审") : action === "apply-ai-review" ? applyTopicReview(button.dataset.candidateId) : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId); Promise.resolve(task).catch(showError); }; }
+>>>>>>> Stashed changes
 
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }
     function renderConnectionStatus(status) {

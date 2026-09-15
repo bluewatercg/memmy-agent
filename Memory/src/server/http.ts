@@ -121,6 +121,7 @@ export const API_ROUTES = [
   "GET /api/v1/topic-inbox",
   "POST /api/v1/topic-inbox/refresh",
   "POST /api/v1/topic-inbox/candidates/:id/decision",
+  "POST /api/v1/topic-inbox/candidates/:id/review",
   "POST /api/v1/topic-inbox/topics/:id/merge",
   "POST /api/v1/topic-inbox/topics/:id/split",
   "GET /api/v1/topic-inbox/topics/:id/evidence",
@@ -1084,6 +1085,21 @@ async function routeRequest(
     const request = parseShared(TopicInboxRefreshInputSchema, body);
     assertNamespaceScope(request.namespace, principal.namespace);
     return await service.idempotent("topic-inbox.refresh", request, request, () => service.refreshProjectTopicInbox(request.namespace), { exactReplay: true });
+  }
+  const topicReview = match(path, /^\/api\/v1\/topic-inbox\/candidates\/([^/]+)\/review$/);
+  if (method === "POST" && topicReview) {
+    requirePanelWrite(principal);
+    const request = asObject(body, "topic-inbox.candidate.review");
+    for (const key of Object.keys(request)) {
+      if (key !== "namespace" && key !== "force") throw new MemoryServiceError("invalid_argument", `topic-inbox.candidate.review unknown field: ${key}`);
+    }
+    if (!isRecord(request.namespace)) throw new MemoryServiceError("invalid_argument", "topic-inbox.candidate.review namespace is required");
+    const namespace = request.namespace as unknown as RuntimeNamespace;
+    assertNamespaceScope(namespace, principal.namespace);
+    if (request.force !== undefined && typeof request.force !== "boolean") throw new MemoryServiceError("invalid_argument", "topic-inbox.candidate.review force must be boolean");
+    const candidateId = decodeMatchSegment(topicReview, 1);
+    const result = await service.reviewProjectTopicCandidate(namespace, candidateId, request.force === true);
+    return { candidateId, candidate: topicCandidateCard(result.candidate), ...result.summary, cached: result.cached, serverTime: new Date().toISOString() };
   }
   const topicDecision = match(path, /^\/api\/v1\/topic-inbox\/candidates\/([^/]+)\/decision$/);
   if (method === "POST" && topicDecision) {
@@ -2266,7 +2282,8 @@ function decisionActor(request: Record<string, unknown>): Record<string, unknown
 }
 
 function topicCandidateCard(candidate: ProjectTopicCandidateRecord) {
-  return { id: candidate.id, topicId: candidate.topicId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: candidate.status, version: candidate.version, evidenceCount: candidate.sourceMemoryIds.length, updatedAt: candidate.updatedAt };
+  const aiReview = isRecord(candidate.metadata.aiReview) ? candidate.metadata.aiReview : undefined;
+  return { id: candidate.id, topicId: candidate.topicId, title: candidate.title, conclusion: candidate.conclusion, proposedLayer: candidate.proposedLayer, status: candidate.status, version: candidate.version, evidenceCount: candidate.sourceMemoryIds.length, ...(aiReview ? { aiReview } : {}), updatedAt: candidate.updatedAt };
 }
 
 function topicSummary(topic: ProjectTopicRecord, item?: TopicInboxItem) {
