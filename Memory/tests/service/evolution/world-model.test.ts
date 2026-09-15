@@ -353,3 +353,4 @@ describe("MemoryService / evolution / legacy world model", () => {
     db.close();
   });
 });
+});

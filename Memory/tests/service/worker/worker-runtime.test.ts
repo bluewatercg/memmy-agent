@@ -337,3 +337,4 @@ describe("MemoryService / worker / runtime", () => {
     db.close();
   });
 });
+});
