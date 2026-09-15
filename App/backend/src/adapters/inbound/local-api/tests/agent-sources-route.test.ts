@@ -419,7 +419,10 @@ describe("agent sources local api routes", () => {
     "opencode",
     "openclaw",
     "hermes",
-    "workbuddy"
+    "deepseek_harness",
+    "workbuddy",
+    "pi",
+    "qwenwork"
   ])("starts a source-scoped scan job for %s", async (sourceId) => {
     const calls: string[] = [];
     const { server } = createServer({

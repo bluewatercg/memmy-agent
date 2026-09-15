@@ -36,6 +36,7 @@ export class IndexedCandidatePool {
   constructor(private readonly deps: IndexedCandidatePoolDependencies) {}
 
   retrievalCandidateCount(input: {
+    userId: string;
     layers: MemoryLayer[];
     tags?: string[];
     scope: MemoryFilter;
@@ -49,6 +50,7 @@ export class IndexedCandidatePool {
   }
 
   hasRetrievalVectorCandidates(input: {
+    userId: string;
     layers: MemoryLayer[];
     tags?: string[];
     scope: MemoryFilter;
@@ -63,12 +65,14 @@ export class IndexedCandidatePool {
   }
 
   async indexedRetrievalCandidatePool(input: {
+    userId: string;
     compiledQuery: CompiledRetrievalQuery;
     queryVector?: number[];
     layers: MemoryLayer[];
     tags?: string[];
     targetSkillId?: string;
     scope: MemoryFilter;
+    currentAgentId?: string;
     config: {
       tier1TopK: number;
       tier2TopK: number;
@@ -141,10 +145,22 @@ export class IndexedCandidatePool {
     return {
       memories: this.deps.repos.memories.getMany(candidateIds).filter((memory) =>
         this.projectIdForMemory(memory) === input.scope.projectId &&
-        this.isMemoryReadyForRetrieval(memory)
+        this.isMemoryReadyForRetrieval(memory) &&
+        this.isSkillVisibleToAgent(memory, input.currentAgentId)
       ),
       channelScoresByMemory
     };
+  }
+
+  private isSkillVisibleToAgent(memory: MemoryRow, currentAgentId?: string): boolean {
+    if (memory.memoryLayer !== "Skill") return true;
+    const internal = memory.properties.internal_info;
+    if (internal.read_only !== true) return true;
+    const sourceAgentId = typeof internal.source_agent_id === "string"
+      ? internal.source_agent_id.trim()
+      : "";
+    if (!sourceAgentId) return false;
+    return !currentAgentId || normalizeAgentId(sourceAgentId) !== normalizeAgentId(currentAgentId);
   }
 
   private searchTraceVectorRoutes(
@@ -241,4 +257,8 @@ function retrievalSemanticTags(tags: readonly string[]): string[] {
   return tags
     .map((tag) => tag.trim())
     .filter((tag) => tag && !ignored.has(tag.toLowerCase()));
+}
+
+function normalizeAgentId(value: string): string {
+  return value.trim().toLowerCase().replace(/[\s-]+/g, "_");
 }

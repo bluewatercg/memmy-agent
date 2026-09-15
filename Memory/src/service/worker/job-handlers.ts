@@ -13,14 +13,16 @@ import type {
   Repositories,
   SessionRecord
 } from "../../storage/repositories.js";
+import { ModelHttpError } from "../../model/http.js";
 import type { JobType,MemoryRow,RuntimeNamespace } from "../../types.js";
 import { newId,stableHash } from "../../utils/id.js";
-import { clip } from "../../utils/text.js";
+import { isRecord } from "../../utils/json.js";
 import {
   embeddingRetryTargetKindForMemory,
   embeddingRetryVectorFieldForMemory
 } from "../embedding/embedding-pipeline.js";
 import { memoryHasImportPipeline } from "../import/import-job-processor.js";
+import { isTerminalL3WorldModelError } from "../evolution/l3-world-model-pipeline.js";
 import {
   namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory,
@@ -31,7 +33,7 @@ export type ProcessingStage = "summary" | "embedding";
 export const EPISODE_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 export type JobChangeOperation = "queued" | "leased" | "succeeded" | "failed" | "dead_letter";
 export type EmbeddingRetryChangeOperation = "queued" | "retry" | "succeeded" | "failed";
-export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic";
+export type ClosedEpisodeTrigger = "topic_boundary" | "session_closed" | "episode_rewarded" | "idle_timeout" | "end_topic" | "capture_decided";
 
 export interface EnqueueJobInput {
   jobType: JobType;
@@ -61,6 +63,8 @@ export interface WorkerJobProcessors {
     induceL2(job: EvolutionJobRecord): MaybePromise<void>;
     materializeNegativeExperience(job: EvolutionJobRecord): MaybePromise<void>;
     abstractL3(job: EvolutionJobRecord): MaybePromise<void>;
+    updateL3WorldModel(job: EvolutionJobRecord): MaybePromise<void>;
+    updateProjectEnvironment(job: EvolutionJobRecord): MaybePromise<void>;
     crystallizeSkill(job: EvolutionJobRecord): MaybePromise<void>;
     associateL2(job: EvolutionJobRecord): MaybePromise<void>;
     splitBigTurn(job: EvolutionJobRecord): MaybePromise<void>;
@@ -72,6 +76,7 @@ export interface WorkerJobProcessors {
   };
   embedding: {
     embedMemory(job: EvolutionJobRecord): MaybePromise<void>;
+    embedUserMemory(job: EvolutionJobRecord): MaybePromise<void>;
   };
   topic: {
     ingest(job: EvolutionJobRecord): MaybePromise<void>;
@@ -80,7 +85,7 @@ export interface WorkerJobProcessors {
 }
 
 export interface WorkerJobHandlerDeps {
-  repos: Pick<Repositories, "transaction" | "memories" | "processing" | "runtime">;
+  repos: Pick<Repositories, "transaction" | "memories" | "userMemories" | "processing" | "runtime">;
   capture: { synthReflection: boolean };
   reward: { feedbackWindowSec: number };
   nowIso(): string;
@@ -234,6 +239,24 @@ export async function processJob(
     case "l3_abstraction":
       await deps.processors.evolution.abstractL3(job);
       return;
+    case "l3_world_model_update":
+      try {
+        await deps.processors.evolution.updateL3WorldModel(job);
+      } catch (error) {
+        if (isTerminalL3WorldModelError(error)) {
+          deps.repos.runtime.failJob(
+            job.id,
+            error instanceof Error ? error.message : String(error),
+            deps.nowIso(),
+            true
+          );
+        }
+        throw error;
+      }
+      return;
+    case "project_environment_profile":
+      await deps.processors.evolution.updateProjectEnvironment(job);
+      return;
     case "skill_crystallization":
       await deps.processors.evolution.crystallizeSkill(job);
       return;
@@ -245,6 +268,9 @@ export async function processJob(
       return;
     case "embedding":
       await deps.processors.embedding.embedMemory(job);
+      return;
+    case "user_memory_embedding":
+      await deps.processors.embedding.embedUserMemory(job);
       return;
     case "reflection":
       await deps.processors.feedback.reflectTrace(job);
@@ -324,10 +350,11 @@ export function finalizeClosedEpisode(
 ): EvolutionJobRecord[] {
   const current = deps.repos.runtime.getEpisode(episode.id) ?? episode;
   if (current.status !== "closed" || current.l1MemoryIds.length === 0) return [];
+  if (episodeHasPendingCaptureDecision(deps, current)) return [];
   if (episodeRewardWasSkipped(current)) return [];
   const reflectionJobs = enqueueEpisodeReflection(deps, current, at, trigger);
   if (reflectionJobs.length > 0) return reflectionJobs;
-  if (episodeHasRewardForReflection(current)) return [];
+  if (episodeHasRewardForReflection(deps, current)) return [];
   return enqueueEpisodeRewardAfterReflection(deps, current, at, trigger);
 }
 
@@ -339,14 +366,30 @@ export function enqueueEpisodeRewardAfterReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
-    episodeHasRewardForReflection(episode) ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
+    episodeHasRewardForReflection(deps, episode) ||
     episodeRewardWasSkipped(episode) ||
-    deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+    (
+      deps.repos.runtime.hasEpisodeJob(episode.id, "reward", ["queued", "leased", "failed"])
+      && !episode.meta.rewardDirty
+    )
   ) return [];
   const target = deps.feedbackTargetFromEpisode(episode);
   if (!target) return [];
+  const feedback = [...episode.feedbackIds]
+    .reverse()
+    .map((id) => deps.repos.runtime.getFeedback(id))
+    .find((item) => Boolean(item));
   const feedbackWindowSec = Math.max(1, deps.reward.feedbackWindowSec);
-  const runAfter = new Date(Date.parse(at) + feedbackWindowSec * 1000).toISOString();
+  const runAfter = feedback
+    ? at
+    : new Date(Date.parse(at) + feedbackWindowSec * 1000).toISOString();
+  const repair = feedback
+    ? [...episode.decisionRepairIds]
+        .reverse()
+        .map((id) => deps.repos.runtime.getDecisionRepair(id))
+        .find((item) => item?.feedbackId === feedback.id)
+    : undefined;
   return [enqueueJob(deps, {
     jobType: "reward",
     userId: episode.userId,
@@ -356,6 +399,15 @@ export function enqueueEpisodeRewardAfterReflection(
       l1MemoryId: target.id,
       trigger,
       targetKind: "episode",
+      phase: "final",
+      ...(feedback ? {
+        feedbackId: feedback.id,
+        channel: feedback.channel,
+        polarity: feedback.polarity,
+        magnitude: feedback.magnitude,
+        rationale: feedback.rationale
+      } : {}),
+      ...(repair ? { repairId: repair.id } : {}),
       runAfter
     },
     createdAt: at
@@ -370,10 +422,11 @@ export function enqueueEpisodeReflection(
 ): EvolutionJobRecord[] {
   if (
     episode.status !== "closed" ||
+    episodeHasPendingCaptureDecision(deps, episode) ||
     deps.repos.runtime.hasEpisodeJob(episode.id, "reflection", ["queued", "leased", "failed"])
   ) return [];
   const target = deps.repos.memories.getMany(episode.l1MemoryIds)
-    .filter((memory) => memory.memoryLayer === "L1" && !deps.traceReflectionWasScored(memory))
+    .filter((memory) => memory.memoryLayer === "L1" && memory.status === "activated" && !deps.traceReflectionWasScored(memory))
     .sort((a, b) => deps.traceSortKey(a) - deps.traceSortKey(b))[0];
   if (!target) return [];
   return [enqueueJob(deps, {
@@ -385,6 +438,13 @@ export function enqueueEpisodeReflection(
     payload: { trigger, targetKind: "episode" },
     createdAt: at
   })];
+}
+
+function episodeHasPendingCaptureDecision(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
+  return deps.repos.memories.getMany(episode.l1MemoryIds).some((memory) => {
+    const decision = memory.properties.internal_info.capture_decision;
+    return isRecord(decision) && decision.status === "pending";
+  });
 }
 
 export function enqueueImportSummaryIfMissing(
@@ -415,8 +475,21 @@ export function enqueueImportSummaryIfMissing(
   });
 }
 
-export function episodeHasRewardForReflection(episode: EpisodeRecord): boolean {
-  return typeof episode.rTask === "number" && !episodeRewardWasSkipped(episode);
+export function episodeHasRewardForReflection(deps: WorkerJobHandlerDeps, episode: EpisodeRecord): boolean {
+  if (
+    episode.status !== "closed" ||
+    typeof episode.rTask !== "number" ||
+    episode.rewardDetail.phase !== "final" ||
+    episodeRewardWasSkipped(episode)
+  ) return false;
+  const traceIds = Array.isArray(episode.rewardDetail.traceIds)
+    ? episode.rewardDetail.traceIds.filter((id): id is string => typeof id === "string")
+    : [];
+  const activeL1MemoryIds = episode.l1MemoryIds.filter((id) =>
+    deps.repos.memories.get(id)?.status === "activated"
+  );
+  return traceIds.length === activeL1MemoryIds.length &&
+    traceIds.every((id, index) => id === activeL1MemoryIds[index]);
 }
 
 export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
@@ -424,7 +497,11 @@ export function episodeRewardWasSkipped(episode: EpisodeRecord): boolean {
 }
 
 export function workerJobCanRunInParallel(job: EvolutionJobRecord): boolean {
-  return job.jobType === "trace_summary" || job.jobType === "import_summary" || job.jobType === "embedding";
+  return job.jobType === "trace_summary" ||
+    job.jobType === "import_summary" ||
+    job.jobType === "embedding" ||
+    job.jobType === "l3_world_model_update" ||
+    job.jobType === "project_environment_profile";
 }
 
 export function processingStageForJob(jobType: JobType): ProcessingStage | undefined {
@@ -439,24 +516,44 @@ export function processingJobMatchesMemory(job: EvolutionJobRecord, memory: Memo
 }
 
 export function sanitizeProcessingError(error: unknown): string {
-  const message = (error instanceof Error ? error.message : String(error))
+  const detail = error instanceof ModelHttpError
+    ? error.detail
+    : error instanceof Error ? error.message : String(error);
+  const message = detail
     .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
     .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[redacted]")
-    .replace(/\b(api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[redacted]")
-    .trim();
-  return clip(message || "Unknown processing error", 1000);
+    .replace(/\b(api[_-]?key)\s*[:=]\s*\S+/gi, "$1=[redacted]");
+  return message.trim() ? message : "Unknown processing error";
 }
 
-export function classifyProcessingError(message: string): {
+export function classifyProcessingError(error: unknown): {
   code: string;
   retryAction: "retry" | "open_settings" | "none";
 } {
+  if (error instanceof ModelHttpError && error.errorCode === "40309") {
+    return { code: "40309", retryAction: "open_settings" };
+  }
+  const hasStructuredCode = error instanceof ModelHttpError && error.errorCode !== undefined;
+  const message = error instanceof ModelHttpError
+    ? `${error.message}\n${error.detail}`
+    : error instanceof Error ? error.message : String(error);
   const normalized = message.toLowerCase();
+  if (!hasStructuredCode && /\b40309\b/.test(normalized)) {
+    return { code: "40309", retryAction: "open_settings" };
+  }
   if (/api.?key|unauthorized|forbidden|\b401\b|\b403\b|\b404\b|model.+not configured|missing.+model|expected json|html instead of json|configured model endpoint/.test(normalized)) {
     return { code: "model_configuration", retryAction: "open_settings" };
   }
   if (/trace payload is missing|memory content is missing|corrupt|malformed memory/.test(normalized)) {
     return { code: "memory_corrupt", retryAction: "none" };
+  }
+  if (error instanceof ModelHttpError && error.httpStatus === 400 &&
+    /maximum.{0,40}(?:input|context).{0,40}(?:length|tokens?)|input.{0,40}(?:too long|token limit)|too many tokens/i.test(message)) {
+    return { code: "model_input_too_long", retryAction: "none" };
+  }
+  if (error instanceof ModelHttpError && error.httpStatus >= 400 && error.httpStatus < 500 &&
+    error.httpStatus !== 408 && error.httpStatus !== 429) {
+    return { code: "invalid_model_request", retryAction: "none" };
   }
   if (/timeout|timed out|network|connect|temporar|rate.?limit|\b429\b|\b5\d\d\b/.test(normalized)) {
     return { code: "transient_provider_error", retryAction: "retry" };
@@ -487,6 +584,8 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
         : undefined;
     case "embedding":
       return target ? `embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
+    case "user_memory_embedding":
+      return target ? `user_memory_embedding:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "trace_summary":
       return target ? `trace_summary:${target}:${payloadString("contentHash") ?? "current"}` : undefined;
     case "import_summary":
@@ -520,7 +619,7 @@ export function evolutionJobDedupeKey(input: Pick<EnqueueJobInput, "jobType" | "
       return basis ? `l3_abstraction:${basis}` : input.episodeId ? `l3_abstraction:${input.episodeId}` : undefined;
     }
     case "skill_crystallization": {
-      const seed = target ?? payloadString("policyId") ?? payloadString("skillId");
+      const seed = payloadString("skillId") ?? target ?? payloadString("policyId");
       return seed ? `skill_crystallization:${seed}` : input.episodeId ? `skill_crystallization:${input.episodeId}` : undefined;
     }
     case "skill_trial_resolve": {

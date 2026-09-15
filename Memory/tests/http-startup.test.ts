@@ -1,6 +1,8 @@
 import type { Server } from "node:http";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createMemoryHttpServer, type MemoryService } from "../src/index.js";
+import { closeMemoryHttpServer } from "../src/server/http.js";
+import type { AgentSourceExecutor } from "../src/agent-source/runtime.js";
 
 const servers: Server[] = [];
 
@@ -11,6 +13,45 @@ afterEach(async () => {
 });
 
 describe("Memory HTTP startup", () => {
+  it("waits for an active worker and Agent source cleanup before completing shutdown", async () => {
+    let finishWorker!: () => void;
+    let finishSources!: () => void;
+    const worker = new Promise<void>((done) => { finishWorker = done; });
+    const sources = new Promise<void>((done) => { finishSources = done; });
+    const service = stubService(() => undefined);
+    const runWorkerOnce = vi.fn(async () => {
+      await worker;
+      return workerResult(1);
+    });
+    service.runWorkerOnce = runWorkerOnce;
+    const dispose = vi.fn(() => sources);
+    const server = createMemoryHttpServer({
+      service,
+      workerStartupFallbackMs: 0,
+      agentSourceExecutor: { dispose } as unknown as AgentSourceExecutor,
+    });
+    servers.push(server);
+    await listen(server);
+    await waitFor(() => runWorkerOnce.mock.calls.length === 1);
+    let closed = false;
+    try {
+      const closing = closeMemoryHttpServer(server).then(() => { closed = true; });
+      await new Promise((done) => setTimeout(done, 10));
+      expect(closed).toBe(false);
+      expect(dispose).toHaveBeenCalledOnce();
+      finishWorker();
+      await new Promise((done) => setTimeout(done, 10));
+      expect(closed).toBe(false);
+      expect(runWorkerOnce).toHaveBeenCalledOnce();
+      finishSources();
+      await closing;
+      expect(closed).toBe(true);
+    } finally {
+      finishWorker();
+      finishSources();
+    }
+  });
+
   it("serves health before startup reconciliation begins", async () => {
     let reconciliations = 0;
     const server = createMemoryHttpServer({
@@ -51,8 +92,10 @@ describe("Memory HTTP startup", () => {
     let runs = 0;
     let timerFired = false;
     let timerObservedBeforeSecondRun = false;
+    const limits: number[] = [];
     const service = stubService(() => undefined);
-    service.runWorkerOnce = async () => {
+    service.runWorkerOnce = async (limit) => {
+      limits.push(limit ?? 100);
       runs += 1;
       if (runs === 1) {
         setTimeout(() => {
@@ -73,6 +116,7 @@ describe("Memory HTTP startup", () => {
 
     await waitFor(() => runs >= 2);
     expect(timerObservedBeforeSecondRun).toBe(true);
+    expect(limits).toEqual([4, 4]);
   });
 });
 

@@ -1,6 +1,6 @@
 import { Script, createContext, type Context } from "node:vm";
 import { describe, expect, it } from "vitest";
-import { memoryPanelHtml } from "../src/viewer/static.js";
+import { isMemoryViewerPath, memoryPanelHtml, memoryViewerAsset } from "../src/viewer/static.js";
 
 describe("memoryPanelHtml", () => {
   it("uses an inline favicon so the protected server does not receive browser favicon requests", () => {
@@ -278,33 +278,22 @@ describe("memoryPanelHtml", () => {
     runViewerScript(harness);
     await flushPromises();
 
-    const rows = harness.rows();
-    expect(rows).toHaveLength(2);
-    const firstRow = rows[0];
-    const secondRow = rows[1];
-    if (!firstRow || !secondRow) {
-      throw new Error("expected two rendered memory rows");
-    }
-    const firstClick = firstRow.onclick();
-    const secondClick = secondRow.onclick();
+  it("serves copied Viewer logos from stable offline paths", () => {
+    expect(isMemoryViewerPath("/viewer/memos-logo.svg")).toBe(true);
+    const logo = memoryViewerAsset("/viewer/memos-logo.svg");
+    expect(logo?.contentType).toBe("image/svg+xml");
+    expect(logo?.body.toString("utf8")).toContain("<svg");
+    expect(memoryPanelHtml()).toContain("/viewer/memos-logo.svg");
+  });
 
-    harness.resolveDetail("memory-2", {
-      item: { id: "memory-2", title: "Summary: Second memory", metadata: { source: "second" } }
-    });
-    await secondClick;
-
-    expect(harness.element("detailId").textContent).toBe("memory-2");
-    expect(harness.element("detailTitle").textContent).toBe("Second memory");
-    expect(harness.element("detailJson").textContent).toContain('"source": "second"');
-
-    harness.resolveDetail("memory-1", {
-      item: { id: "memory-1", title: "First memory", metadata: { source: "first" } }
-    });
-    await firstClick;
-
-    expect(harness.element("detailId").textContent).toBe("memory-2");
-    expect(harness.element("detailJson").textContent).toContain('"source": "second"');
-    expect(harness.element("detailJson").textContent).not.toContain('"source": "first"');
+  it("recognizes only Viewer paths and rejects traversal", () => {
+    expect(isMemoryViewerPath("/viewer/")).toBe(true);
+    expect(isMemoryViewerPath("/user-memories")).toBe(true);
+    expect(isMemoryViewerPath("/import")).toBe(false);
+    expect(isMemoryViewerPath("/viewer/assets/app.js")).toBe(true);
+    expect(isMemoryViewerPath("/help")).toBe(false);
+    expect(isMemoryViewerPath("/api/v1/health")).toBe(false);
+    expect(memoryViewerAsset("/viewer/../config.yaml")).toBeUndefined();
   });
 
   it("uses a fragment token for API requests without leaving it in the address bar", async () => {

@@ -8,6 +8,7 @@ import {
   type LlmCompletionOptions,
   type LlmMessage
 } from "../../../src/index.js";
+import { ModelHttpError } from "../../../src/model/http.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
   accountRuntimeConfig,
@@ -429,7 +430,7 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
-  it("sanitizes provider failures and retries only the failed summary stage", async () => {
+  it("sanitizes deterministic provider failures and allows manual summary retry", async () => {
     const root = createTestRoot("mindock-memory-processing-retry-summary-");
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
     const llmCalls: Array<{
@@ -459,14 +460,12 @@ describe("MemoryService / import / processing", () => {
     const added = addAgentSourceImport(service, namespace, "retry this protected summary", "protected-summary");
 
     await service.runWorkerOnce(1);
-    await service.runWorkerOnce(1);
-    await service.runWorkerOnce(1);
 
     const failed = service.memoryProcessingStatus([added.id], { namespace }).items[0];
     expect(failed).toMatchObject({
       state: "failed",
       stage: "summary",
-      attemptCount: 3,
+      attemptCount: 1,
       retryAction: "open_settings",
       errorCode: "model_configuration"
     });
@@ -504,7 +503,9 @@ describe("MemoryService / import / processing", () => {
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
       state: "summary_pending",
       stage: "summary",
-      ...firstFailure
+      errorCode: "transient_provider_error",
+      errorMessage: "429 second provider failure",
+      autoRetryScheduled: true
     });
     await service.runWorkerOnce(1);
     await service.runWorkerOnce(1);
@@ -553,6 +554,72 @@ describe("MemoryService / import / processing", () => {
     db.close();
   });
 
+  it("persists terminal quota details and derives queue state after reopening", async () => {
+    const root = createTestRoot("mindock-memory-processing-quota-");
+    const dbPath = join(root, "memory.sqlite");
+    const db = new MemoryDb({ path: dbPath });
+    const detail = `Error:\n40309\n${"x".repeat(1_100)}\nTAIL`;
+    const baseLlm = createFailingLlm();
+    const llm: LlmClient = {
+      ...baseLlm,
+      async completeJson() {
+        throw new ModelHttpError(
+          "openai_compatible HTTP 403: quota exhausted",
+          "openai_compatible",
+          403,
+          "40309",
+          detail
+        );
+      }
+    };
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm,
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = { source: "codex", profileId: "default", userId: "quota-user" };
+    const added = addAgentSourceImport(service, namespace, "quota failure", "quota-failure");
+
+    await service.runWorkerOnce(1);
+
+    expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
+      state: "failed",
+      stage: "summary",
+      attemptCount: 1,
+      retryAction: "open_settings",
+      errorCode: "40309",
+      errorMessage: detail,
+      autoRetryScheduled: false
+    });
+    db.close();
+
+    const reopened = new MemoryDb({ path: dbPath });
+    const repos = new Repositories(reopened.db);
+    expect(repos.processing.get(added.id)).toMatchObject({
+      errorCode: "40309",
+      errorMessage: detail,
+      autoRetryScheduled: false
+    });
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'queued' WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'leased' WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.db.prepare(
+      `UPDATE evolution_jobs SET status = 'failed', attempts = max_attempts WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.db.prepare(
+      `DELETE FROM evolution_jobs WHERE target_memory_id = ?`
+    ).run(added.id);
+    expect(repos.processing.get(added.id)?.autoRetryScheduled).toBe(false);
+    reopened.close();
+  });
+
   it("classifies an HTML model response as a model endpoint configuration failure", async () => {
     const root = createTestRoot("mindock-memory-processing-html-response-");
     const db = new MemoryDb({ path: join(root, "memory.sqlite") });
@@ -574,12 +641,12 @@ describe("MemoryService / import / processing", () => {
     const namespace = { source: "codex", profileId: "default", userId: "html-response-user" };
     const added = addAgentSourceImport(service, namespace, "bad model endpoint", "html-response");
 
-    await runWorkerRounds(service, 3, 1);
+    await service.runWorkerOnce(1);
 
     expect(service.memoryProcessingStatus([added.id], { namespace }).items[0]).toMatchObject({
       state: "failed",
       stage: "summary",
-      attemptCount: 3,
+      attemptCount: 1,
       retryAction: "open_settings",
       errorCode: "model_configuration",
       errorMessage: expect.stringContaining("HTTP 200")
@@ -1033,14 +1100,28 @@ describe("MemoryService / import / processing", () => {
       userId: "user-import-order"
     };
 
-    const older = addAgentSourceImport(service, namespace, "older memory query", "order-old");
-    const newer = addAgentSourceImport(service, namespace, "newer memory query", "order-new");
-    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T10:00:00.000Z", older.id);
+    const older = addAgentSourceImport(
+      service,
+      namespace,
+      "older memory query",
+      "order-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const newer = addAgentSourceImport(
+      service,
+      namespace,
+      "newer memory query",
+      "order-new",
+      "2026-06-10T12:00:00.000Z"
+    );
+    db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T13:00:00.000Z", older.id);
     db.db.prepare(`UPDATE memories SET updated_at = ? WHERE id = ?`).run("2026-06-10T12:00:00.000Z", newer.id);
 
-    const run = await service.runWorkerOnce(10);
+    const summaryRun = await service.runWorkerOnce(10);
+    const embeddingRun = await service.runWorkerOnce(10);
 
-    expect(run.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
+    expect(summaryRun.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
+    expect(embeddingRun.jobs.map((job) => job.targetMemoryId)).toEqual([newer.id, older.id]);
     expect(llmCalls[0]?.messages.find((message) => message.role === "user")?.content).toContain("newer memory query");
 
     db.close();
@@ -1069,7 +1150,13 @@ describe("MemoryService / import / processing", () => {
     };
 
     for (let index = 0; index < 25; index += 1) {
-      addAgentSourceImport(service, namespace, `imported query ${index}`, `interleave-${index}`);
+      addAgentSourceImport(
+        service,
+        namespace,
+        `imported query ${index}`,
+        `interleave-${index}`,
+        new Date(Date.UTC(2026, 5, 10, 10, index)).toISOString()
+      );
     }
 
     const summaryRun = await service.runWorkerOnce(20);
@@ -1165,8 +1252,20 @@ describe("MemoryService / import / processing", () => {
       userId: "user-import-placeholder-order"
     };
 
-    const older = addAgentSourceImport(service, namespace, "older user query", "placeholder-old");
-    const newer = addAgentSourceImport(service, namespace, "newer assistant placeholder query", "placeholder-new");
+    const older = addAgentSourceImport(
+      service,
+      namespace,
+      "older user query",
+      "placeholder-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const newer = addAgentSourceImport(
+      service,
+      namespace,
+      "newer assistant placeholder query",
+      "placeholder-new",
+      "2026-06-10T12:00:00.000Z"
+    );
     db.db.prepare(`DELETE FROM evolution_jobs WHERE target_memory_id IN (?, ?)`).run(older.id, newer.id);
     db.db.prepare(`UPDATE memories SET updated_at = ?, info_json = json_set(info_json, '$.summary', ?) WHERE id = ?`)
       .run("2026-06-10T10:00:00.000Z", "## user", older.id);
@@ -1200,6 +1299,140 @@ describe("MemoryService / import / processing", () => {
        WHERE target_memory_id = ? AND job_type = 'import_summary'`
     ).all(newer.id) as Array<{ job_type: string; status: string }>;
     expect(queuedSummary).toEqual([{ job_type: "import_summary", status: "queued" }]);
+
+    db.close();
+  });
+
+  it("finishes a new Memmy chat memory before draining scanned-memory backlog", async () => {
+    const root = createTestRoot("mindock-memory-live-priority-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const llmCalls: Array<{
+      messages: Array<{ role: string; content: string }>;
+      options: { operation: string };
+    }> = [];
+    const embeddingTexts: string[] = [];
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm(llmCalls),
+      embedder: createCapturingEmbedder(embeddingTexts)
+    });
+    const namespace = {
+      source: "memmy",
+      profileId: "jiang",
+      userId: "user-live-priority"
+    };
+
+    const oldImport = addAgentSourceImport(
+      service,
+      namespace,
+      "old scanned memory",
+      "live-priority-old",
+      "2026-06-10T10:00:00.000Z"
+    );
+    const recentImport = addAgentSourceImport(
+      service,
+      namespace,
+      "recent scanned memory",
+      "live-priority-recent",
+      "2026-06-10T12:00:00.000Z"
+    );
+    const session = service.openSession({ namespace });
+    const live = service.completeTurn("turn-live-priority", {
+      sessionId: session.sessionId,
+      query: "Remember the new interactive preference.",
+      answer: "The new interactive preference is dark mode."
+    });
+
+    const summaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const embeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const scanRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+
+    expect(summaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(embeddingRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(scanRun.jobs.map((job) => job.targetMemoryId)).toEqual([recentImport.id, oldImport.id]);
+    expect(scanRun.jobs.every((job) => job.jobType === "import_summary")).toBe(true);
+    expect(llmCalls[0]?.messages.find((message) => message.role === "user")?.content)
+      .toContain("new interactive preference");
+    expect(embeddingTexts).toHaveLength(1);
+
+    db.close();
+  });
+
+  it("finishes the Memmy first-report memory before interactive and scanned-memory work", async () => {
+    const root = createTestRoot("mindock-memory-first-report-priority-");
+    const db = new MemoryDb({
+      path: join(root, "memory.sqlite")
+    });
+    const service = createTestMemoryService({
+      db,
+      mode: "dev",
+      llm: createBatchReflectionLlm([]),
+      embedder: createCapturingEmbedder([])
+    });
+    const namespace = {
+      source: "memmy",
+      profileId: "jiang",
+      userId: "user-first-report-priority"
+    };
+
+    const scanned = addAgentSourceImport(
+      service,
+      namespace,
+      "background scanned memory",
+      "first-report-priority-scan"
+    );
+    const session = service.openSession({ namespace });
+    const live = service.completeTurn("turn-first-report-priority-live", {
+      sessionId: session.sessionId,
+      query: "Remember this interactive task.",
+      answer: "The interactive task is queued."
+    });
+    const firstReport = service.addMemory({
+      namespace,
+      adapterId: "agent-source:memmy-onboarding",
+      requestId: "first-report-priority",
+      layer: "L1",
+      source: "memmy-onboarding",
+      tags: [
+        "agent-source",
+        "memmy",
+        "初见报告",
+        "first-encounter-report",
+        "onboarding-report",
+        "cross-agent-handoff"
+      ],
+      title: "Memmy 初见报告 / First Encounter Report",
+      turnId: "first-report:priority",
+      deferProcessing: true,
+      content: [
+        "## user\n\nMemmy 初见报告 / Memmy First Encounter Report latest task context",
+        "## assistant\n\nThe report and next step are ready."
+      ].join("\n\n")
+    });
+    service.enqueuePendingImportSummaries(10_000, [firstReport.id]);
+
+    const reportSummaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const reportEmbeddingRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+    const liveSummaryRun = await service.runWorkerOnce(4, { priorityCohortOnly: true });
+
+    expect(reportSummaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "import_summary", targetMemoryId: firstReport.id })
+    ]);
+    expect(reportEmbeddingRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "embedding", targetMemoryId: firstReport.id })
+    ]);
+    expect(liveSummaryRun.jobs).toEqual([
+      expect.objectContaining({ jobType: "trace_summary", targetMemoryId: live.l1MemoryId })
+    ]);
+    expect(liveSummaryRun.jobs.map((job) => job.targetMemoryId)).not.toContain(scanned.id);
+    expect(service.memoryProcessingStatus([firstReport.id], { namespace }).items[0]?.state).toBe("ready");
 
     db.close();
   });

@@ -4,6 +4,7 @@ import ReactMarkdown, { type Components } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { ApiRequestError } from "../../api/http.js";
+import { PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR } from "../../app/product-tour-layout.js";
 import {
   buildLogsFilterLayer,
   buildMemoryUiDetailOpenedEvent,
@@ -12,6 +13,7 @@ import {
 import { useAnalytics } from "../../analytics/use-analytics.js";
 import { MEMORY_ADD_STATUS_SUMMARIES, type MessageKey, type MessageValues } from "../../i18n/messages.js";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import { useTranslation } from "../../i18n/use-translation.js";
 import {
   MEMORY_SOURCE_AGENT_EXCLUSIONS,
@@ -189,6 +191,36 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
     });
   };
 
+  const renderLogCard = (log: (typeof filteredLogs)[number]) => {
+    const input = parseJson(log.inputJson);
+    const output = parseJson(log.outputJson);
+    const isExpanded = expanded.has(log.id);
+    const summary = buildSummary(log, input, output, t);
+    return (
+      <article key={log.id} className={`memory-log-card${isExpanded ? " memory-log-card--expanded" : ""}`}>
+        <button
+          type="button"
+          onClick={() => toggleExpanded(log.id)}
+          className="memory-log-card__button"
+        >
+          <span className={`memory-log-tool ${logToolClass(log.toolName)}`}>
+            {log.toolName}
+          </span>
+          <span className={`memory-log-card__summary${summary.tail ? " memory-log-card__summary--with-tail" : ""}`}>{summary.text}</span>
+          {summary.tail && <span className="memory-log-card__summary-tail">{summary.tail}</span>}
+          <span className="memory-log-card__meta">{formatDuration(log.durationMs)}</span>
+          <span className="memory-log-card__meta">{formatDate(log.calledAt)}</span>
+          <span className="memory-log-card__action">{isExpanded ? t("memory.logs.collapse") : t("memory.logs.expand")}</span>
+        </button>
+        {isExpanded && (
+          <div className="memory-log-card__details">
+            <LogDetail log={log} input={input} output={output} />
+          </div>
+        )}
+      </article>
+    );
+  };
+
   return (
     <section className="memory-panel">
       <div className="memory-panel__header memory-panel__header--single-line">
@@ -241,40 +273,28 @@ export function LogsSubPageView(props: LogsSubPageViewProps) {
         </div>
       </div>
 
-      {props.state.status === "loading" && <StateBox message={t("memory.logs.loading")} />}
-      {props.state.status === "error" && <StateBox message={props.state.message} tone="error" />}
-      {props.state.status === "ready" && filteredLogs.length === 0 && <StateBox message={t("memory.logs.empty")} />}
+      {/* Keep the tour list anchor mounted even when empty/loading so step 1/5 can resolve layout. */}
+      {props.state.status === "loading" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.loading")} />
+        </div>
+      )}
+      {props.state.status === "error" && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={props.state.message} tone="error" />
+        </div>
+      )}
+      {props.state.status === "ready" && filteredLogs.length === 0 && (
+        <div data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+          <StateBox message={t("memory.logs.empty")} />
+        </div>
+      )}
       {props.state.status === "ready" && filteredLogs.length > 0 && (
         <div className="memory-list">
-          {filteredLogs.map((log) => {
-            const input = parseJson(log.inputJson);
-            const output = parseJson(log.outputJson);
-            const isExpanded = expanded.has(log.id);
-            const summary = buildSummary(log, input, output, t);
-            return (
-              <article key={log.id} className={`memory-log-card${isExpanded ? " memory-log-card--expanded" : ""}`}>
-                <button
-                  type="button"
-                  onClick={() => toggleExpanded(log.id)}
-                  className="memory-log-card__button"
-                >
-                  <span className={`memory-log-tool ${logToolClass(log.toolName)}`}>
-                    {log.toolName}
-                  </span>
-                  <span className={`memory-log-card__summary${summary.tail ? " memory-log-card__summary--with-tail" : ""}`}>{summary.text}</span>
-                  {summary.tail && <span className="memory-log-card__summary-tail">{summary.tail}</span>}
-                  <span className="memory-log-card__meta">{formatDuration(log.durationMs)}</span>
-                  <span className="memory-log-card__meta">{formatDate(log.calledAt)}</span>
-                  <span className="memory-log-card__action">{isExpanded ? t("memory.logs.collapse") : t("memory.logs.expand")}</span>
-                </button>
-                {isExpanded && (
-                  <div className="memory-log-card__details">
-                    <LogDetail log={log} input={input} output={output} />
-                  </div>
-                )}
-              </article>
-            );
-          })}
+          <div className="memory-log-tour-group" data-tour-anchor={PRODUCT_TOUR_MEMORY_LOGS_LIST_ANCHOR}>
+            {filteredLogs.slice(0, 2).map(renderLogCard)}
+          </div>
+          {filteredLogs.slice(2).map(renderLogCard)}
         </div>
       )}
       {pagination && (
@@ -365,7 +385,7 @@ export function MemorySearchDetail(props: { sourceAgent?: string; input: unknown
   const { t } = useTranslation();
   const input = asRecord(props.input) as SearchInput;
   const output = asRecord(props.output) as SearchOutput;
-  const candidates = output.candidates ?? [];
+  const candidates = memorySearchCandidates(output);
   const filtered = output.filtered ?? [];
   const keptCandidateKeys = new Set(filtered.map(memorySearchCandidateKey));
   const sourceAgent = firstLogText(props.sourceAgent);
@@ -509,6 +529,9 @@ export function memorySearchCandidateLayerLabel(candidate: SearchCandidate): str
     case "Skill":
     case "skill":
       return "Skill";
+    case "UserMemory":
+    case "user_memory":
+      return "User";
     default:
       return "Memory";
   }
@@ -671,12 +694,26 @@ function usableAddSummary(value: string | null | undefined): string | undefined 
 }
 
 function memorySearchSummaryCounts(output: SearchOutput): { beforeLlm: number; afterLlm: number } {
+  const afterLlm = firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
+    ?? output.filtered?.length
+    ?? 0;
   return {
-    beforeLlm: firstNonNegativeInt(output.stats?.ranked) ?? output.candidates?.length ?? 0,
-    afterLlm: firstNonNegativeInt(output.stats?.llmFilter?.kept, output.stats?.finalReturned)
-      ?? output.filtered?.length
-      ?? 0
+    beforeLlm: Math.max(
+      firstNonNegativeInt(output.stats?.ranked) ?? 0,
+      memorySearchCandidates(output).length,
+      afterLlm
+    ),
+    afterLlm
   };
+}
+
+function memorySearchCandidates(output: SearchOutput): SearchCandidate[] {
+  const candidates = new Map<string, SearchCandidate>();
+  for (const candidate of [...(output.candidates ?? []), ...(output.filtered ?? [])]) {
+    const key = memorySearchCandidateKey(candidate);
+    if (!candidates.has(key)) candidates.set(key, candidate);
+  }
+  return [...candidates.values()];
 }
 
 function firstNonNegativeInt(...values: unknown[]): number | undefined {
@@ -714,11 +751,7 @@ function formatDuration(value: number): string {
 }
 
 function formatDate(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString();
+  return formatUserDateTime(value);
 }
 
 function isMissingLogsRoute(error: unknown): boolean {

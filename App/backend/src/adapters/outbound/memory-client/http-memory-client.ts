@@ -13,6 +13,7 @@ import {
   MemoryHistoryOutputSchema,
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigOutputSchema,
+  RecallEvidenceOutputSchema,
   PanelAnalysisOutputSchema,
   PanelItemsOutputSchema,
   PanelOverviewOutputSchema,
@@ -34,11 +35,12 @@ import {
   RestoreMemoryOutputSchema,
   WorkerRunOutputSchema
 } from "@memmy/local-api-contracts";
-import type { ZodType } from "zod";
+import { z, type ZodType } from "zod";
 import { MemoryLayerError, MemoryLayerNetworkError } from "./errors.js";
 import { buildMemoryLayerUrl, MEMORY_LAYER_PATHS } from "./memory-layer-endpoints.js";
 import { retryWithBackoff } from "./retry.js";
-import type { MemoryClient } from "./types.js";
+import type { MemoryClient, MemoryRequestContext } from "./types.js";
+import { normalizeTimeZoneOffset } from "../../../utils/time-zone.js";
 
 export interface MemoryLayerConfig {
   /** Base url. */
@@ -75,7 +77,8 @@ export function createHttpMemoryClient(
       query?: Readonly<Record<string, unknown>>;
       signal?: AbortSignal;
       timeoutMs?: number;
-      headers?: Readonly<Record<string, string>>;
+      maxRetries?: number;
+      context?: MemoryRequestContext;
     } = {}
   ): Promise<Output> {
     const url = appendQuery(buildMemoryLayerUrl(config.baseUrl, pathKey, requestOptions.params), requestOptions.query);
@@ -88,8 +91,9 @@ export function createHttpMemoryClient(
           method,
           headers: {
             ...(hasBody ? { "content-type": "application/json" } : {}),
-            authorization: `Bearer ${config.token}`,
-            ...requestOptions.headers
+            "x-memmy-time-zone": normalizeTimeZoneOffset(requestOptions.context?.timeZone),
+            ...(requestOptions.context?.userId ? { "x-memmy-user-id": requestOptions.context.userId } : {}),
+            authorization: `Bearer ${config.token}`
           },
           body: hasBody ? JSON.stringify(requestOptions.body) : undefined,
           signal: combineAbortSignals(timeoutSignal, requestOptions.signal)
@@ -115,7 +119,7 @@ export function createHttpMemoryClient(
         );
       },
       {
-        maxRetries: config.maxRetries,
+        maxRetries: requestOptions.maxRetries ?? config.maxRetries,
         baseDelayMs: 100,
         factor: 3,
         jitter: 0.2,
@@ -135,41 +139,56 @@ export function createHttpMemoryClient(
       return request("POST", "reloadConfig", MemoryReloadConfigOutputSchema, { body: input });
     },
 
-    async openSession(input) {
-      return request("POST", "openSession", OpenSessionOutputSchema, { body: input });
+    async exportBundle() {
+      return request("GET", "exportBundle", z.record(z.string(), z.unknown()));
     },
 
-    async closeSession(input) {
+    async clearAllData() {
+      return request("DELETE", "clearAllData", z.object({
+        ok: z.literal(true),
+        clearedAt: z.string(),
+        cleared: z.record(z.string(), z.number())
+      }), { body: {} });
+    },
+
+    async openSession(input, context) {
+      return request("POST", "openSession", OpenSessionOutputSchema, { body: input, context });
+    },
+
+    async closeSession(input, context) {
       const { sessionId, ...body } = input;
       return request("POST", "closeSession", CloseSessionOutputSchema, {
         params: { sessionId },
-        body
+        body,
+        context
       });
     },
 
-    async startTurn(input) {
-      return request("POST", "startTurn", StartTurnOutputSchema, { body: input });
+    async startTurn(input, context) {
+      return request("POST", "startTurn", StartTurnOutputSchema, { body: input, context });
     },
 
-    async completeTurn(input) {
+    async completeTurn(input, context) {
       const { turnId, ...body } = input;
       return request("POST", "completeTurn", CompleteTurnOutputSchema, {
         params: { turnId },
-        body
+        body,
+        context
       });
     },
 
-    async search(input) {
-      return request("POST", "search", SearchOutputSchema, { body: input });
+    async search(input, context) {
+      return request("POST", "search", SearchOutputSchema, { body: input, context });
     },
 
-    async addMemory(input) {
-      return request("POST", "addMemory", AddMemoryOutputSchema, { body: input });
+    async addMemory(input, context) {
+      return request("POST", "addMemory", AddMemoryOutputSchema, { body: input, context });
     },
 
-    async getMemory(input) {
+    async getMemory(input, context) {
       return request("GET", "getMemory", GetMemoryOutputSchema, {
-        params: { id: input.memoryId }
+        params: { id: input.memoryId },
+        context
       });
     },
 
@@ -188,11 +207,19 @@ export function createHttpMemoryClient(
       });
     },
 
-    async deleteMemory(input) {
+    async deleteMemory(input, context) {
       const { memoryId, ...body } = input;
       return request("DELETE", "deleteMemory", DeleteMemoryOutputSchema, {
         params: { id: memoryId },
-        body
+        body,
+        context
+      });
+    },
+
+    async recallEvidence(queryId, context) {
+      return request("GET", "recallEvidence", RecallEvidenceOutputSchema, {
+        params: { queryId },
+        context
       });
     },
 
@@ -219,19 +246,21 @@ export function createHttpMemoryClient(
       return request("POST", "runWorker", WorkerRunOutputSchema, {
         body: {
           limit: input.limit,
-          targetMemoryIds: input.targetMemoryIds
+          targetMemoryIds: input.targetMemoryIds,
+          priorityCohortOnly: input.priorityCohortOnly
         },
         signal: input.signal,
-        timeoutMs: input.timeoutMs
+        timeoutMs: input.timeoutMs,
+        maxRetries: 0
       });
     },
 
-    async panelOverview() {
-      return request("GET", "panelOverview", PanelOverviewOutputSchema);
+    async panelOverview(context) {
+      return request("GET", "panelOverview", PanelOverviewOutputSchema, { context, maxRetries: 0 });
     },
 
-    async panelAnalysis() {
-      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema);
+    async panelAnalysis(context) {
+      return request("GET", "panelAnalysis", PanelAnalysisOutputSchema, { context, maxRetries: 0 });
     },
 
     async projectContextPack(projectId) {
@@ -293,23 +322,25 @@ export function createHttpMemoryClient(
       return request("GET", "topicEvidence", TopicInboxEvidenceOutputSchema, { params: { id: topicId }, query: { namespace: JSON.stringify(input.namespace), limit: input.limit } });
     },
 
-    async panelItems(input) {
-      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input });
+    async panelItems(input, context) {
+      return request("GET", "panelItems", PanelItemsOutputSchema, { query: input, context });
     },
 
-    async panelTasks(input) {
-      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input });
+    async panelTasks(input, context) {
+      return request("GET", "panelTasks", PanelTasksOutputSchema, { query: input, context });
     },
 
-    async deletePanelTask(taskId) {
+    async deletePanelTask(taskId, context) {
       return request("DELETE", "deletePanelTask", DeletePanelTaskOutputSchema, {
         params: { id: taskId },
-        body: {}
+        body: {},
+        context
       });
     },
 
-    async memoryApiLogs(input) {
+    async memoryApiLogs(input, context) {
       return request("GET", "memoryApiLogs", MemoryApiLogsOutputSchema, {
+        context,
         query: {
           ...input,
           tools: input.tools?.join(",")

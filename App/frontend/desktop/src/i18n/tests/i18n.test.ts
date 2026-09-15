@@ -60,4 +60,31 @@ describe("desktop i18n helpers", () => {
     expect(messageCatalogs["zh-CN"]["home.agent.platformApiFallback"]).toBe("抱歉，刚刚没有拿到有效回复，请稍后再试一次。");
     expect(messageCatalogs["en-US"]["home.agent.platformApiFallback"]).toBe("Sorry, I couldn't get a valid response. Please try again in a moment.");
   });
+
+  it("keeps governed error notices aligned in Chinese and English", () => {
+    expect(messageCatalogs["zh-CN"]["agent.error.quotaExceeded"])
+      .toBe("当前模型 Token 余额不足，请更换模型后重试");
+    expect(messageCatalogs["en-US"]["agent.error.quotaExceeded"])
+      .toBe("The current model has insufficient tokens. Switch models and try again.");
+    expect(messageCatalogs["zh-CN"]["agent.error.modelFailed"])
+      .toBe("模型请求失败，请稍后重试");
+    expect(messageCatalogs["en-US"]["agent.error.modelFailed"])
+      .toBe("The model request failed. Please try again later.");
+    expect(messageCatalogs["zh-CN"]["agent.error.imageInputUnsupported"])
+      .toBe("当前模型不支持图片输入，请切换到支持多模态能力的模型后重试");
+    expect(messageCatalogs["en-US"]["agent.error.imageInputUnsupported"])
+      .toBe("The current model does not support image input. Switch to a multimodal model and try again.");
+    expect(messageCatalogs["zh-CN"]["agent.error.imageAnalysisFailed"])
+      .toBe("图片解析失败，请稍后重试");
+    expect(messageCatalogs["en-US"]["agent.error.imageAnalysisFailed"])
+      .toBe("Image analysis failed. Please try again later.");
+    expect(messageCatalogs["zh-CN"]["memory.memories.processing.quotaExhaustedTitle"])
+      .toBe("当前模型 Token 余额不足，记忆处理失败，请更换模型后重试");
+    expect(messageCatalogs["en-US"]["memory.memories.processing.quotaExhaustedTitle"])
+      .toBe("The current model has insufficient tokens. Memory processing failed. Switch models and try again.");
+    expect(messageCatalogs["zh-CN"]["memory.memories.processing.autoRetryScheduledTitle"])
+      .toBe("记忆处理失败，稍后将自动重试");
+    expect(messageCatalogs["en-US"]["memory.memories.processing.autoRetryScheduledTitle"])
+      .toBe("Memory processing failed. It will retry automatically later.");
+  });
 });

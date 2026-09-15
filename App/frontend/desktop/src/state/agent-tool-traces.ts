@@ -10,6 +10,7 @@ export interface AgentToolProgressEvent {
   version?: number;
   phase?: "start" | "end" | "error" | string;
   call_id?: string;
+  ui_tool_call_id?: string;
   name?: string;
   arguments?: unknown;
   result?: unknown;
@@ -26,6 +27,7 @@ export interface AgentToolProgressEvent {
 export interface AgentFileEdit {
   version?: number;
   call_id: string;
+  ui_tool_call_id?: string;
   tool: string;
   path: string;
   absolute_path?: string;
@@ -35,6 +37,7 @@ export interface AgentFileEdit {
   deleted?: number;
   approximate?: boolean;
   binary?: boolean;
+  unchanged?: boolean;
   pending?: boolean;
   error?: string;
   [key: string]: unknown;
@@ -210,6 +213,7 @@ const CANONICAL_TOOL_NAMES = new Set([
 function canonicalToolName(name: string): string {
   const trimmed = name.trim();
   const lower = trimmed.toLowerCase();
+  if (lower === "apply_patch") return "apply_patch";
   if (TOOL_NAME_ALIASES[lower]) return TOOL_NAME_ALIASES[lower]!;
   if (CANONICAL_TOOL_NAMES.has(lower)) return lower;
   // Match prefixed variants like `mcp_<server>_<tool>` or `namespace.action`
@@ -263,6 +267,13 @@ function buildToolSummary(
   args: Record<string, unknown>
 ): { verb: string; detail: string; category: ToolTraceCategory } {
   switch (canonicalName) {
+    case "apply_patch": {
+      const paths = typeof args.input === "string" ? extractApplyPatchSummaryPaths(args.input) : [];
+      const detail = paths.length === 1 ? basename(paths[0]!) : paths.length > 1 ? `${paths.length} files` : "";
+      return paths.length
+        ? { verb: "Patched", detail, category: "edit" }
+        : { verb: "Applied", detail: "patch", category: "edit" };
+    }
     case "exec": {
       const command = firstStringField(args, ["command", "cmd", "script", "code"]);
       return { verb: "Ran", detail: command ? truncate(collapseWhitespace(command), 140) : "", category: "shell" };
@@ -351,6 +362,89 @@ function buildToolSummary(
         category: "generic"
       };
   }
+}
+
+function normalizeApplyPatchSummaryPath(raw: string): string | null {
+  const value = raw.trim();
+  if (
+    !value ||
+    value.includes("\0") ||
+    value.startsWith("~") ||
+    value.startsWith("/") ||
+    value.startsWith("\\") ||
+    /^[A-Za-z]:/u.test(value)
+  ) {
+    return null;
+  }
+  const segments = value.replace(/\\/gu, "/").split("/");
+  if (segments.some((segment) => segment === "..")) return null;
+  const normalized = segments.filter((segment) => segment && segment !== ".").join("/");
+  return normalized || null;
+}
+
+export function extractApplyPatchSummaryPaths(input: string): string[] {
+  const lines = input.replace(/\r\n?/gu, "\n").split("\n");
+  if (lines[0] !== "*** Begin Patch") return [];
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  let kind: "add" | "update" | "delete" | null = null;
+  let updatePhase: "before-hunk" | "hunk" | "after-eof" = "before-hunk";
+  let updateChanged = false;
+  let updateMoved = false;
+  const addPath = (raw: string): boolean => {
+    const normalized = normalizeApplyPatchSummaryPath(raw);
+    if (!normalized) return false;
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      paths.push(normalized);
+    }
+    return true;
+  };
+  const canClose = (): boolean => {
+    if (kind !== "update") return true;
+    return updatePhase !== "hunk" || updateChanged;
+  };
+
+  for (let index = 1; index < lines.length; index += 1) {
+    const line = lines[index]!;
+    if (line === "*** End Patch") break;
+    const header = /^(\*\*\* (Add|Update|Delete) File: )(.*)$/u.exec(line);
+    if (header) {
+      if (!canClose() || !addPath(header[3]!)) break;
+      kind = header[2]!.toLowerCase() as "add" | "update" | "delete";
+      updatePhase = "before-hunk";
+      updateChanged = false;
+      updateMoved = false;
+      continue;
+    }
+    if (!kind) break;
+    if (kind === "add") {
+      if (!line.startsWith("+")) break;
+      continue;
+    }
+    if (kind === "delete") break;
+
+    if (updatePhase === "before-hunk" && line.startsWith("*** Move to: ")) {
+      if (updateMoved) break;
+      if (!addPath(line.slice("*** Move to: ".length))) break;
+      updateMoved = true;
+      continue;
+    }
+    if (line === "*** End of File") {
+      if (updatePhase !== "hunk" || !updateChanged) break;
+      updatePhase = "after-eof";
+      continue;
+    }
+    if (line === "@@" || (line.startsWith("@@ ") && line.length > 3 && !line.endsWith(" @@"))) {
+      if (updatePhase === "after-eof" || (updatePhase === "hunk" && !updateChanged)) break;
+      updatePhase = "hunk";
+      updateChanged = false;
+      continue;
+    }
+    if (updatePhase !== "hunk" || ![" ", "+", "-"].includes(line[0] ?? "")) break;
+    if (line.startsWith("+") || line.startsWith("-")) updateChanged = true;
+  }
+  return paths;
 }
 
 function firstStringField(args: Record<string, unknown>, keys: string[]): string | null {
@@ -442,12 +536,12 @@ export function toolTraceLinesFromEvents(events: unknown): string[] {
   const lines: string[] = [];
 
   for (const event of normalizeToolProgressEvents(events)) {
-    const callId = typeof event.call_id === "string" ? event.call_id : "";
-    if (callId) {
-      if (seen.has(callId)) {
+    const identity = toolEventKey(event);
+    if (identity) {
+      if (seen.has(identity)) {
         continue;
       }
-      seen.add(callId);
+      seen.add(identity);
     }
     const line = formatToolCallTrace(event);
     if (line) {
@@ -473,7 +567,8 @@ export function mergeToolProgressEvents(
   const indexByKey = new Map(next.map((event, index) => [toolEventKey(event), index]));
   for (const event of incoming) {
     const key = toolEventKey(event);
-    const existingIndex = indexByKey.get(key);
+    const fallbackIndex = next.findIndex((existing) => toolEventsShareActivity(existing, event));
+    const existingIndex = indexByKey.get(key) ?? (fallbackIndex >= 0 ? fallbackIndex : undefined);
     if (existingIndex === undefined) {
       indexByKey.set(key, next.length);
       next.push(event);
@@ -527,7 +622,10 @@ export function normalizeFileEdits(edits: unknown): AgentFileEdit[] {
     const status = normalizeFileEditStatus(edit.status, phase);
     const normalized: AgentFileEdit = {
       ...edit,
-      call_id: typeof edit.call_id === "string" && edit.call_id ? edit.call_id : `${tool}:${path || "pending"}`,
+      call_id: typeof edit.call_id === "string" ? edit.call_id : "",
+      ...(typeof edit.ui_tool_call_id === "string" && edit.ui_tool_call_id
+        ? { ui_tool_call_id: edit.ui_tool_call_id }
+        : {}),
       tool,
       path,
       ...(typeof edit.absolute_path === "string" ? { absolute_path: edit.absolute_path } : {}),
@@ -538,7 +636,8 @@ export function normalizeFileEdits(edits: unknown): AgentFileEdit[] {
       ...(typeof edit.error === "string" ? { error: edit.error } : {}),
       ...(pending ? { pending: true } : {}),
       ...(edit.approximate === true ? { approximate: true } : {}),
-      ...(edit.binary === true ? { binary: true } : {})
+      ...(edit.binary === true ? { binary: true } : {}),
+      ...(edit.unchanged === true ? { unchanged: true } : {})
     };
     return [normalized];
   });
@@ -553,17 +652,32 @@ export function mergeFileEdits(previous: AgentFileEdit[] | undefined, incoming: 
   }
 
   const next = [...previous];
-  const indexByKey = new Map(next.map((edit, index) => [fileEditKey(edit), index]));
   for (const edit of incoming) {
+    if (edit.path && !edit.pending) {
+      for (let index = next.length - 1; index >= 0; index -= 1) {
+        const candidate = next[index];
+        if (candidate?.pending && sameFileEditActivity(candidate, edit)) next.splice(index, 1);
+      }
+    }
+    const indexByKey = new Map(next.map((candidate, index) => [fileEditKey(candidate), index]));
     const key = fileEditKey(edit);
-    const existingIndex = indexByKey.get(key);
+    const fallbackIndex = next.findIndex((candidate) => (
+      sameFileEditActivity(candidate, edit)
+      && normalizedFileEditPath(candidate) === normalizedFileEditPath(edit)
+    ));
+    const existingIndex = indexByKey.get(key) ?? (fallbackIndex >= 0 ? fallbackIndex : undefined);
     if (existingIndex === undefined) {
       indexByKey.set(key, next.length);
       next.push(edit);
       continue;
     }
 
-    const merged = { ...next[existingIndex], ...edit };
+    const existing = next[existingIndex]!;
+    const incomingRank = PHASE_RANK[String(edit.phase)] ?? 0;
+    const existingRank = PHASE_RANK[String(existing.phase)] ?? 0;
+    const merged = incomingRank >= existingRank
+      ? { ...existing, ...edit }
+      : fillMissingFileEditIdentity(existing, edit);
     if (edit.path && !edit.pending) {
       delete merged.pending;
     }
@@ -574,14 +688,71 @@ export function mergeFileEdits(previous: AgentFileEdit[] | undefined, incoming: 
 }
 
 function toolEventKey(event: AgentToolProgressEvent): string {
-  if (event.call_id) {
-    return `call:${event.call_id}`;
-  }
+  const identity = toolEventIdentity(event);
+  if (identity) return identity;
   return formatToolCallTrace(event) ?? safeJson(event);
 }
 
 function fileEditKey(edit: AgentFileEdit): string {
-  return edit.call_id ? `call:${edit.call_id}:${edit.tool}` : `${edit.tool}:${edit.path}`;
+  return `${fileEditActivityIdentity(edit)}:path:${normalizedFileEditPath(edit)}`;
+}
+
+function toolEventIdentity(event: AgentToolProgressEvent): string {
+  if (event.ui_tool_call_id) return `ui:${event.ui_tool_call_id}:${toolEventName(event)}`;
+  if (event.call_id) return `call:${event.call_id}:${toolEventName(event)}`;
+  return "";
+}
+
+function toolEventsShareActivity(left: AgentToolProgressEvent, right: AgentToolProgressEvent): boolean {
+  if (left.ui_tool_call_id && right.ui_tool_call_id) {
+    return left.ui_tool_call_id === right.ui_tool_call_id && toolEventName(left) === toolEventName(right);
+  }
+  return Boolean(
+    left.call_id
+    && right.call_id
+    && left.call_id === right.call_id
+    && toolEventName(left) === toolEventName(right),
+  );
+}
+
+function toolEventName(event: AgentToolProgressEvent): string {
+  if (typeof event.name === "string" && event.name) return event.name;
+  return typeof event.function?.name === "string" ? event.function.name : "";
+}
+
+function fileEditActivityIdentity(edit: AgentFileEdit): string {
+  if (edit.ui_tool_call_id) return `ui:${edit.ui_tool_call_id}:${edit.tool}`;
+  if (edit.call_id) return `call:${edit.call_id}:${edit.tool}`;
+  return `legacy:${edit.tool}`;
+}
+
+function normalizedFileEditPath(edit: AgentFileEdit): string {
+  const value = edit.absolute_path || edit.path || "pending";
+  return value.replace(/\\/gu, "/");
+}
+
+function sameFileEditActivity(left: AgentFileEdit, right: AgentFileEdit): boolean {
+  if (left.ui_tool_call_id && right.ui_tool_call_id) {
+    return left.ui_tool_call_id === right.ui_tool_call_id && left.tool === right.tool;
+  }
+  if (left.call_id && right.call_id) {
+    return left.call_id === right.call_id && left.tool === right.tool;
+  }
+  return !left.ui_tool_call_id
+    && !right.ui_tool_call_id
+    && !left.call_id
+    && !right.call_id
+    && left.tool === right.tool;
+}
+
+function fillMissingFileEditIdentity(existing: AgentFileEdit, incoming: AgentFileEdit): AgentFileEdit {
+  return {
+    ...existing,
+    ...(!existing.ui_tool_call_id && incoming.ui_tool_call_id ? { ui_tool_call_id: incoming.ui_tool_call_id } : {}),
+    ...(!existing.call_id && incoming.call_id ? { call_id: incoming.call_id } : {}),
+    ...(!existing.path && incoming.path ? { path: incoming.path } : {}),
+    ...(!existing.absolute_path && incoming.absolute_path ? { absolute_path: incoming.absolute_path } : {}),
+  };
 }
 
 function normalizeFileEditStatus(value: unknown, phase: string | undefined): "editing" | "done" | "error" {

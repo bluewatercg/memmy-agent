@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryListItem, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
   buildMemoryUiDeletedEvent,
   buildMemoryUiDetailOpenedEvent,
@@ -14,6 +15,11 @@ import { ChevronRight, Search, Sparkles, X } from "./memory-prototype-icons.js";
 import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, displayMemoryTitle, drawerEyebrow } from "./memory-display.js";
+import {
+  MemoryReferenceTags,
+  type MemoryReferenceOpenRequest,
+  type OpenMemoryReference
+} from "./memory-reference-tags.js";
 import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
@@ -52,6 +58,8 @@ interface ExperienceView {
 
 export interface PoliciesSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 function policiesCacheKeys(query: string, page: number): string[] {
@@ -133,7 +141,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     void refresh(normalizedPage).catch(() => undefined);
   }
 
-  function openDetail(item: MemoryListItem) {
+  function openDetailById(id: string) {
     track(buildMemoryUiDetailOpenedEvent({
       subPage: "policies",
       filterLayer: policiesFilterLayer
@@ -145,9 +153,13 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
 
     setDetail({ status: "loading" });
     void props.client
-      .getMemory(item.id)
+      .getMemory(id)
       .then((data) => setDetail({ status: "ready", data }))
       .catch((error) => setDetail({ status: "error", message: toMemoryDetailErrorMessage(error, t("memory.detailUnavailable")) }));
+  }
+
+  function openDetail(item: MemoryListItem) {
+    openDetailById(item.id);
   }
 
   async function deleteDetail(id: string) {
@@ -169,6 +181,13 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
     void refresh().catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t]);
+
+  useEffect(() => {
+    if (props.openRequest) {
+      openDetailById(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
 
   return (
     <section className="memory-panel">
@@ -215,6 +234,7 @@ export function PoliciesSubPage(props: PoliciesSubPageProps) {
         onDeleteDetail={deleteDetail}
         onCloseDetail={() => setDetail(null)}
         onPageChange={changePage}
+        onOpenMemoryReference={props.onOpenMemoryReference}
       />
     </section>
   );
@@ -227,54 +247,60 @@ function ExperienceState(props: {
   onDeleteDetail: (id: string) => Promise<void>;
   onCloseDetail: () => void;
   onPageChange: (page: number) => void;
+  onOpenMemoryReference: OpenMemoryReference;
 }) {
   const { t } = useTranslation();
 
-  if (props.state.status === "loading") {
-    return <MemoryStateBox message={t("memory.policies.loading")} />;
-  }
-
-  if (props.state.status === "error") {
-    return <MemoryStateBox message={props.state.message} tone="error" />;
-  }
-
-  if (props.state.data.items.length === 0) {
-    return <MemoryStateBox message={t("memory.policies.empty")} />;
-  }
-
   return (
     <>
-      <div className="memory-list">
-        {props.state.data.items.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            onClick={() => props.onOpenDetail(item)}
-            className="memory-card"
-          >
-            <div className="memory-card__body">
-              <div className="memory-card__title">{displayMemoryTitle(item)}</div>
-              <div className="memory-card__meta">
-                <PolicyStatusPill status={item.status} />
-                <span>{t("memory.memories.updatedAt")}: {formatDateTime(item.updatedAt)}</span>
-                {item.tags.slice(0, 4).map((tag) => (
-                  <span key={tag}>{tag}</span>
-                ))}
-              </div>
-            </div>
-            <div className="memory-card__tail">
-              <ChevronRight size={16} />
-            </div>
-          </button>
-        ))}
-      </div>
-      <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
-      <ExperienceDrawer detail={props.detail} onClose={props.onCloseDetail} onDelete={props.onDeleteDetail} />
+      {props.state.status === "loading" && <MemoryStateBox message={t("memory.policies.loading")} />}
+      {props.state.status === "error" && <MemoryStateBox message={props.state.message} tone="error" />}
+      {props.state.status === "ready" && props.state.data.items.length === 0 && <MemoryStateBox message={t("memory.policies.empty")} />}
+      {props.state.status === "ready" && props.state.data.items.length > 0 && (
+        <>
+          <div className="memory-list">
+            {props.state.data.items.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => props.onOpenDetail(item)}
+                className="memory-card"
+              >
+                <div className="memory-card__body">
+                  <div className="memory-card__title">{displayMemoryTitle(item)}</div>
+                  <div className="memory-card__meta">
+                    <PolicyStatusPill status={item.status} />
+                    <span>{t("memory.memories.updatedAt")}: {formatDateTime(item.updatedAt)}</span>
+                    {item.tags.slice(0, 4).map((tag) => (
+                      <span key={tag}>{tag}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="memory-card__tail">
+                  <ChevronRight size={16} />
+                </div>
+              </button>
+            ))}
+          </div>
+          <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
+        </>
+      )}
+      <ExperienceDrawer
+        detail={props.detail}
+        onClose={props.onCloseDetail}
+        onDelete={props.onDeleteDetail}
+        onOpenMemoryReference={props.onOpenMemoryReference}
+      />
     </>
   );
 }
 
-function ExperienceDrawer(props: { detail: DetailState; onClose: () => void; onDelete: (id: string) => Promise<void> }) {
+function ExperienceDrawer(props: {
+  detail: DetailState;
+  onClose: () => void;
+  onDelete: (id: string) => Promise<void>;
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
 
   if (!props.detail) {
@@ -306,7 +332,9 @@ function ExperienceDrawer(props: { detail: DetailState; onClose: () => void; onD
         <div className="memory-drawer__body">
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.policies.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
-          {props.detail.status === "ready" && <ExperienceDetail detail={props.detail.data} />}
+          {props.detail.status === "ready" && (
+            <ExperienceDetail detail={props.detail.data} onOpenMemoryReference={props.onOpenMemoryReference} />
+          )}
         </div>
         {readyDetail && <MemoryDrawerDeleteAction onDelete={() => props.onDelete(readyDetail.item.id)} />}
       </aside>
@@ -314,7 +342,7 @@ function ExperienceDrawer(props: { detail: DetailState; onClose: () => void; onD
   );
 }
 
-function ExperienceDetail(props: { detail: GetMemoryOutput }) {
+function ExperienceDetail(props: { detail: GetMemoryOutput; onOpenMemoryReference: OpenMemoryReference }) {
   const { t } = useTranslation();
   const experience = experienceFromDetail(props.detail);
 
@@ -349,11 +377,15 @@ function ExperienceDetail(props: { detail: GetMemoryOutput }) {
         title={t("memory.policies.sourceTasks")}
         ids={experience.sourceEpisodes}
         empty={t("memory.policies.noSourceTasks")}
+        fallbackPage="tasks"
+        onOpen={props.onOpenMemoryReference}
       />
       <LinkedIdsSection
         title={t("memory.policies.sourceMemories")}
         ids={experience.sourceTraces.length > 0 ? experience.sourceTraces : props.detail.item.sourceMemoryIds}
         empty={t("memory.policies.noSourceMemories")}
+        fallbackPage="memories"
+        onOpen={props.onOpenMemoryReference}
       />
     </>
   );
@@ -404,20 +436,22 @@ function GuidanceList(props: { title: string; entries: string[]; tone: "prefer" 
   );
 }
 
-function LinkedIdsSection(props: { title: string; ids: string[]; empty: string }) {
-  const uniqueIds = uniqueStrings(props.ids);
+function LinkedIdsSection(props: {
+  title: string;
+  ids: string[];
+  empty: string;
+  fallbackPage: "memories" | "tasks";
+  onOpen: OpenMemoryReference;
+}) {
+  const hasIds = props.ids.some(Boolean);
 
   return (
     <section className="memory-detail-card">
       <h5 className="memory-detail-card__label">{props.title}</h5>
-      {uniqueIds.length === 0 ? (
+      {!hasIds ? (
         <div className="memory-policy-empty">{props.empty}</div>
       ) : (
-        <div className="memory-policy-id-list">
-          {uniqueIds.map((id) => (
-            <span key={id} className="memory-policy-id">{compactId(id)}</span>
-          ))}
-        </div>
+        <MemoryReferenceTags ids={props.ids} fallbackPage={props.fallbackPage} onOpen={props.onOpen} />
       )}
     </section>
   );
@@ -544,10 +578,6 @@ function stringArray(value: unknown): string[] {
   return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim());
 }
 
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values.filter(Boolean))];
-}
-
 function formatNumber(value: number | undefined, digits: number): string {
   return value === undefined ? "-" : value.toFixed(digits);
 }
@@ -557,12 +587,5 @@ function formatDateTime(value: string | undefined): string {
     return "-";
   }
 
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function compactId(id: string): string {
-  const parts = id.split("::");
-  const value = parts[parts.length - 1] ?? id;
-  return value.length > 22 ? `${value.slice(0, 18)}...` : value;
+  return formatUserDateTime(value);
 }

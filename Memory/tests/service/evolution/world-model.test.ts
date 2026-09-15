@@ -1,238 +1,54 @@
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
-import {
-  insertActivePolicyMemory,
-  insertWorldModelMemoryForTest,
-  makeTraceEligibleForL2,
-  setPolicySignatureAndVectorForTest
-} from "../../fixtures/evolution-fixture.js";
-import {
-  createCapturingL2Llm,
-  createNoToolSkillLlm
-} from "./evolution-llm-stubs.js";
+import { Repositories } from "../../../src/storage/repositories.js";
 import { createMemoryServiceFixture } from "../../fixtures/memory-service-fixture.js";
+import { insertActivePolicyMemory } from "../../fixtures/evolution-fixture.js";
 
 const {
-  cleanup,
-  createTestMemoryService,
-  createTestRoot,
+  cleanup: cleanupMemoryServiceFixture,
   createTestService
 } = createMemoryServiceFixture();
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanupMemoryServiceFixture();
+});
 
-describe("MemoryService / evolution / world model", () => {
-  it("merges L3 world models by policy overlap even when the domain key changes", async () => {
-    const { db, service } = createTestService({ skillLlm: createNoToolSkillLlm() });
-    const session = service.openSession({
-      namespace: {
-        source: "codex",
-        profileId: "jiang",
-        userId: "user-l3-policy-overlap"
-      },
-      workspaceId: "workspace-l3-overlap"
-    });
-    const complete = service.completeTurn("turn-l3-policy-overlap", {
-      sessionId: session.sessionId,
-      episodeId: "episode-l3-policy-overlap",
-      query: "python pytest l3 overlap merge",
-      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
+describe("MemoryService / evolution / legacy world model", () => {
+  it("does not generate policy-derived legacy L3 records after schema v6", async () => {
+    const { db, service } = createTestService();
     insertActivePolicyMemory(db, {
-      id: "policy_l3_policy_overlap",
-      userId: "user-l3-policy-overlap",
-      sessionId: session.sessionId,
+      id: "policy_no_legacy_world_model",
+      userId: "world-model-user",
+      sessionId: "world-model-session",
       agentId: "codex",
-      appId: "workspace-l3-overlap",
-      profileId: "jiang",
-      sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
+      appId: "world-model-workspace",
+      profileId: "default",
+      sourceTraceId: "trace_world_model",
+      sourceEpisodeId: "episode_world_model"
     });
-    insertWorldModelMemoryForTest(db, {
-      id: "world_l3_policy_overlap_existing",
-      userId: "user-l3-policy-overlap",
-      sessionId: session.sessionId,
-      agentId: "codex",
-      appId: "workspace-l3-overlap",
-      profileId: "jiang",
-      memoryKey: "world:legacy-overlap-key",
-      domainKey: "legacy|pytest",
-      domainTags: ["legacy"],
-      policyIds: ["policy_l3_policy_overlap"]
-    });
-    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    const repos = new Repositories(db.db);
     const at = new Date().toISOString();
-    db.db.prepare(
-      `INSERT INTO evolution_jobs (
-         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
-         payload_json, attempts, max_attempts, created_at, updated_at
-       ) VALUES (?, 'l3_abstraction', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
-    ).run(
-      "job_l3_policy_overlap_merge",
-      "user-l3-policy-overlap",
-      session.sessionId,
-      complete.episodeId,
-      "policy_l3_policy_overlap",
-      at,
-      at
-    );
-
-    await service.runWorkerOnce(20);
-
-    const worlds = db.db.prepare(
-      `SELECT id, memory_key, memory_value, properties_json
-       FROM memories
-       WHERE user_id = 'user-l3-policy-overlap'
-         AND memory_layer = 'L3'`
-    ).all() as Array<{ id: string; memory_key: string; memory_value: string; properties_json: string }>;
-    expect(worlds).toHaveLength(1);
-    expect(worlds[0]).toMatchObject({
-      id: "world_l3_policy_overlap_existing",
-      memory_key: "world:legacy-overlap-key"
-    });
-    const world = JSON.parse(worlds[0]!.properties_json) as {
-      internal_info?: {
-        world_model_confidence?: number;
-        body?: string;
-        world_model?: {
-          policy_ids?: string[];
-          domain_tags?: string[];
-          confidence?: number;
-          body?: string;
-        };
-      };
-    };
-    expect(world.internal_info?.world_model?.policy_ids).toEqual(["policy_l3_policy_overlap"]);
-    expect(world.internal_info?.world_model?.domain_tags).toEqual(expect.arrayContaining(["legacy", "pytest", "sqlite"]));
-    expect(world.internal_info?.world_model_confidence).toBeCloseTo(0.65);
-    expect(world.internal_info?.world_model?.confidence).toBeCloseTo(0.65);
-    expect(worlds[0]!.memory_value).not.toContain("Merged policies:");
-    expect(world.internal_info?.body).not.toContain("Merged policies:");
-    expect(world.internal_info?.world_model?.body).not.toContain("Merged policies:");
-
-    db.close();
-  });
-
-  it("records an L3 cooldown skip instead of silently dropping the abstraction run", async () => {
-    const root = createTestRoot("mindock-memory-");
-    const db = new MemoryDb({
-      path: join(root, "memory.sqlite")
-    });
-    const service = createTestMemoryService({
-      db,
-      mode: "dev",
-      skillLlm: createCapturingL2Llm([]),
-      config: {
-        ...DEFAULT_MEMMY_CONFIG,
-        algorithm: {
-          ...DEFAULT_MEMMY_CONFIG.algorithm,
-          l3Abstraction: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.l3Abstraction,
-            useLlm: true,
-            cooldownDays: 1
-          },
-          skill: {
-            ...DEFAULT_MEMMY_CONFIG.algorithm.skill,
-            useLlm: false
-          }
-        }
-      }
-    });
-    const session = service.openSession({
-      namespace: {
-        source: "codex",
-        profileId: "jiang",
-        userId: "user-l3-cooldown"
+    const job = repos.runtime.enqueueJob({
+      id: "job_legacy_l3_noop",
+      jobType: "l3_abstraction",
+      status: "queued",
+      userId: "world-model-user",
+      payload: {
+        targetKind: "policy_cluster",
+        seedPolicyId: "policy_no_legacy_world_model",
+        policyIds: ["policy_no_legacy_world_model"]
       },
-      workspaceId: "workspace-l3-cooldown"
-    });
-    const complete = service.completeTurn("turn-l3-cooldown", {
-      sessionId: session.sessionId,
-      episodeId: "episode-l3-cooldown",
-      query: "python pytest l3 cooldown",
-      answer: "Run pytest, inspect the failure, retry after fixing issue, then verify the result."
-    });
-    insertActivePolicyMemory(db, {
-      id: "policy_l3_cooldown",
-      userId: "user-l3-cooldown",
-      sessionId: session.sessionId,
-      agentId: "codex",
-      appId: "workspace-l3-cooldown",
-      profileId: "jiang",
-      sourceTraceId: complete.l1MemoryId,
-      sourceEpisodeId: complete.episodeId
-    });
-    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
-    const firstAt = new Date().toISOString();
-    db.db.prepare(
-      `INSERT INTO evolution_jobs (
-         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
-         payload_json, attempts, max_attempts, created_at, updated_at
-       ) VALUES (?, 'l3_abstraction', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
-    ).run(
-      "job_l3_cooldown_create",
-      "user-l3-cooldown",
-      session.sessionId,
-      complete.episodeId,
-      "policy_l3_cooldown",
-      firstAt,
-      firstAt
-    );
-    await service.runWorkerOnce(20);
-
-    const createdWorld = db.db.prepare(
-      `SELECT id, updated_at
-       FROM memories
-       WHERE user_id = 'user-l3-cooldown'
-         AND memory_layer = 'L3'
-       LIMIT 1`
-    ).get() as { id: string; updated_at: string } | undefined;
-    expect(createdWorld).toBeTruthy();
-
-    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
-    const secondAt = new Date().toISOString();
-    db.db.prepare(
-      `INSERT INTO evolution_jobs (
-         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
-         payload_json, attempts, max_attempts, created_at, updated_at
-       ) VALUES (?, 'l3_abstraction', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
-    ).run(
-      "job_l3_cooldown_skip",
-      "user-l3-cooldown",
-      session.sessionId,
-      complete.episodeId,
-      "policy_l3_cooldown",
-      secondAt,
-      secondAt
-    );
-    await service.runWorkerOnce(20);
-
-    const worlds = db.db.prepare(
-      `SELECT id, updated_at
-       FROM memories
-       WHERE user_id = 'user-l3-cooldown'
-         AND memory_layer = 'L3'`
-    ).all() as Array<{ id: string; updated_at: string }>;
-    expect(worlds).toEqual([createdWorld]);
-    const skipped = db.db.prepare(
-      `SELECT memory_id, after_json
-       FROM memory_change_log
-       WHERE user_id = 'user-l3-cooldown'
-         AND kind = 'world_model'
-         AND op = 'skipped'
-         AND change_type = 'l3_abstraction_skipped'
-       ORDER BY seq DESC
-       LIMIT 1`
-    ).get() as { memory_id: string; after_json: string } | undefined;
-    expect(skipped?.memory_id).toBe("policy_l3_cooldown");
-    expect(JSON.parse(skipped!.after_json)).toMatchObject({
-      policyIds: ["policy_l3_cooldown"],
-      reason: "cooldown"
+      attempts: 0,
+      maxAttempts: 1,
+      createdAt: at,
+      updatedAt: at
     });
 
-    db.close();
-  });
+    await service.runWorkerOnce(10);
+
+    expect(repos.runtime.getJob(job.id)?.status).toBe("succeeded");
+    expect(db.db.prepare(
+      `SELECT COUNT(*) AS count FROM memories WHERE memory_layer = 'L3'`
+    ).get()).toEqual({ count: 0 });
 
   it("skips L3 abstraction when the policy cluster has no centroid vector like the plugin", async () => {
     const { db, service } = createTestService({ skillLlm: createCapturingL2Llm([]) });

@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalJson, sha256Hex } from "../../src/contracts/index.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   MemoryDb,
@@ -48,6 +49,67 @@ async function withServerClosed(
 
 describe("MemoryService / REST contract", () => {
 
+  it("uses the caller timezone for offset-less memory times and rejects invalid zones", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const endpoint = `http://127.0.0.1:${address.port}`;
+      const client = new MemoryRestClient({ endpoint, timeZone: "Asia/Shanghai" });
+
+      const added = await client.addMemory({
+        content: "timezone-aware import",
+        layer: "L2",
+        createdAt: "2026-08-06T12:30:00"
+      }) as { id: string; createdAt: string };
+      expect(added.createdAt).toBe("2026-08-06T04:30:00.000Z");
+      expect(new Repositories(db.db).memories.get(added.id)?.info.time_zone).toBe("+08:00");
+
+      const opened = await client.openSession({ sessionId: "timezone-aware-session" }) as { sessionId: string };
+      const completed = await client.completeTurn("timezone-aware-turn", {
+        sessionId: opened.sessionId,
+        query: "remember my local time",
+        answer: "stored with timezone context"
+      }) as { l1MemoryId: string };
+      expect(new Repositories(db.db).memories.get(completed.l1MemoryId)?.info.time_zone)
+        .toBe("+08:00");
+
+      const invalid = await fetch(`${endpoint}/api/v1/panel/overview`, {
+        headers: { "x-memmy-time-zone": "Mars/Base" }
+      });
+      expect(invalid.status).toBe(400);
+      await expect(invalid.json()).resolves.toMatchObject({
+        error: { code: "invalid_argument", message: "invalid timezone: Mars/Base" }
+      });
+    });
+    db.close();
+  });
+
+  it("prefers the configured timezone over the caller timezone", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service, timeZone: "UTC" });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({
+        endpoint: `http://127.0.0.1:${address.port}`,
+        timeZone: "Asia/Shanghai"
+      });
+
+      const added = await client.addMemory({
+        content: "configured timezone wins",
+        layer: "L2",
+        createdAt: "2026-08-06T12:30:00"
+      }) as { id: string; createdAt: string };
+      expect(added.createdAt).toBe("2026-08-06T12:30:00.000Z");
+      expect(new Repositories(db.db).memories.get(added.id)?.info.time_zone).toBe("+00:00");
+    });
+    db.close();
+  });
+
   it("serves the REST health endpoint", async () => {
     const { db, service } = createTestService();
     const server = createMemoryHttpServer({ service });
@@ -71,6 +133,9 @@ describe("MemoryService / REST contract", () => {
         fullText?: string;
         vector?: string;
       };
+      features?: {
+        l3WorldModelProtocolVersions: number[];
+      };
     };
     expect(response.status).toBe(200);
     expect(body.ok).toBe(true);
@@ -80,6 +145,9 @@ describe("MemoryService / REST contract", () => {
     expect(body.storage.vector).toBe("native");
     expect(body.storage.schemaVersion).toBe("11");
     expect(body.storage.lastMigrationId).toBe("011_asset_recall_terminal_outcomes");
+    expect(body.features).toEqual({
+      l3WorldModelProtocolVersions: [2]
+    });
     const client = new MemoryRestClient({
       endpoint: `http://127.0.0.1:${address.port}`
     });
@@ -277,6 +345,55 @@ describe("MemoryService / REST contract", () => {
     db.close();
   });
 
+  it("serves strict v2 L3 and project environment routes through MemoryRestClient", async () => {
+    const { db, service } = createTestService();
+    const server = createMemoryHttpServer({ service });
+    await withServerClosed(server, async () => {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("expected TCP address");
+      const client = new MemoryRestClient({ endpoint: `http://127.0.0.1:${address.port}` });
+      const namespace = {
+        source: "codex",
+        profileId: "matrix-profile",
+        sessionKey: "codex:rest-v2",
+        userId: "rest-v2-user"
+      } as const;
+      const opened = await client.openSession({
+        requestId: "8c960b93-852f-4182-833c-d07591bb7c21",
+        adapterId: "codex-memory",
+        source: "codex",
+        namespace,
+        l3WorldModelProtocolVersion: 2,
+        l3WorldModelTransition: "resume_only",
+        workspaceUri: "file:///tmp/rest-v2-project",
+        workspaceHostId: "c".repeat(64)
+      }) as { sessionId: string; projectId: string };
+      expect(opened.projectId).toMatch(/^ws_/u);
+      expect(new Repositories(db.db).runtime.getSession(opened.sessionId)?.profileId).toBe("matrix-profile");
+      const envelope = {
+        requestId: "91ae733d-25af-4ab0-8cbd-49c447b34d98",
+        adapterId: "codex-memory",
+        source: "codex",
+        namespace: { ...namespace, projectId: opened.projectId }
+      } as const;
+      await expect(client.l3WorldModelTraceHead(opened.sessionId, {
+        ...envelope,
+        requestId: "b539776a-867d-42da-b11c-fc6ab94fd65a"
+      })).resolves.toMatchObject({ throughL1MemoryId: null, traceSeq: null });
+      await expect(client.l3WorldModelContext(opened.sessionId, {
+        ...envelope,
+        requestId: "66fb88a6-66a4-4b67-8b60-fe9e68b9e82a"
+      })).resolves.toMatchObject({ schemaVersion: 2, projectId: opened.projectId });
+      const removedRoute = await fetch(
+        `http://127.0.0.1:${address.port}/api/v1/l3-world-model/projects/${opened.projectId}/environment-sync/start`,
+        { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+      );
+      expect(removedRoute.status).toBe(404);
+    });
+    db.close();
+  });
+
   it("serves the manual memory-processing retry endpoint", async () => {
     const root = mkdtempSync(join(tmpdir(), "mindock-memory-http-processing-retry-"));
     roots.push(root);
@@ -378,6 +495,7 @@ describe("MemoryService / REST contract", () => {
       sessionId: opened.sessionId,
       turnId: "cursor-http-turn",
       query: "Continue the hook lifecycle repair",
+      layers: ["L2"],
       contextHints: {
         agentIdentity: "cursor-agent",
         hostProvider: "cursor"
@@ -390,7 +508,6 @@ describe("MemoryService / REST contract", () => {
       body: JSON.stringify(startRequestBody)
     });
     const started = await startResponse.json() as {
-      episodeId: string;
       searchEventId: string;
       turnId: string;
       closedEpisodeIds: string[];
@@ -399,7 +516,7 @@ describe("MemoryService / REST contract", () => {
     };
     expect(startResponse.status).toBe(200);
     expect(started.turnId).toBe("cursor-http-turn");
-    expect(started.episodeId).toMatch(/^episode_/u);
+    expect(started).not.toHaveProperty("episodeId");
     expect(started.projectContext).toMatchObject({ version: 0, status: "no_confirmed_goal", goal: null, focusedWorkItem: null });
     expect(started.projectContext.markdown).toContain('<memmy_project_context version="0" status="no_confirmed_goal">');
     expect(started.closedEpisodeIds).toEqual([]);
@@ -413,8 +530,6 @@ describe("MemoryService / REST contract", () => {
     };
     expect(afterFirstStart).toEqual({
       ...beforeStart,
-      episodes: beforeStart.episodes + 1,
-      rawTurns: beforeStart.rawTurns + 1,
       recalls: beforeStart.recalls + 1,
       apiLogs: beforeStart.apiLogs + 1,
       idempotency: beforeStart.idempotency + 1
@@ -423,11 +538,7 @@ describe("MemoryService / REST contract", () => {
       `SELECT episode_id, assistant_text, status
        FROM raw_turns
        WHERE session_id = ? AND turn_id = ?`
-    ).get(opened.sessionId, started.turnId)).toEqual({
-      episode_id: started.episodeId,
-      assistant_text: null,
-      status: "started"
-    });
+    ).get(opened.sessionId, started.turnId)).toBeUndefined();
     expect(db.db.prepare(
       `SELECT tool_name, json_extract(input_json, '$.retrievalMode') AS retrieval_mode
        FROM api_logs
@@ -437,13 +548,15 @@ describe("MemoryService / REST contract", () => {
       tool_name: "memory_search",
       retrieval_mode: "turn_start"
     });
+    expect(db.db.prepare(
+      "SELECT layers_json FROM recall_events WHERE id = ?"
+    ).get(started.searchEventId)).toEqual({ layers_json: '["L2"]' });
     const duplicateStartResponse = await fetch(baseUrl + "/turns/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(startRequestBody)
     });
     const duplicateStarted = await duplicateStartResponse.json() as {
-      episodeId: string;
       searchEventId: string;
       turnId: string;
     };
@@ -488,7 +601,7 @@ describe("MemoryService / REST contract", () => {
     });
     const completed = await completeResponse.json() as { episodeId: string; rawTurnId: string };
     expect(completeResponse.status).toBe(200);
-    expect(completed.episodeId).toBe(started.episodeId);
+    expect(completed.episodeId).toMatch(/^episode_/u);
 
     const sessionRow = db.db.prepare(
       "SELECT source, profile_id, workspace_path FROM sessions WHERE id = ?"
@@ -555,7 +668,7 @@ describe("MemoryService / REST contract", () => {
         answer: "embedding jobs should drain after REST turn complete"
       })
     });
-    const complete = await completeResponse.json() as { l1MemoryId: string };
+    const complete = await completeResponse.json() as { episodeId: string; l1MemoryId: string };
     expect(completeResponse.status).toBe(200);
 
     const closeResponse = await fetch(
@@ -567,6 +680,14 @@ describe("MemoryService / REST contract", () => {
       }
     );
     expect(closeResponse.status).toBe(200);
+    await expect(closeResponse.json()).resolves.toMatchObject({
+      ok: true,
+      sessionId: session.sessionId,
+      status: "closed",
+      closedEpisodeIds: [complete.episodeId],
+      changeSeq: expect.any(Number),
+      syncCursor: expect.any(String)
+    });
 
     await waitFor(() => {
       const row = db.db.prepare(
@@ -978,9 +1099,12 @@ describe("MemoryService / REST contract", () => {
 
     expect(readerResponse.status).toBe(403);
     expect(result).toMatchObject({
-      activeProfile: "account",
       changed: true,
-      requiresRestart: false
+      requiresRestart: false,
+      models: {
+        summary: { routing: expect.stringMatching(/^(follow|fixed)$/) },
+        evolution: { routing: expect.stringMatching(/^(follow|fixed)$/) }
+      }
     });
 
     });

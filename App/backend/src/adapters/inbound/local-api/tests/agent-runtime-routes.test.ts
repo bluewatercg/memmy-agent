@@ -33,6 +33,7 @@ describe("agent runtime local api routes", () => {
       { method: "GET", url: "/api/v1/memory/memory-1/history" },
       { method: "POST", url: "/api/v1/memory/memory-1/history/1/restore", payload: { version: 1, reason: "desktop restore" } },
       { method: "DELETE", url: "/api/v1/memory/memory-1" },
+      { method: "GET", url: "/api/v1/memory/recalls/turn-1" },
       { method: "GET", url: "/api/v1/memory/logs?tools=memory_add,memory_search&limit=20&offset=0" },
       { method: "GET", url: "/api/v1/panel/overview" },
       { method: "GET", url: "/api/v1/panel/analysis" },
@@ -71,6 +72,51 @@ describe("agent runtime local api routes", () => {
     });
 
     expect(response.statusCode).toBe(401);
+  });
+
+  it("forwards the renderer timezone to memory services", async () => {
+    let receivedContext: unknown;
+    app = createServer({
+      search: {
+        async search(_input: unknown, context: unknown) {
+          receivedContext = context;
+          return searchOutput();
+        }
+      }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/memory/search",
+      headers: {
+        "x-memmy-local-token": "test-token",
+        "x-memmy-time-zone": "Asia/Shanghai"
+      },
+      payload: searchInput()
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(receivedContext).toMatchObject({ adapterId: "runtime", timeZone: "+08:00" });
+
+    await app.close();
+    app = createServer({
+      search: {
+        async search(_input: unknown, context: unknown) {
+          receivedContext = context;
+          return searchOutput();
+        }
+      }
+    }, "UTC");
+    await app.inject({
+      method: "POST",
+      url: "/api/v1/memory/search",
+      headers: {
+        "x-memmy-local-token": "test-token",
+        "x-memmy-time-zone": "Asia/Shanghai"
+      },
+      payload: searchInput()
+    });
+    expect(receivedContext).toMatchObject({ adapterId: "runtime", timeZone: "+00:00" });
   });
 
   it("reloads the latest model config before retrying one failed memory", async () => {
@@ -381,7 +427,7 @@ describe("agent runtime local api routes", () => {
   });
 });
 
-function createServer(overrides: Record<string, unknown> = {}): FastifyInstance {
+function createServer(overrides: Record<string, unknown> = {}, timeZone?: string): FastifyInstance {
   const services = {
     memoryClient: {
       async health() {
@@ -480,7 +526,17 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
       async getById() { return getMemoryOutput(); },
       async history(id: string) { return memoryHistoryOutput(id); },
       async restore(id: string, targetVersion: number) { return restoreMemoryOutput(id, targetVersion); },
-      async delete() { return deleteMemoryOutput(); }
+      async delete() { return deleteMemoryOutput(); },
+      async recallEvidence() {
+        return {
+          recallEventId: "recall-1",
+          queryId: "turn-1",
+          query: "question",
+          hits: [],
+          createdAt: now(),
+          serverTime: now()
+        };
+      }
     },
     panel: {
       async overview() { return panelOverviewOutput(); },
@@ -504,6 +560,7 @@ function createServer(overrides: Record<string, unknown> = {}): FastifyInstance 
   return createLocalApiServer({
     permissionManager: createPermissionManager(),
     services,
+    timeZone,
     heartbeatIntervalMs: 20
   });
 }
@@ -552,9 +609,9 @@ function projectContextStateOutput() {
 
 function memoryModels() {
   return {
-    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true },
-    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true },
-    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false }
+    summary: { provider: "openai_compatible", model: "memory_summary", configured: true, remote: true, routing: "fixed" as const },
+    evolution: { provider: "openai_compatible", model: "memory_evolution", configured: true, remote: true, routing: "follow" as const },
+    embedding: { provider: "local", model: "hash-embedding-v1", configured: true, remote: false, mode: "local" as const }
   };
 }
 
@@ -623,7 +680,6 @@ function startTurnOutput() {
     turnId: "turn-1",
     contextPacketId: "context-1",
     sessionId: "session-1",
-    episodeId: "episode-1",
     injectedContext: { markdown: "", sections: [] },
     searchEventId: "search-1",
     sourceMemoryIds: [],
@@ -638,6 +694,8 @@ function completeTurnOutput() {
     turnId: "turn-1",
     sessionId: "session-1",
     l1MemoryId: "memory-1",
+    l1MemoryIds: ["memory-1"],
+    closedEpisodeIds: [],
     rawTurnId: "raw-1",
     episodeId: "episode-1",
     scheduledEvolution: false,
@@ -732,7 +790,7 @@ function deleteMemoryOutput() {
 
 function panelOverviewOutput() {
   return {
-    counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 },
+    counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
     dailyActivity: panelDays(),
     sourceDistribution: []
   };

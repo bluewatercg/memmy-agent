@@ -24,4 +24,19 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: [
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "src/**/*.spec.ts",
+      "src/**/*.spec.tsx",
+      "src/**/tests/**/*.ts",
+      "src/**/tests/**/*.tsx",
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: false,
+      },
+    },
+  },
 );

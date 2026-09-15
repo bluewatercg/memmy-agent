@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { MemoryProfileName } from "../config/index.js";
 
 export type MemoryAgentRegion = "cn" | "intl";
 
@@ -17,14 +16,18 @@ export interface ResolveMemoryAgentRegionOptions {
 export function packagedDesktopEditionManifestPath(
   modelDirectory = import.meta.dirname
 ): string {
+  const normalized = resolve(modelDirectory).replace(/\\/g, "/");
+  if (normalized.includes("/memory-runtime/dist/")) {
+    return resolve(modelDirectory, "../../../../app.asar/dist/main/desktop-edition.json");
+  }
   return resolve(modelDirectory, "../../../../main/desktop-edition.json");
 }
 
 export function resolveMemoryAgentRegion(
-  activeProfile: MemoryProfileName,
+  sourceProvider: string | null | undefined,
   options: ResolveMemoryAgentRegionOptions = {}
 ): MemoryAgentRegion | undefined {
-  if (activeProfile !== "account") return undefined;
+  if (sourceProvider !== "memmy_account") return undefined;
 
   const manifest = readDesktopEditionManifest(
     options.manifestPath ?? packagedDesktopEditionManifestPath()

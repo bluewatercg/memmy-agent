@@ -3,23 +3,23 @@ import { PanelItemsInputSchema, PanelTasksInputSchema, ProjectContextFocusInputS
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
-import type { RuntimeContext } from "../../../../../services/runtime-context.js";
+import { runtimeContextFromRequest } from "../../../../../services/runtime-context.js";
 import type { AgentRuntimeRouteDeps } from "./index.js";
 
 export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
   app.get(
     "/api/v1/panel/overview",
     { preHandler: deps.authenticateRuntimeToken },
-    withErrorEnvelope(async (_request, reply) => {
-      return reply.send(await deps.services.panel.overview(runtimeContext()));
+    withErrorEnvelope(async (request, reply) => {
+      return reply.send(await deps.services.panel.overview(runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
   app.get(
     "/api/v1/panel/analysis",
     { preHandler: deps.authenticateRuntimeToken },
-    withErrorEnvelope(async (_request, reply) => {
-      return reply.send(await deps.services.panel.analysis(runtimeContext()));
+    withErrorEnvelope(async (request, reply) => {
+      return reply.send(await deps.services.panel.analysis(runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -100,7 +100,7 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
         ...rawQuery,
         excludedSourceAgents
       });
-      return reply.send(await deps.services.panel.items(input, runtimeContext()));
+      return reply.send(await deps.services.panel.items(input, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -109,7 +109,7 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
     { preHandler: deps.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const input = PanelTasksInputSchema.parse(request.query);
-      return reply.send(await deps.services.panel.tasks(input, runtimeContext()));
+      return reply.send(await deps.services.panel.tasks(input, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -118,7 +118,7 @@ export function registerPanelRoutes(app: FastifyInstance, deps: AgentRuntimeRout
     { preHandler: deps.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const { id } = z.object({ id: z.string().min(1) }).parse(request.params);
-      return reply.send(await deps.services.panel.deleteTask(id, runtimeContext()));
+      return reply.send(await deps.services.panel.deleteTask(id, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 

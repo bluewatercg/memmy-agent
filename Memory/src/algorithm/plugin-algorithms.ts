@@ -10,10 +10,16 @@ import type { LlmClient } from "../model/types.js";
 import { MEMORY_SUMMARY_MAX_TOKENS } from "../config/index.js";
 import { memoryVector } from "../storage/memory-vector-state.js";
 import { stableHash } from "../utils/id.js";
+import { formatZonedTime } from "../utils/time.js";
+import {
+  renderL3WorldModelFields,
+  type L3WorldModelFields
+} from "../contracts/index.js";
 
 export interface CapturedTraceStep {
   key: string;
   ts: number;
+  timeZone?: string;
   turnId: string;
   rawTurnId?: string;
   stepIndex: number;
@@ -42,6 +48,7 @@ export interface TraceMemoryMeta {
   id: string;
   memory: MemoryRow;
   ts: number;
+  timeZone?: string;
   turnId?: string;
   rawTurnId?: string;
   episodeId?: string;
@@ -74,7 +81,7 @@ export interface PolicyMemoryMeta {
   support: number;
   gain: number;
   confidence: number;
-  status: "candidate" | "active" | "archived";
+  status: "candidate" | "active" | "verification_required" | "quarantined" | "superseded" | "archived";
   experienceType: "success_pattern" | "repair_validated" | "failure_avoidance" | "repair_instruction" | "preference" | "verifier_feedback";
   evidencePolarity: "positive" | "negative" | "mixed" | "neutral";
   skillEligible: boolean;
@@ -86,6 +93,9 @@ export interface PolicyMemoryMeta {
     preference: string[];
     antiPattern: string[];
   };
+  freshnessClass: "stable" | "dynamic";
+  lastVerifiedAt?: string;
+  revalidateAfter?: string;
   salience: number;
   vec: number[] | null;
   updatedAtMs: number;
@@ -102,6 +112,8 @@ export interface SkillMemoryMeta {
   sourceWorldModelIds: string[];
   evidenceAnchorIds: string[];
   invocationGuide: string;
+  retrievalBlurb?: string;
+  triggerContext?: string;
   trialsAttempted: number;
   trialsPassed: number;
   repairOrigin: boolean;
@@ -425,7 +437,10 @@ function detectFeedbackPreference(
     };
   }
   if (/(prefer|instead|should use|下次用|改用|而不是)/.test(normalized)) {
-    return { shape: "preference", confidence: 0.55 };
+    return {
+      shape: "preference",
+      confidence: feedbackMatchesAny(normalized, FEEDBACK_NEGATIVE_PATTERNS) ? 0.75 : 0.55
+    };
   }
   return null;
 }
@@ -943,7 +958,7 @@ export type PromptLanguage = "auto" | "zh" | "en";
 
 export const L2_INDUCTION_PROMPT = {
   id: "l2.induction",
-  version: 3,
+  version: 4,
   description:
     "Distill an L2 policy (procedural sub-task strategy) from a cluster of similar L1 traces, with explicit boundaries against L3 world-model drift.",
   system: `You induce reusable **procedural policies** from agent experience.
@@ -964,6 +979,10 @@ Produce ONE policy describing the action pattern. The policy must:
 - Note at least one CAVEAT or failure mode observed in the traces — a
   step-level pitfall, NOT a generic environment taboo.
 - Generalize across the input traces, not restate one of them.
+- Return should_generate=false when the evidence has no reusable task action,
+  is only a user preference or factual statement, duplicates an existing rule,
+  or contains unresolved contradictory feedback. Do not invent a policy merely
+  to satisfy the output schema.
 
 Source-specific entity boundary:
 - Names, locations, product names, file names, one-off requested targets,
@@ -1025,15 +1044,27 @@ libs by default":
 
 Return JSON:
 {
+  "should_generate": true | false,
   "title": "short imperative title",
   "trigger": "state-level condition the agent can detect",
   "action": "templated step or step sequence",
+  "expected_outcome": "observable result expected after the action",
+  "verification": "how to verify that result",
+  "exclusions": ["condition where this policy must not be used", ...],
   "rationale": "why this action works ON THESE TRACES (not why the
                 environment behaves this way)",
   "caveats": ["step-level pitfall string", ...],
   "confidence": number in [0, 1],
+  "freshness_class": "stable" | "dynamic",
+  "revalidate_after_days": number | null,
   "support_trace_ids": ["tr_...", ...]
-}`,
+}
+
+Use freshness_class="dynamic" when the policy depends on changing business data,
+external APIs, current product behavior, market conditions, live data sources, or
+other assumptions that can expire. Set revalidate_after_days to a positive bounded
+interval for dynamic policies. Use freshness_class="stable" and null for durable
+techniques whose trigger and verification remain self-contained.`,
 } as const;
 
 export const REWARD_R_HUMAN_PROMPT = {
@@ -1047,7 +1078,8 @@ Fields:
 - turnSummaries: chronological L1 summaries of the episode.
 - finalExchange: exact trailing user and assistant text.
 - execution: authoritative aggregate tool outcome.
-- feedback: explicit or implicit user signal; implicit feedback is weaker.
+- feedback: the latest explicit or implicit user signal; implicit feedback is weaker.
+- feedbackHistory: all captured user signals in chronological order.
 - host: authoritative host-agent identity/model context. Do not project your
   own identity, provider, policies, or capabilities onto the host agent.
 
@@ -1057,7 +1089,8 @@ Score three independent axes in [-1, 1]:
 - user_satisfaction: -1 correction/frustration, 0 no signal, +1 acceptance.
 
 Rules:
-- Judge goal achievement against mission, using turnSummaries in order.
+- Judge goal achievement against the active goal, using turnSummaries in order. If later user turns revise or replace the initial mission within the same episode, grade the latest active goal.
+- Treat feedback chronologically. A negative correction followed by demonstrated recovery or explicit acceptance is not a permanent failure.
 - If execution.completedByTool is "no", goal_achievement must not exceed 0
   unless a later summary shows a successful recovery.
 - Explicit negative feedback without later recovery means goal_achievement <= 0.
@@ -1225,14 +1258,16 @@ If nothing is truly relevant, return {"ranked": [], "sufficient": false}.`,
 
 export const RETRIEVAL_QUERY_EXTRACT_PROMPT = {
   id: "retrieval.query.extract",
-  version: 1,
+  version: 2,
   description:
-    "Extract a compact semantic query and up to five keyword terms for memory retrieval.",
+    "Extract semantic, lexical, and optional time-range constraints for memory retrieval.",
   system: `You prepare memory retrieval input for an AI agent.
 
 Given the complete current user input, return JSON with:
 - queryVecText: a compact semantic query for embedding search and later relevance filtering.
 - keywords: up to 5 short keyword strings for lexical FTS / pattern search.
+- timeFilter: an absolute time range only when the user is constraining which
+  personal history or past activity memories should be searched; otherwise null.
 
 Rules:
 1. Use the complete input as evidence. Do not assume a fixed prompt template.
@@ -1241,11 +1276,24 @@ Rules:
 4. keywords must contain at most 5 items, ordered by retrieval usefulness.
 5. Do not invent keywords not grounded in the input.
 6. Keep queryVecText concise but specific; do not summarize away the user's actual goal.
+7. Set timeFilter only when a time expression limits the user's own remembered
+   conversations, actions, work, or prior events. Questions merely about dates,
+   date parsing, historical facts, schedules, or current external information do
+   not request a memory time filter.
+8. Resolve relative expressions such as today, yesterday, this week, recently,
+   今天, 昨天, 本周, and 最近 using CURRENT_TIME and TIME_ZONE supplied with the
+   request. Approximate expressions may use a reasonable bounded range.
+9. startAt is inclusive and endAt is exclusive. Return ISO-8601 timestamps with
+   an explicit UTC offset. endAt must be later than startAt.
 
 Return JSON only:
 {
   "queryVecText": "semantic retrieval query",
-  "keywords": ["term1", "term2", "term3"]
+  "keywords": ["term1", "term2", "term3"],
+  "timeFilter": null | {
+    "startAt": "ISO-8601 timestamp",
+    "endAt": "ISO-8601 timestamp"
+  }
 }`,
 } as const;
 
@@ -1278,7 +1326,7 @@ Rules:
 
 export const L3_ABSTRACTION_PROMPT = {
   id: "l3.abstraction",
-  version: 2,
+  version: 3,
   description:
     "Distill an L3 world model (declarative environment knowledge) from a cluster of L2 policies, with explicit boundaries against L2 procedural drift.",
   system: `You abstract environment world models from cross-task policy evidence.
@@ -1357,14 +1405,19 @@ Return JSON:
   "title": "short noun phrase, e.g. 'Alpine python dependency model'",
   "domain_tags": ["tag1", "tag2"],   // 1-4 short, lowercase, no spaces
   "environment": [
-    { "label": "...", "description": "...", "evidenceIds": ["po_...", "tr_..."] }
+    { "label": "...", "description": "...", "evidenceIds": ["policy_<exact input id>", "trace_<exact input id>"] }
   ],
   "inference":   [ { "label": "...", "description": "...", "evidenceIds": [] } ],
   "constraints": [ { "label": "...", "description": "...", "evidenceIds": [] } ],
-  "body": "rendered markdown summary of the three sections",
+  "summary": "1-3 sentences describing the environment and its most important invariants",
   "confidence": number in [0, 1],
   "supersedes_world_ids": []
-}`
+}
+
+Evidence ID rules:
+- Copy evidence IDs exactly from the input lines prefixed with "policy" or "trace".
+- Never abbreviate, rewrite, or invent an evidence ID.
+- Use [] when no supplied ID directly supports an entry.`
 } as const;
 
 export const SKILL_CRYSTALLIZE_PROMPT = {
@@ -1484,8 +1537,11 @@ export interface WorldModelMemoryMeta {
   cohesion: number;
   admission: "strict" | "loose";
   structure: WorldModelStructure;
+  summary?: string;
   body: string;
   vec: number[] | null;
+  schemaVersion?: 2;
+  fields?: L3WorldModelFields;
 }
 
 export interface WorldModelStructureEntry {
@@ -1510,6 +1566,7 @@ export interface WorldModelDraft {
   cohesion: number;
   admission: "strict" | "loose";
   structure: WorldModelStructure;
+  summary: string;
   body: string;
   vec: number[] | null;
   tags: string[];
@@ -1535,6 +1592,7 @@ export interface RetrievalTuningConfig {
   mmrLambda?: number;
   rrfConstant?: number;
   relativeThresholdFloor?: number;
+  minRecallScore?: number;
   minSkillEta?: number;
   minTraceSim?: number;
   episodeGoalMinSim?: number;
@@ -1961,6 +2019,10 @@ export interface CompiledRetrievalQuery {
 export interface RetrievalQueryExtract {
   queryVecText: string;
   keywords: string[];
+  timeFilter?: {
+    startAt: string;
+    endAt: string;
+  };
 }
 
 export type PluginRetrievalQueryContext =
@@ -3076,6 +3138,7 @@ const DEFAULT_RETRIEVAL_TUNING: Required<RetrievalTuningConfig> = {
   mmrLambda: 0.7,
   rrfConstant: 60,
   relativeThresholdFloor: 0.2,
+  minRecallScore: 0.12,
   minSkillEta: 0.1,
   minTraceSim: 0.25,
   episodeGoalMinSim: 0.45,
@@ -3104,6 +3167,7 @@ export function captureTurnSteps(input: {
   toolCalls?: ToolCallPayload[];
   toolResults?: unknown[];
   createdAtIso: string;
+  timeZone?: string;
   maxTextChars?: number;
   maxToolOutputChars?: number;
 }): CapturedTraceStep[] {
@@ -3116,6 +3180,7 @@ export function captureTurnSteps(input: {
   const rawSteps: Array<Omit<CapturedTraceStep, "summary" | "tags" | "vecSummary" | "vecAction" | "errorSignatures">> = [{
     key: `${input.episodeId}:${input.turnId}:turn`,
     ts: Number.isFinite(baseTs) ? baseTs : Date.now(),
+    timeZone: input.timeZone,
     turnId: input.turnId,
     stepIndex: 0,
     subStepTotal: 1,
@@ -3164,6 +3229,7 @@ export function traceMetaFromMemory(memory: MemoryRow): TraceMemoryMeta | null {
     id: memory.id,
     memory,
     ts: numberField(trace, "ts") ?? Date.parse(memory.timeline),
+    timeZone: stringField(trace, "time_zone") ?? stringField(memory.info, "time_zone"),
     turnId: stringField(trace, "turn_id"),
     rawTurnId: stringField(trace, "raw_turn_id"),
     episodeId: stringField(trace, "episode_id"),
@@ -3216,7 +3282,14 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
     support: numberField(policy, "support") ?? 0,
     gain: numberField(policy, "gain") ?? 0,
     confidence: numberField(policy, "policy_confidence") ?? numberField(policy, "confidence") ?? clamp01(0.5 + (numberField(policy, "gain") ?? 0)),
-    status: statusField(policy, "status", ["candidate", "active", "archived"]) ?? "candidate",
+    status: statusField(policy, "status", [
+      "candidate",
+      "active",
+      "verification_required",
+      "quarantined",
+      "superseded",
+      "archived"
+    ]) ?? "candidate",
     experienceType: statusField(policy, "experience_type", [
       "success_pattern",
       "repair_validated",
@@ -3248,16 +3321,55 @@ export function policyMetaFromMemory(memory: MemoryRow): PolicyMemoryMeta | null
           ])
         : []
     },
+    freshnessClass: statusField(policy, "freshness_class", ["stable", "dynamic"]) ?? "stable",
+    lastVerifiedAt: stringField(policy, "last_verified_at"),
+    revalidateAfter: stringField(policy, "revalidate_after"),
     salience: numberField(policy, "salience") ?? numberField(policy, "raw_gain") ?? numberField(policy, "gain") ?? 0,
     vec: memoryVector(memory, "vec"),
     updatedAtMs: Date.parse(memory.updatedAt)
   };
 }
 
+export function policyRequiresRevalidation(policy: PolicyMemoryMeta, now = Date.now()): boolean {
+  if (policy.freshnessClass !== "dynamic") return false;
+  if (!policy.revalidateAfter) return true;
+  const revalidateAt = Date.parse(policy.revalidateAfter);
+  return !Number.isFinite(revalidateAt) || revalidateAt <= now;
+}
+
+export function policyIsEligibleForDownstream(
+  policy: PolicyMemoryMeta,
+  now = Date.now()
+): boolean {
+  return policy.status === "active" && !policyRequiresRevalidation(policy, now);
+}
+
+export function failureAvoidancePolicyIsRetrievalEligible(policy: PolicyMemoryMeta): boolean {
+  if (policy.experienceType !== "failure_avoidance" && policy.evidencePolarity !== "negative") {
+    return true;
+  }
+  if (policy.confidence < 0.6 || !policy.trigger.trim()) return false;
+  const preferences = new Set(policy.decisionGuidance.preference.map(normalizeGuidanceForComparison).filter(Boolean));
+  const antiPatterns = new Set(policy.decisionGuidance.antiPattern.map(normalizeGuidanceForComparison).filter(Boolean));
+  if (preferences.size === 0 || antiPatterns.size === 0) return false;
+  return [...preferences].some((item) => !antiPatterns.has(item));
+}
+
+function normalizeGuidanceForComparison(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^(?:avoid|prefer|safer behavior)\s*:\s*/i, "")
+    .replace(/[\s.。!！?？,，;；:：]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
   if (memory.memoryLayer !== "Skill") return null;
   const skill = getInternal<Record<string, unknown>>(memory, "skill");
   if (!skill) return null;
+  const procedure = recordField(skill, "procedure_json") ??
+    recordField(memory.properties.internal_info as Record<string, unknown>, "procedure_json");
   return {
     id: memory.id,
     memory,
@@ -3270,6 +3382,12 @@ export function skillMetaFromMemory(memory: MemoryRow): SkillMemoryMeta | null {
     evidenceAnchorIds: stringArrayField(skill, "evidence_anchor_ids")
       .concat(stringArrayField(skill, "evidence_anchors")),
     invocationGuide: stringField(skill, "invocation_guide") ?? memory.memoryValue,
+    retrievalBlurb: procedure
+      ? stringField(procedure, "retrievalBlurb") ?? stringField(procedure, "retrieval_blurb")
+      : undefined,
+    triggerContext: procedure
+      ? stringField(procedure, "triggerContext") ?? stringField(procedure, "trigger_context")
+      : undefined,
     trialsAttempted: numberField(skill, "trials_attempted") ?? 0,
     trialsPassed: numberField(skill, "trials_passed") ?? 0,
     repairOrigin: booleanishField(skill, "repairOrigin") ?? booleanishField(skill, "repair_origin") ?? false,
@@ -3290,6 +3408,28 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
   if (memory.memoryLayer !== "L3") return null;
   const wm = getInternal<Record<string, unknown>>(memory, "world_model");
   if (!wm) return null;
+  const v2Fields = l3WorldModelV2Fields(memory, wm);
+  if (v2Fields) {
+    const project = typeof memory.info.project_id === "string" && memory.info.project_id.length > 0;
+    const sourceMemoryIds = stringArrayField(memory.properties.internal_info as Record<string, unknown>, "source_memory_ids");
+    return {
+      id: memory.id,
+      memory,
+      title: project ? "项目场域认知" : "通用规则与安全约束",
+      domainKey: project ? `project:${memory.info.project_id as string}` : "general:no_project",
+      domainTags: project ? ["project"] : ["general_rules"],
+      policyIds: sourceMemoryIds,
+      confidence: 0,
+      cohesion: 1,
+      admission: "strict",
+      structure: { environment: [], inference: [], constraints: [] },
+      summary: renderL3WorldModelFields(v2Fields),
+      body: memory.memoryValue,
+      vec: memoryVector(memory, "vec"),
+      schemaVersion: 2,
+      fields: v2Fields
+    };
+  }
   return {
     id: memory.id,
     memory,
@@ -3301,9 +3441,75 @@ export function worldModelMetaFromMemory(memory: MemoryRow): WorldModelMemoryMet
     cohesion: numberField(wm, "cohesion") ?? 1,
     admission: statusField(wm, "admission", ["strict", "loose"]) ?? "strict",
     structure: worldModelStructureField(wm, "structure"),
+    summary: stringField(wm, "summary") ?? stringField(memory.properties.internal_info as Record<string, unknown>, "summary"),
     body: stringField(wm, "body") ?? memory.memoryValue,
     vec: memoryVector(memory, "vec")
   };
+}
+
+function l3WorldModelV2Fields(
+  memory: MemoryRow,
+  worldModel: Record<string, unknown>
+): L3WorldModelFields | null {
+  if (memory.properties.internal_info.schema_version !== 2) return null;
+  const expectedKeys = [
+    "domain_knowledge",
+    "general_rules_and_safety_constraints",
+    "project_contract",
+    "project_environment_profile"
+  ];
+  if (Object.keys(worldModel).sort().join(",") !== expectedKeys.join(",")) return null;
+  const value = (key: string): string | null | undefined => {
+    const field = worldModel[key];
+    return field === null || typeof field === "string" ? field : undefined;
+  };
+  const fields = {
+    generalRulesAndSafetyConstraints: value("general_rules_and_safety_constraints"),
+    projectEnvironmentProfile: value("project_environment_profile"),
+    projectContract: value("project_contract"),
+    domainKnowledge: value("domain_knowledge")
+  };
+  if (Object.values(fields).some((field) => field === undefined)) return null;
+  return fields as L3WorldModelFields;
+}
+
+export const RETRIEVAL_DOCUMENT_VERSION = 2;
+
+/** Builds the canonical text shared by vector, FTS, and in-memory retrieval for Skill and L3. */
+export function retrievalDocumentForMemory(memory: MemoryRow): string {
+  const skill = skillMetaFromMemory(memory);
+  if (skill) {
+    const shortGuide = [skill.retrievalBlurb, skill.triggerContext].filter(Boolean);
+    return [skill.name, ...(shortGuide.length > 0 ? shortGuide : [skill.invocationGuide]), memory.tags.join(" ")]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  const world = worldModelMetaFromMemory(memory);
+  if (world) {
+    const structuredFacts = world.summary
+      ? [
+          ...world.structure.environment,
+          ...world.structure.inference,
+          ...world.structure.constraints
+        ].map((entry) => [entry.label, entry.description].filter(Boolean).join(": "))
+      : [world.body];
+    return [world.title, world.summary, world.domainTags.join(" "), ...structuredFacts]
+      .filter(Boolean)
+      .join("\n");
+  }
+
+  return memory.memoryValue;
+}
+
+export function retrievalDocumentSourceHash(memory: MemoryRow): string {
+  return stableHash(retrievalDocumentForMemory(memory));
+}
+
+export function retrievalDocumentIsCurrent(memory: MemoryRow): boolean {
+  const index = recordField(memory.properties.internal_info as Record<string, unknown>, "retrieval_index");
+  return numberField(index ?? {}, "version") === RETRIEVAL_DOCUMENT_VERSION &&
+    stringField(index ?? {}, "source_hash") === retrievalDocumentSourceHash(memory);
 }
 
 function worldModelTitleFromMemory(memory: MemoryRow, wm: Record<string, unknown>): string {
@@ -3421,14 +3627,24 @@ export function buildPolicyDraft(args: {
     alpha: args.gainEmaAlpha ?? 0.4,
     isFirst: args.currentSupport === undefined || args.currentSupport === 0
   });
-  const status = policyStatusAfterGain({
+  const minSupport = args.minSupport ?? 1;
+  let status = policyStatusAfterGain({
     currentStatus: args.currentStatus ?? "candidate",
     support,
     gain,
-    minSupport: args.minSupport ?? 1,
+    minSupport,
     minGain: args.minGain ?? 0.02,
     archiveGain: args.archiveGain ?? -0.05
   });
+  if (status === "active" && minSupport >= 3) {
+    const successfulEpisodes = distinct(
+      args.evidenceTraces
+        .filter((trace) => trace.value > 0)
+        .map((trace) => trace.episodeId || trace.id)
+        .filter(isString)
+    ).length;
+    if (successfulEpisodes < 2) status = "candidate";
+  }
   const tags = distinct(args.evidenceTraces.flatMap((trace) => trace.tags)).slice(0, 10);
   const confidence = clamp01(0.5 + rawGain);
   const label = signatureLabel(args.signature, tags);
@@ -3517,6 +3733,7 @@ export function packL2InductionTraces(
       "---",
       `id: ${trace.id}`,
       `episode: ${trace.episodeId ?? "-"}`,
+      `captured_at: ${formatZonedTime(trace.ts, trace.timeZone)}`,
       `tags: ${trace.tags.join(",") || "-"}`,
       `user: ${truncateText(trace.userText, 200)}`,
       `agent: ${truncateText(trace.agentText, 300)}`,
@@ -3615,6 +3832,7 @@ export function buildWorldModelDraft(args: {
       admission,
       cohesion
     });
+    const summary = fallbackWorldModelSummary(title, structure);
     const body = [
       title,
       `Admission: ${admission} (cohesion=${round(cohesion, 4)})`,
@@ -3639,6 +3857,7 @@ export function buildWorldModelDraft(args: {
       cohesion,
       admission,
       structure,
+      summary,
       body,
       vec: center,
       tags: distinct(["world_model", ...tags])
@@ -3744,7 +3963,11 @@ export function buildSkillDraft(args: {
     tools: toolsFromSignature(args.policy.signature)
   };
   return {
-    key: `skill:${args.policy.id}`,
+    key: `skill:${stableHash({
+      name,
+      trigger: args.policy.trigger,
+      tools: toolsFromSignature(args.policy.signature)
+    }).slice(0, 20)}`,
     name,
     status: "candidate",
     eta,
@@ -4130,8 +4353,14 @@ export function retrievePluginMemories(input: {
       )
     : thresholdSurvivors;
 
+  const ranked = mmrSelect(survivors, input.limit, config);
+  const minRecallScore = mode === "skill_invoke" ? 0 : config.minRecallScore;
+  const scoreSurvivors = minRecallScore > 0
+    ? ranked.filter((candidate) => candidate.score >= minRecallScore)
+    : ranked;
+  droppedByThreshold += ranked.length - scoreSurvivors.length;
   const selected = suppressFeedbackExperiencesCoveredBySkills(
-    dedupeTraceEpisodeByEpisodeId(mmrSelect(survivors, input.limit, config))
+    dedupeTraceEpisodeByEpisodeId(scoreSurvivors)
   );
   const kept = {
     tier1: selected.filter((candidate) => candidate.tier === "tier1").length,
@@ -4556,7 +4785,7 @@ export function policyStatusAfterGain(input: {
   if (input.currentStatus === "candidate") {
     return input.support >= input.minSupport && input.gain >= input.minGain ? "active" : "candidate";
   }
-  return input.gain < input.archiveGain || input.support <= 0 ? "archived" : "active";
+  return input.gain < input.archiveGain || input.support < input.minSupport ? "archived" : "active";
 }
 
 function buildPolicyProcedure(evidence: TraceMemoryMeta[]): string {
@@ -4623,6 +4852,15 @@ function fallbackWorldModelStructure(input: {
       evidenceIds
     }]
   };
+}
+
+function fallbackWorldModelSummary(title: string, structure: WorldModelStructure): string {
+  const facts = [
+    structure.environment[0]?.description,
+    structure.inference[0]?.description,
+    structure.constraints[0]?.description
+  ].filter((value): value is string => Boolean(value?.trim()));
+  return [title, ...facts].join(" — ");
 }
 
 function skillNameFromPolicy(policy: PolicyMemoryMeta): string {
@@ -4777,6 +5015,13 @@ interface RankedMemoryCandidate {
 
 export function isMemoryReadyForRetrieval(memory: MemoryRow): boolean {
   if (memory.status === "deleted" || memory.status === "archived") return false;
+  const evidenceStatus = memory.properties.internal_info.evidence_status;
+  if (evidenceStatus === "provisional" || evidenceStatus === "disputed") return false;
+  const policy = memory.memoryLayer === "L2" ? policyMetaFromMemory(memory) : null;
+  if (policy && policy.status !== "candidate" && policy.status !== "active") return false;
+  if (policy && policyRequiresRevalidation(policy)) return false;
+  const skill = memory.memoryLayer === "Skill" ? skillMetaFromMemory(memory) : null;
+  if (skill && skill.status !== "candidate" && skill.status !== "active") return false;
   if (hasMemoryRetrievalIndex(memory)) return true;
   if (hasPendingImportPipeline(memory)) return false;
   return hasSearchableText(memory);
@@ -4919,6 +5164,9 @@ function candidateFromMemory(
     if (skill.eta < options.config.minSkillEta) return null;
   }
   if (memory.memoryLayer === "L2" && policy?.status === "archived") {
+    return null;
+  }
+  if (memory.memoryLayer === "L2" && policy && !failureAvoidancePolicyIsRetrievalEligible(policy)) {
     return null;
   }
   if (memory.memoryLayer === "L3" && (world?.confidence ?? 0) < options.config.minWorldModelConfidence) {
@@ -5278,6 +5526,7 @@ function retrievalTuning(input: RetrievalTuningConfig | undefined): Required<Ret
     mmrLambda: clamp01(finiteOr(input?.mmrLambda, DEFAULT_RETRIEVAL_TUNING.mmrLambda)),
     rrfConstant: Math.max(1, finiteOr(input?.rrfConstant, DEFAULT_RETRIEVAL_TUNING.rrfConstant)),
     relativeThresholdFloor: clamp01(finiteOr(input?.relativeThresholdFloor, DEFAULT_RETRIEVAL_TUNING.relativeThresholdFloor)),
+    minRecallScore: clamp01(finiteOr(input?.minRecallScore, DEFAULT_RETRIEVAL_TUNING.minRecallScore)),
     minSkillEta: clamp01(finiteOr(input?.minSkillEta, DEFAULT_RETRIEVAL_TUNING.minSkillEta)),
     minTraceSim: clamp01(finiteOr(input?.minTraceSim, DEFAULT_RETRIEVAL_TUNING.minTraceSim)),
     episodeGoalMinSim: clamp01(finiteOr(input?.episodeGoalMinSim, DEFAULT_RETRIEVAL_TUNING.episodeGoalMinSim)),
@@ -5465,11 +5714,11 @@ function memoryTextForRetrieval(memory: MemoryRow): string {
   }
   const skill = skillMetaFromMemory(memory);
   if (skill) {
-    return [skill.name, skill.invocationGuide].join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   const world = worldModelMetaFromMemory(memory);
   if (world) {
-    return [world.title, world.body, world.domainTags.join(" ")].join("\n");
+    return retrievalDocumentForMemory(memory);
   }
   return memory.memoryValue;
 }

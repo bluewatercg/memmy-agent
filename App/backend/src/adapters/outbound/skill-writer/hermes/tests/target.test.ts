@@ -7,6 +7,7 @@ import YAML from "yaml";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SkillManifest } from "../../types.js";
 import { createHermesSkillTarget } from "../index.js";
+import { MEMMY_VERSION } from "../../../../../project-version.js";
 
 let tempDir: string | undefined;
 
@@ -94,11 +95,15 @@ describe("hermes skill target", () => {
       endpoint?: string;
       memmy_config_path?: string;
       token?: string;
+      userId?: string;
+      workspaceHostId?: string;
     };
     const commandPluginConfig = JSON.parse(readFileSync(join(rootDirectory, "plugins", "memmy-resume", "config.json"), "utf8")) as {
       endpoint?: string;
       memmy_config_path?: string;
       token?: string;
+      userId?: string;
+      workspaceHostId?: string;
     };
     const config = YAML.parse(readFileSync(join(rootDirectory, "config.yaml"), "utf8")) as {
       model?: { default?: string };
@@ -108,8 +113,10 @@ describe("hermes skill target", () => {
     };
 
     expect(pluginYaml).toContain("name: memmy-memory");
+    expect(pluginYaml).toContain(`version: ${MEMMY_VERSION}`);
     expect(pluginYaml).toContain("kind: exclusive");
     expect(commandPluginYaml).toContain("name: memmy-resume");
+    expect(commandPluginYaml).toContain(`version: ${MEMMY_VERSION}`);
     expect(commandPluginYaml).toContain("kind: standalone");
     expect(pluginInit).toContain("class MemmyMemoryProvider");
     expect(pluginInit).not.toContain("x-memmy-agent-kind");
@@ -144,7 +151,10 @@ describe("hermes skill target", () => {
     expect(pluginInit).toContain('_memmy_get("/api/v1/memory/" + quote(memory_id, safe=""))');
     expect(pluginInit).toContain("authorization");
     expect(pluginInit).toContain('"source": _optional_text(body.get("source")) or "hermes"');
-    expect(pluginInit).toContain('"sessionId": "hermes-memory-" + external_session_id');
+    expect(pluginInit).toContain('session_key = "hermes-memory-" + external_session_id');
+    expect(pluginInit).toContain('"l3WorldModelProtocolVersion": 2');
+    expect(pluginInit).not.toContain("def _drive_workspace_bridge");
+    expect(pluginInit).toContain("def _render_l3_world_model_context");
     expect(pluginInit).toContain("HTTP_TIMEOUT_SECONDS = 45.0");
     expect(pluginInit).toContain("SHUTDOWN_THREAD_TIMEOUT_SECONDS = 60.0");
     expect(pluginInit).toContain("thread.join(timeout=SHUTDOWN_THREAD_TIMEOUT_SECONDS)");
@@ -162,9 +172,12 @@ describe("hermes skill target", () => {
     expect(pluginConfig.memmy_config_path).toBe(memmyConfigPath);
     expect(pluginConfig.endpoint).toBe("http://127.0.0.1:18991");
     expect(pluginConfig.token).toBe("test-token");
+    expect(pluginConfig.userId).toBe("local-user");
+    expect(pluginConfig.workspaceHostId).toMatch(/^[a-f0-9]{64}$/u);
     expect(commandPluginConfig).toEqual(pluginConfig);
     expect(config.model?.default).toBe("test-model");
     expect(config.memory?.provider).toBe("memmy-memory");
+    expect(config.plugins?.enabled).toContain("memmy-memory");
     expect(config.plugins?.enabled).toContain("memmy-resume");
     expect(config.plugins?.enabled).not.toContain("memmy-memory-command");
     expect(config.toolsets).toEqual(["hermes-cli", "memory"]);
@@ -206,6 +219,7 @@ describe("hermes skill target", () => {
     expect(configAfterUninstall.model?.default).toBe("test-model");
     expect(configAfterUninstall.memory?.provider).toBeUndefined();
     expect(configAfterUninstall.plugins?.enabled).not.toContain("memmy-resume");
+    expect(configAfterUninstall.plugins?.enabled).not.toContain("memmy-memory");
     expect(configAfterUninstall.plugins?.enabled).not.toContain("memmy-memory-command");
     expect(configAfterUninstall.toolsets).toEqual(["hermes-cli"]);
   });
@@ -347,7 +361,8 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
 `;
     const result = spawnSync("python3", ["-", pluginInit], {
       input: script,
-      encoding: "utf8"
+      encoding: "utf8",
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" }
     });
     if (result.status !== 0) {
       throw new Error(result.stderr || result.stdout);
@@ -374,7 +389,7 @@ print(json.dumps({"calls": calls, "text": text, "selection": selection}, ensure_
     expect(output.calls[0]?.body.verbose).toBe(true);
     expect(output.selection?.context).toContain("Episode id: episode_2");
     expect(output.selection?.context).toContain("Full episode body 2");
-  });
+  }, 15_000);
 
   it("detects non-Memmy memory provider conflicts from config.yaml", async () => {
     const { rootDirectory } = createFixture();

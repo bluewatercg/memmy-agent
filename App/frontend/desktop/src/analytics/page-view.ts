@@ -24,6 +24,7 @@ const MEMORY_SUB_PAGE_TITLES: Record<MemorySubPageId, string> = {
   "topic-inbox": "Topic Inbox",
   overview: "Overview",
   memories: "Memories",
+  "user-memories": "User Memories",
   tasks: "Tasks",
   policies: "Policies",
   "world-model": "World Model",

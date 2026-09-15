@@ -38,7 +38,28 @@ function apiErrorResponse(): LLMResponse {
 }
 
 function quotaErrorResponse(): LLMResponse {
-  return new LLMResponse({ content: "Error calling LLM: REQUEST_TOKEN_QUOTA_EXCEEDED_ERROR", finishReason: "error" });
+  return new LLMResponse({
+    content: "Error calling LLM: provider detail",
+    finishReason: "error",
+    errorCategory: "quota_exhausted",
+  });
+}
+
+function imageErrorResponse(
+  category: "image_input_unsupported" | "image_analysis_failed",
+): LLMResponse {
+  return new LLMResponse({
+    content: category === "image_input_unsupported"
+      ? "image_url is not supported"
+      : "image2text upstream failed",
+    finishReason: "error",
+    errorCategory: category,
+    actualProvider: "memmy_account",
+    actualModel: "test-model",
+    ...(category === "image_analysis_failed"
+      ? { failedProvider: "memmy_account", failedModel: "image2text" }
+      : {}),
+  });
 }
 
 function reserveStandaloneSession(agent: AgentLoop, chatId: string): void {
@@ -70,6 +91,10 @@ describe("AgentLoop WebUI API error localization", () => {
 
     expect(outbound?.content).toBe("平台服务响应异常，请稍后重试。");
     expect(outbound?.content).not.toContain("API returned empty choices");
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "model_failed",
+      modelErrorDetail: "Error: API returned empty choices."
+    });
   });
 
   it("uses an English fallback for WebUI API errors in English mode", async () => {
@@ -88,6 +113,10 @@ describe("AgentLoop WebUI API error localization", () => {
 
     expect(outbound?.content).toBe("The platform service returned an unexpected response. Please try again later.");
     expect(outbound?.content).not.toContain("API returned empty choices");
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "model_failed",
+      modelErrorDetail: "Error: API returned empty choices."
+    });
   });
 
   it("shows a quota-specific Chinese message when the model token quota is exhausted", async () => {
@@ -104,7 +133,8 @@ describe("AgentLoop WebUI API error localization", () => {
       }),
     );
 
-    expect(outbound?.content).toBe("当前账号的模型 Token 额度已用完，请充值或更换模型后重试。");
+    expect(outbound?.content).toBe("当前模型额度已用完");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
     expect(outbound?.content).not.toBe("平台服务响应异常，请稍后重试。");
   });
 
@@ -122,7 +152,8 @@ describe("AgentLoop WebUI API error localization", () => {
       }),
     );
 
-    expect(outbound?.content).toBe("Your model token quota has been used up. Please top up or switch models, then try again.");
+    expect(outbound?.content).toBe("This model's quota has been used up.");
+    expect(outbound?.metadata.modelErrorCategory).toBe("quota_exhausted");
   });
 
   it("keeps the raw provider error outside WebUI", async () => {
@@ -131,5 +162,67 @@ describe("AgentLoop WebUI API error localization", () => {
     const outbound = await agent.processDirect("hello", { sessionKey: "cli:api-error" });
 
     expect(outbound?.content).toBe("Error: API returned empty choices.");
+  });
+
+  it.each([
+    ["zh-CN", "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试"],
+    ["en-US", "The current model does not support image input. Switch to a multimodal model and try again."],
+  ] as const)("localizes image input rejection for WebUI language %s", async (language, expected) => {
+    const agent = loopWithResponse(imageErrorResponse("image_input_unsupported"));
+    reserveStandaloneSession(agent, `image-unsupported-${language}`);
+
+    const outbound = await agent.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: `image-unsupported-${language}`,
+      senderId: "user",
+      content: "describe it",
+      metadata: { webui: true, webui_language: language },
+    }));
+
+    expect(outbound?.content).toBe(expected);
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "image_input_unsupported",
+      modelErrorDetail: "image_url is not supported",
+    });
+  });
+
+  it("preserves the internal image2text failure source separately from the selected model", async () => {
+    const agent = loopWithResponse(imageErrorResponse("image_analysis_failed"));
+    reserveStandaloneSession(agent, "image-analysis-failed");
+
+    const outbound = await agent.processMessage(new InboundMessage({
+      channel: "websocket",
+      chatId: "image-analysis-failed",
+      senderId: "user",
+      content: "describe it",
+      metadata: { webui: true, webui_language: "zh-CN" },
+    }));
+
+    expect(outbound?.content).toBe("图片解析失败，请稍后重试");
+    expect(outbound?.metadata).toMatchObject({
+      modelErrorCategory: "image_analysis_failed",
+      modelErrorDetail: "image2text upstream failed",
+      modelErrorContext: {
+        model: "test-model",
+        failedProvider: "memmy_account",
+        failedModel: "image2text",
+      },
+    });
+    expect(agent.sessions.get("websocket:image-analysis-failed")?.messages.at(-1)?.model_error).toMatchObject({
+      category: "image_analysis_failed",
+      model: "test-model",
+      failedProvider: "memmy_account",
+      failedModel: "image2text",
+    });
+  });
+
+  it("defaults image errors to English outside WebUI", async () => {
+    const agent = loopWithResponse(imageErrorResponse("image_input_unsupported"));
+
+    const outbound = await agent.processDirect("describe it", { sessionKey: "cli:image-unsupported" });
+
+    expect(outbound?.content).toBe(
+      "The current model does not support image input. Switch to a multimodal model and try again.",
+    );
   });
 });

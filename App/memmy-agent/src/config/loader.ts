@@ -2,10 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import YAML from "yaml";
+import { mutateRuntimeConfigSync } from "@memmy/migrations";
 import { configureSsrfWhitelist } from "../security/network.js";
 import { Config, FileMemoryConfig } from "./schema.js";
 
 let configPathOverride: string | null = null;
+
+/** Base class for config values that fail to load or resolve. Callers should treat these as fatal. */
+export class ConfigError extends Error {}
+
+/** The config file exists but could not be parsed as YAML or failed schema validation. */
+export class ConfigLoadError extends ConfigError {}
 
 function expandHome(value: string): string {
   return value === "~" || value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
@@ -21,16 +28,22 @@ export function getConfigPath(): string {
 }
 
 export function resolveConfigEnvVars(config: Config): Config {
-  return new Config(resolveEnvVars(config as any) as any);
+  const serialized = config.toObject();
+  const dream = serialized.agents?.defaults?.dream;
+  if (dream && config.agents.defaults.dream.cron) {
+    dream.cron = config.agents.defaults.dream.cron;
+  }
+  return new Config(resolveEnvVars(serialized) as any);
 }
 
 function resolveInPlace(obj: any): any {
-  if (typeof obj === "string") return obj.replace(/\$\{([A-Z0-9_]+)(?::([^}]*))?\}/gi, (fullMatch, key, fallback) => {
-    void fullMatch;
-    const value = process.env[key] ?? fallback;
-    if (value == null) throw new EnvValueError(`Environment variable ${key} is not set`);
-    return value;
-  });
+  if (typeof obj === "string")
+    return obj.replace(/\$\{([A-Z0-9_]+)(?::([^}]*))?\}/gi, (fullMatch, key, fallback) => {
+      void fullMatch;
+      const value = process.env[key] ?? fallback;
+      if (value == null) throw new EnvValueError(`Environment variable ${key} is not set`);
+      return value;
+    });
   if (Array.isArray(obj)) return obj.map(resolveInPlace);
   if (obj && typeof obj === "object") {
     for (const [key, value] of Object.entries(obj)) obj[key] = resolveInPlace(value);
@@ -38,7 +51,7 @@ function resolveInPlace(obj: any): any {
   return obj;
 }
 
-class EnvValueError extends Error {}
+export class EnvValueError extends ConfigError {}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -48,51 +61,32 @@ export function resolveEnvVars(obj: any): any {
   return resolveInPlace(structuredClone(obj));
 }
 
-export function migrateConfig(data: any): any {
-  if (!data || typeof data !== "object") return {};
-  const copy = structuredClone(data);
-  if (copy.agent && !copy.agents) copy.agents = { defaults: copy.agent };
-  if (copy.model && !copy.agents?.defaults?.model) {
-    copy.agents ??= {};
-    copy.agents.defaults ??= {};
-    copy.agents.defaults.model = copy.model;
-  }
-  if (copy.tools) {
-    delete copy.tools.my;
-    delete copy.tools.myEnabled;
-    delete copy.tools.mySet;
-  }
-  return copy;
-}
-
 export function loadConfig(configPath?: string | null): Config {
   const target = expandHome(configPath ?? getConfigPath());
-  let config = new Config();
   if (!fs.existsSync(target)) {
+    const config = new Config();
     configureSsrfWhitelist(config.tools.ssrfWhitelist);
     return config;
   }
   const raw = fs.readFileSync(target, "utf8");
-  let parsed: any;
+  let config: Config;
   try {
-    parsed = raw.trim() ? YAML.parse(raw) : {};
+    const parsed = raw.trim() ? YAML.parse(raw) : {};
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed) &&
+      Object.prototype.hasOwnProperty.call(parsed, "fileMemory")
+    ) {
+      new FileMemoryConfig(parsed.fileMemory);
+    }
+    config = new Config(parsed);
   } catch (error) {
-    console.warn(`Failed to load config from ${target}: ${errorMessage(error)}\nUsing default configuration.`);
-    configureSsrfWhitelist(config.tools.ssrfWhitelist);
-    return config;
-  }
-  if (
-    parsed &&
-    typeof parsed === "object" &&
-    !Array.isArray(parsed) &&
-    Object.prototype.hasOwnProperty.call(parsed, "fileMemory")
-  ) {
-    new FileMemoryConfig(parsed.fileMemory);
-  }
-  try {
-    config = new Config(migrateConfig(parsed));
-  } catch (error) {
-    console.warn(`Failed to load config from ${target}: ${errorMessage(error)}\nUsing default configuration.`);
+    // The config file exists but is unusable (bad YAML or a value that fails schema
+    // validation). Silently falling back to defaults here would run the agent on a
+    // configuration the user never asked for (e.g. dropping BYOK credentials), so this
+    // must fail loud instead of warning and continuing.
+    throw new ConfigLoadError(`Failed to load config from ${target}: ${errorMessage(error)}`);
   }
   configureSsrfWhitelist(config.tools.ssrfWhitelist);
   return config;
@@ -100,8 +94,37 @@ export function loadConfig(configPath?: string | null): Config {
 
 export function saveConfig(config: Config, configPath?: string | null): void {
   const target = expandHome(configPath ?? getConfigPath());
-  fs.mkdirSync(path.dirname(target), { recursive: true });
   const dumped = config.toObject();
-  const body = YAML.stringify(dumped);
-  fs.writeFileSync(target, body, "utf8");
+  mutateRuntimeConfigSync(target, (current) => {
+    const merged = mergeConfigFields(current, dumped);
+    for (const key of Object.keys(current)) delete current[key];
+    Object.assign(current, merged);
+  });
+}
+
+function mergeConfigFields(current: Record<string, any>, next: Record<string, any>): Record<string, any> {
+  const merged: Record<string, any> = { ...current };
+  for (const [key, value] of Object.entries(next)) {
+    if (isPlainRecord(value) && isPlainRecord(current[key])) {
+      merged[key] = mergeConfigFields(current[key], value);
+    } else {
+      merged[key] = value;
+    }
+  }
+  // These maps are owned collections: an absent child means the caller deleted it.
+  // Their surviving entries already carry unknown nested fields through Base.toObject().
+  for (const key of ["providers", "modelPresets", "modelAssignments"]) {
+    if (Object.prototype.hasOwnProperty.call(next, key)) merged[key] = next[key];
+  }
+  if (isPlainRecord(next.tools)) {
+    merged.tools = isPlainRecord(merged.tools) ? merged.tools : {};
+    if (Object.prototype.hasOwnProperty.call(next.tools, "mcpServers")) {
+      merged.tools.mcpServers = next.tools.mcpServers;
+    }
+  }
+  return merged;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, any> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -3,10 +3,13 @@
  */
 import { describe, expect, it } from "vitest";
 import {
+  extractApplyPatchSummaryPaths,
   formatToolCallTrace,
+  mergeFileEdits,
   mergeToolProgressEvents,
   mergeUniqueToolTraceLines,
   normalizeToolProgressEvents,
+  normalizeFileEdits,
   summarizeToolCall,
   toolTraceLinesFromEvents
 } from "../agent-tool-traces.js";
@@ -32,6 +35,111 @@ describe("agent tool trace helpers", () => {
 
     expect(merged).toEqual([
       { phase: "error", call_id: "1", name: "web_fetch", arguments: { url: "https://example.com" }, error: "timeout" }
+    ]);
+  });
+
+  it("merges one UI tool call while preserving distinct calls with repeated Provider ids", () => {
+    const merged = mergeToolProgressEvents(
+      [{ phase: "start", call_id: "stream-id", ui_tool_call_id: "ui-1", name: "write_file" }],
+      [
+        { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1", name: "write_file" },
+        { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2", name: "write_file" }
+      ]
+    );
+
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1" });
+    expect(merged[1]).toMatchObject({ phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2" });
+  });
+
+  it("keeps trace lines for distinct UI calls with a repeated Provider id", () => {
+    expect(toolTraceLinesFromEvents([
+      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-1", name: "write_file", arguments: { path: "a.ts" } },
+      { phase: "end", call_id: "provider-final", ui_tool_call_id: "ui-2", name: "write_file", arguments: { path: "b.ts" } }
+    ])).toHaveLength(2);
+  });
+
+  it("keeps multi-file edits inside one UI call and rejects late phase downgrades", () => {
+    const pending = normalizeFileEdits({
+      call_id: "stream-id",
+      ui_tool_call_id: "ui-patch",
+      tool: "apply_patch",
+      path: "",
+      pending: true,
+      phase: "start"
+    });
+    const completed = normalizeFileEdits([
+      {
+        call_id: "provider-final",
+        ui_tool_call_id: "ui-patch",
+        tool: "apply_patch",
+        path: "src/a.ts",
+        absolute_path: "/workspace/src/a.ts",
+        phase: "end",
+        added: 20
+      },
+      {
+        call_id: "provider-final",
+        ui_tool_call_id: "ui-patch",
+        tool: "apply_patch",
+        path: "src/b.ts",
+        absolute_path: "/workspace/src/b.ts",
+        phase: "end",
+        added: 467
+      }
+    ]);
+    const lateStart = normalizeFileEdits({
+      call_id: "stream-id",
+      ui_tool_call_id: "ui-patch",
+      tool: "apply_patch",
+      path: "src/a.ts",
+      absolute_path: "/workspace/src/a.ts",
+      phase: "start",
+      added: 1,
+      approximate: true
+    });
+
+    const merged = mergeFileEdits(mergeFileEdits(pending, completed), lateStart);
+    expect(merged).toHaveLength(2);
+    expect(merged[0]).toMatchObject({ path: "src/a.ts", phase: "end", status: "done", added: 20 });
+    expect(merged[0]?.approximate).not.toBe(true);
+    expect(merged[1]).toMatchObject({ path: "src/b.ts", phase: "end", status: "done", added: 467 });
+  });
+
+  it("does not synthesize a Provider call id for legacy file edits", () => {
+    expect(normalizeFileEdits({ tool: "edit_file", path: "src/a.ts", phase: "end" })[0]?.call_id).toBe("");
+  });
+
+  it("preserves unchanged through normalization and terminal event merging", () => {
+    const started = normalizeFileEdits({
+      call_id: "call-noop",
+      ui_tool_call_id: "ui-noop",
+      tool: "edit_file",
+      path: "src/a.ts",
+      phase: "start",
+      status: "editing",
+      added: 1,
+    });
+    const completed = normalizeFileEdits({
+      call_id: "call-noop",
+      ui_tool_call_id: "ui-noop",
+      tool: "edit_file",
+      path: "src/a.ts",
+      phase: "end",
+      status: "done",
+      added: 0,
+      deleted: 0,
+      unchanged: true,
+    });
+
+    expect(mergeFileEdits(started, completed)).toEqual([
+      expect.objectContaining({
+        phase: "end",
+        status: "done",
+        added: 0,
+        deleted: 0,
+        unchanged: true,
+      }),
     ]);
   });
 
@@ -154,5 +262,63 @@ describe("agent tool trace helpers", () => {
 
   it("parses stringified JSON arguments so they aren't shown as raw text", () => {
     expect(formatToolCallTrace({ phase: "end", name: "exec", arguments: '{"command":"npm test"}' })).toBe("Ran npm test");
+  });
+
+  it("summarizes exact apply_patch calls without exposing the patch body", () => {
+    const singleInput = [
+      "*** Begin Patch",
+      "*** Update File: src/app.ts",
+      "@@",
+      "-old secret body",
+      "+new secret body",
+      "*** End Patch",
+    ].join("\n");
+    const multiInput = [
+      "*** Begin Patch",
+      "*** Update File: src/old.ts",
+      "*** Move to: src/new.ts",
+      "*** Add File: src/extra.ts",
+      "+extra",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(summarizeToolCall({ name: "apply_patch", arguments: { input: singleInput } })).toMatchObject({
+      line: "Patched app.ts",
+      category: "edit",
+    });
+    expect(summarizeToolCall({ name: "apply_patch", arguments: JSON.stringify({ input: multiInput }) })).toMatchObject({
+      line: "Patched 3 files",
+      category: "edit",
+    });
+    expect(formatToolCallTrace({ name: "apply_patch", arguments: { input: "*** Begin Pat" } })).toBe(
+      "Applied patch",
+    );
+    expect(formatToolCallTrace({ name: "apply_patch", arguments: { input: singleInput } })).not.toContain(
+      "secret body",
+    );
+  });
+
+  it("extracts normalized unique apply_patch paths and stops at invalid control input", () => {
+    const input = [
+      "*** Begin Patch",
+      "*** Add File: ./src//a.ts",
+      "+*** Update File: fake.ts",
+      "*** Update File: src\\a.ts",
+      "@@",
+      "-old",
+      "+new",
+      "invalid",
+      "*** Add File: ignored.ts",
+      "+ignored",
+      "*** End Patch",
+    ].join("\n");
+
+    expect(extractApplyPatchSummaryPaths(input)).toEqual(["src/a.ts"]);
+  });
+
+  it("keeps non-exact apply patch aliases on the existing edit_file summary path", () => {
+    for (const name of ["applypatch", "patch", "mcp_server_apply_patch"]) {
+      expect(formatToolCallTrace({ name, arguments: { path: "src/legacy.ts" } })).toBe("Edited legacy.ts");
+    }
   });
 });

@@ -16,6 +16,14 @@ import { execFileSync } from "node:child_process";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  closeRuntimeSession,
+  completeRuntimeTurn,
+  loadRuntimeL3,
+  notifyRuntimeBoundary,
+  openRuntimeSession,
+  startRuntimeTurn
+} from "./memmy-workspace-bridge.mjs";
 
 const SOURCE = ${JSON.stringify(options.source)};
 const MODE = ${JSON.stringify(options.mode)};
@@ -34,6 +42,14 @@ const RESUME_CONTEXT_MAX_CHARS = 24000;
 async function main() {
   const input = await readStdin();
   const payload = parseJson(input) || {};
+  if (isL3LifecycleEvent(payload)) {
+    try {
+      await handleL3LifecycleEvent(payload);
+    } catch {
+      writeLifecycleOutput(payload, "");
+    }
+    return;
+  }
   if (isAgentResponseEvent(payload)) {
     try {
       await rememberAgentResponse(payload);
@@ -141,6 +157,67 @@ function parseJson(value) {
   }
 }
 
+function hookEventName(payload) {
+  return normalizeText(payload.hook_event_name || payload.hookEventName).toLowerCase();
+}
+
+function isL3LifecycleEvent(payload) {
+  const event = hookEventName(payload);
+  return event === "sessionstart" || event === "postcompact" || event === "precompact" || event === "sessionend";
+}
+
+async function openHookRuntimeSession(payload, transition) {
+  return openRuntimeSession({
+    configUrl: CONFIG_URL,
+    source: SOURCE,
+    adapterId: "memmy-" + SOURCE + "-hook",
+    sessionKey: memoryExternalSessionId(payload),
+    workspaceRoot: workspacePath(payload) || null,
+    transition,
+    pinnedOwner: true
+  });
+}
+
+async function handleL3LifecycleEvent(payload) {
+  const event = hookEventName(payload);
+  const session = await openHookRuntimeSession(payload, event === "sessionstart" ? "allow_legacy_rollover" : "resume_only");
+  if (!session) {
+    writeLifecycleOutput(payload, "");
+    return;
+  }
+  if (event === "sessionend") {
+    await closeRuntimeSession(session);
+    writeLifecycleOutput(payload, "");
+    return;
+  }
+  if (event === "precompact") {
+    if (MODE === "cursor") await notifyRuntimeBoundary(session, "token_compaction_attempt");
+    writeLifecycleOutput(payload, "");
+    return;
+  }
+  if (event === "postcompact") {
+    await notifyRuntimeBoundary(session, "token_compaction");
+    writeLifecycleOutput(payload, "");
+    return;
+  }
+  const loaded = await loadRuntimeL3(session);
+  writeLifecycleOutput(payload, loaded.additionalContext);
+}
+
+function writeLifecycleOutput(payload, context) {
+  const event = normalizeText(payload.hook_event_name || payload.hookEventName) || "SessionStart";
+  if (MODE === "cursor") {
+    process.stdout.write(context ? JSON.stringify({ additional_context: context }) : "{}");
+    return;
+  }
+  process.stdout.write(context ? JSON.stringify({
+    hookSpecificOutput: {
+      hookEventName: event,
+      additionalContext: context
+    }
+  }) : JSON.stringify({ continue: true, suppressOutput: true }));
+}
+
 function isStopEvent(payload) {
   return normalizeText(payload.hook_event_name || payload.hookEventName).toLowerCase() === "stop";
 }
@@ -175,55 +252,21 @@ async function captureCompletedTurn(payload) {
     return;
   }
 
-  const client = await createMemmyClient();
-  const externalSessionId = memoryExternalSessionId(payload);
-  const currentWorkspacePath = workspacePath(payload) || undefined;
-  const openRequestId = SOURCE + "-open:" + externalSessionId;
-  const openProvenance = buildProtocolProvenance({
-    requestId: openRequestId,
-    sessionId: externalSessionId,
-    workspacePath: currentWorkspacePath
-  });
-  const opened = await client.post("/api/v1/sessions/open", {
-    protocolVersion: MEMMY_PROTOCOL_VERSION,
-    adapterId: ADAPTER_ID,
-    requestId: openRequestId,
-    sessionId: externalSessionId,
-    source: SOURCE,
-    workspacePath: currentWorkspacePath,
-    provenance: openProvenance,
-    meta: {
-      memmyProtocolVersion: MEMMY_PROTOCOL_VERSION,
-      provenance: openProvenance
-    }
-  });
-  const sessionId = normalizeText(opened.sessionId) || externalSessionId;
+  const runtimeSession = await openHookRuntimeSession(payload, "resume_only");
+  if (!runtimeSession) return;
+  const sessionId = runtimeSession.sessionId;
   const turnId = normalizeText(pending && pending.turnId) || platformTurnId(payload) ||
     SOURCE + "-fallback-" + hashText([sessionId, query, answer].join("\\u0000"));
   const completeRequestId = SOURCE + "-complete:" + turnId + ":" + hashText([status, query, answer].join("\\u0000"));
   const projectId = normalizeText(opened.projectId) || normalizeText(pending && pending.projectId) || undefined;
 
-  await client.post("/api/v1/turns/" + encodeURIComponent(turnId) + "/complete", {
-    protocolVersion: MEMMY_PROTOCOL_VERSION,
-    adapterId: ADAPTER_ID,
-    requestId: completeRequestId,
-    namespace: protocolNamespace(currentWorkspacePath, projectId),
-    sessionId,
+  await completeRuntimeTurn(runtimeSession, {
+    turnId,
     episodeId: normalizeText(pending && pending.episodeId) || undefined,
     query,
     answer,
     status,
-    source: SOURCE,
-    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined,
-    provenance: buildProtocolProvenance({
-      ...(pending && pending.provenance && typeof pending.provenance === "object" ? pending.provenance : {}),
-      requestId: completeRequestId,
-      sessionId,
-      turnId,
-      workspacePath: currentWorkspacePath,
-      projectId,
-      sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : []
-    })
+    sourceMemoryIds: Array.isArray(pending && pending.sourceMemoryIds) ? pending.sourceMemoryIds : undefined
   });
   await clearTurnState(payload);
 }
@@ -233,50 +276,12 @@ async function startCapturedTurn(payload, prompt) {
   if (!query) {
     return null;
   }
-  const client = await createMemmyClient();
-  const externalSessionId = memoryExternalSessionId(payload);
-  const currentWorkspacePath = workspacePath(payload) || undefined;
-  const openRequestId = SOURCE + "-open:" + externalSessionId;
-  const openProvenance = buildProtocolProvenance({
-    requestId: openRequestId,
-    sessionId: externalSessionId,
-    workspacePath: currentWorkspacePath
-  });
-  const opened = await client.post("/api/v1/sessions/open", {
-    protocolVersion: MEMMY_PROTOCOL_VERSION,
-    adapterId: ADAPTER_ID,
-    requestId: openRequestId,
-    sessionId: externalSessionId,
-    source: SOURCE,
-    workspacePath: currentWorkspacePath,
-    provenance: openProvenance,
-    meta: {
-      memmyProtocolVersion: MEMMY_PROTOCOL_VERSION,
-      provenance: openProvenance
-    }
-  });
-  const sessionId = normalizeText(opened.sessionId) || externalSessionId;
-  const projectId = normalizeText(opened.projectId) || undefined;
+  const runtimeSession = await openHookRuntimeSession(payload, "resume_only");
+  if (!runtimeSession) return null;
+  const sessionId = runtimeSession.sessionId;
   const requestedTurnId = platformTurnId(payload) ||
     SOURCE + "-turn-" + hashText([sessionId, query, String(Date.now())].join("\\u0000"));
-  const startRequestId = SOURCE + "-start:" + requestedTurnId;
-  const provenance = buildProtocolProvenance({
-    requestId: startRequestId,
-    sessionId,
-    turnId: requestedTurnId,
-    workspacePath: currentWorkspacePath,
-    projectId
-  });
-  const turn = await client.post("/api/v1/turns/start", {
-    protocolVersion: MEMMY_PROTOCOL_VERSION,
-    adapterId: ADAPTER_ID,
-    requestId: startRequestId,
-    namespace: protocolNamespace(currentWorkspacePath, projectId),
-    sessionId,
-    turnId: requestedTurnId,
-    query,
-    provenance
-  });
+  const turn = await startRuntimeTurn(runtimeSession, requestedTurnId, query);
   const state = {
     createdAt: new Date().toISOString(),
     sessionId,

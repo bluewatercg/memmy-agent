@@ -3,26 +3,21 @@ import type { AgentSourceAutoInjectResult, ScanPreferences } from "@memmy/local-
 import type { PermissionManager } from "../permission/index.js";
 import type { AgentSourceService } from "./agent-source-service.js";
 
-const AUTO_INJECT_AGENT_SOURCE_IDS: Readonly<Record<string, true>> = {
-  cursor: true,
-  claude_code: true,
-  codex: true,
-  omp: true,
-  opencode: true,
-  openclaw: true,
-  hermes: true,
-  workbuddy: true,
-  freebuff: true
-};
-const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS: Readonly<Record<string, true>> = {
-  cursor: true,
-  claude_code: true,
-  codex: true,
-  omp: true,
-  opencode: true,
-  openclaw: true,
-  hermes: true
-};
+const AUTO_INJECT_AGENT_SOURCE_IDS = new Set([
+  "cursor",
+  "claude_code",
+  "codex",
+  "omp",
+  "opencode",
+  "openclaw",
+  "hermes",
+  "deepseek_harness",
+  "workbuddy",
+  "freebuff",
+  "pi",
+  "qwenwork"
+]);
+const HOOK_OR_PLUGIN_AGENT_SOURCE_IDS = new Set(["cursor", "claude_code", "codex", "omp", "opencode", "openclaw", "hermes", "deepseek_harness"]);
 
 export interface AgentSourceAutoInjectService {
   runOnce(): Promise<AgentSourceAutoInjectResult>;

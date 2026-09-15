@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { DEFAULT_MEMMY_CONFIG, MemoryDb } from "../../../src/index.js";
+import { DEFAULT_MEMMY_CONFIG, MemoryDb, type LlmClient } from "../../../src/index.js";
 import { l2CandidateIdFor } from "../../../src/algorithm/plugin-algorithms.js";
 import { Repositories } from "../../../src/storage/repositories.js";
 import {
@@ -19,7 +19,8 @@ import {
 } from "./evolution-llm-stubs.js";
 import {
   createCapturingEmbedder,
-  createMemoryServiceFixture
+  createMemoryServiceFixture,
+  runWorkerRounds
 } from "../../fixtures/memory-service-fixture.js";
 
 const {
@@ -32,6 +33,88 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / evolution / policy induction", () => {
+  it("[BC-08] keeps task-linked feedback in both branches and activates its candidate Policy only after new successful evidence", async () => {
+    const { db, service } = createTestService({
+      llm: createBc08SummaryLlm(),
+      skillLlm: createCapturingL2Llm([]),
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            minEpisodesForActivation: 2,
+            minGain: -1
+          }
+        }
+      }
+    });
+    const namespace = { source: "codex", profileId: "jiang", userId: "bc-08-user" };
+    const firstSession = service.openSession({ namespace, workspaceId: "bc-08-workspace" });
+    const first = service.completeTurn("bc-08-feedback", {
+      sessionId: firstSession.sessionId,
+      episodeId: "bc-08-feedback-episode",
+      query: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
+      answer: "已精简代码并通过测试。",
+      toolCalls: [{ id: "bc-08-test-1", name: "run_tests", input: { scope: "changed" } }],
+      toolResults: [{ toolCallId: "bc-08-test-1", success: true, output: "passed" }]
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    makeTraceEligibleForL2(db, first.l1MemoryId);
+    setTraceSignatureAndVectorForTest(db, first.l1MemoryId, "code|simplify|pytest|fallback", [1, 0, 0]);
+    await addPositiveFeedbackForTurn(service, firstSession.sessionId, first);
+    service.closeSession(firstSession.sessionId);
+    await runWorkerRounds(service, 8, 50);
+
+    expect(db.db.prepare(
+      `SELECT content, memory_types_json FROM user_memories WHERE status = 'active'`
+    ).get()).toEqual({
+      content: "你刚才写了很多兜底代码，我更喜欢简洁的代码，以后不要写不必要的兜底代码",
+      memory_types_json: '["User Preference"]'
+    });
+    expect(db.db.prepare(`SELECT status FROM memories WHERE id = ?`).get(first.l1MemoryId))
+      .toEqual({ status: "activated" });
+    const candidate = db.db.prepare(
+      `SELECT id, status, properties_json FROM memories WHERE memory_layer = 'L2' LIMIT 1`
+    ).get() as { id: string; status: string; properties_json: string };
+    expect(candidate.status).toBe("resolving");
+    expect(JSON.parse(candidate.properties_json)).toMatchObject({
+      internal_info: { policy: { status: "candidate" } }
+    });
+
+    const secondSession = service.openSession({ namespace, workspaceId: "bc-08-workspace" });
+    const second = service.completeTurn("bc-08-verified-fix", {
+      sessionId: secondSession.sessionId,
+      episodeId: "bc-08-verified-episode",
+      query: "按反馈删除不必要的兜底代码并运行测试",
+      answer: "已保持实现简洁，测试验证通过。",
+      toolCalls: [{ id: "bc-08-test-2", name: "run_tests", input: { scope: "changed" } }],
+      toolResults: [{ toolCallId: "bc-08-test-2", success: true, output: "passed" }]
+    });
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
+    makeTraceEligibleForL2(db, second.l1MemoryId);
+    setTraceSignatureAndVectorForTest(db, second.l1MemoryId, "code|simplify|pytest|fallback", [1, 0, 0]);
+    await addPositiveFeedbackForTurn(service, secondSession.sessionId, second);
+    service.closeSession(secondSession.sessionId);
+    await runWorkerRounds(service, 8, 50);
+
+    const policies = db.db.prepare(
+      `SELECT status, properties_json FROM memories WHERE memory_layer = 'L2'`
+    ).all() as Array<{ status: string; properties_json: string }>;
+    expect(policies).toHaveLength(1);
+    expect(policies[0]!.status).toBe("activated");
+    expect(JSON.parse(policies[0]!.properties_json)).toMatchObject({
+      internal_info: {
+        policy: {
+          status: "active",
+          support: 2,
+          source_trace_ids: expect.arrayContaining([first.l1MemoryId, second.l1MemoryId])
+        }
+      }
+    });
+    db.close();
+  });
+
   it("promotes only the selected L2 candidate evidence", () => {
     const { db } = createTestService();
     const repos = new Repositories(db.db);
@@ -105,7 +188,18 @@ describe("MemoryService / evolution / policy induction", () => {
   });
 
   it("associates each L1 trace to only the best L2 policy like the plugin", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            minEpisodesForActivation: 1
+          }
+        }
+      }
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -148,8 +242,27 @@ describe("MemoryService / evolution / policy induction", () => {
 
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
-    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_association'`).run();
+    db.db.prepare(`DELETE FROM trace_policy_links WHERE l1_memory_id = ?`).run(complete.l1MemoryId);
+    db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded'`).run();
+    const associationAt = new Date().toISOString();
+    db.db.prepare(
+      `INSERT INTO evolution_jobs (
+         id, job_type, status, user_id, session_id, episode_id, target_memory_id,
+         payload_json, attempts, max_attempts, created_at, updated_at
+       ) VALUES (?, 'l2_association', 'queued', ?, ?, ?, ?, '{}', 0, 3, ?, ?)`
+    ).run(
+      "job_best_l2_association",
+      "user-best-l2-association",
+      session.sessionId,
+      complete.episodeId,
+      complete.l1MemoryId,
+      associationAt,
+      associationAt
+    );
     await service.runWorkerOnce(20);
 
     const links = db.db.prepare(
@@ -278,7 +391,7 @@ describe("MemoryService / evolution / policy induction", () => {
       };
     };
     expect(properties.internal_info?.policy?.support).toBe(1);
-    expect(properties.internal_info?.policy?.status).toBe("active");
+    expect(properties.internal_info?.policy?.status).toBe("candidate");
     expect(properties.internal_info?.policy?.source_trace_ids).toEqual(expect.arrayContaining(evidenceIds));
 
     db.close();
@@ -349,6 +462,9 @@ describe("MemoryService / evolution / policy induction", () => {
     service.closeSession(profileA.sessionId);
     service.closeSession(profileB.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, firstA.l1MemoryId);
     makeTraceEligibleForL2(db, firstB.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_induction'`).run();
@@ -378,6 +494,9 @@ describe("MemoryService / evolution / policy induction", () => {
     await addPositiveFeedbackForTurn(service, profileANext.sessionId, secondA);
     makeTraceEligibleForL2(db, secondA.l1MemoryId);
     service.closeSession(profileANext.sessionId);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, secondA.l1MemoryId);
     db.db.prepare(`UPDATE evolution_jobs SET status = 'succeeded' WHERE job_type <> 'l2_induction'`).run();
@@ -470,6 +589,9 @@ describe("MemoryService / evolution / policy induction", () => {
     }
     service.closeSession(profileA.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     for (const turn of turnsA) {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
     }
@@ -489,6 +611,9 @@ describe("MemoryService / evolution / policy induction", () => {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
     }
     service.closeSession(profileB.sessionId);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     await service.runWorkerOnce(20);
     for (const turn of turnsB) {
       setTraceSignatureAndVectorForTest(db, turn.l1MemoryId, signature, [1, 0, 0]);
@@ -661,11 +786,12 @@ describe("MemoryService / evolution / policy induction", () => {
       await service.runWorkerOnce(50);
     }
 
-    const l2Call = l2Calls.find((call) => call.options.operation === "l2.induction.v3");
+    const l2Call = l2Calls.find((call) => call.options.operation === "l2.induction.v4");
     expect(l2Call).toBeTruthy();
-    expect(l2Calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(1);
+    expect(l2Calls.filter((call) => call.options.operation === "l2.induction.v4")).toHaveLength(1);
     expect(l2Call!.options.thinkingMode).toBe("enabled");
     expect(l2Call!.messages[0]!.content).toContain("procedural policies");
+    expect(l2Call!.messages[0]!.content).toContain("should_generate=false");
     expect(l2Call!.messages[0]!.content).toContain("Same fact, two framings");
     expect(l2Call!.messages[0]!.content).toContain("Do NOT express here (declarative");
     expect(l2Call!.messages[1]!.content).toContain("English");
@@ -696,8 +822,8 @@ describe("MemoryService / evolution / policy induction", () => {
     expect(properties.internal_info?.policy?.procedure).toContain("Run the focused pytest workflow");
     expect(properties.internal_info?.policy?.procedure).toContain("inspect migration output");
     expect(properties.internal_info?.policy?.procedure).not.toContain("javascript:");
-    expect(properties.internal_info?.policy?.verification).toBe("");
-    expect(properties.internal_info?.policy?.boundary).toBe("");
+    expect(properties.internal_info?.policy?.verification).toBeTruthy();
+    expect(properties.internal_info?.policy?.boundary).toBeTruthy();
     expect(properties.internal_info?.policy?.policy_confidence).toBeCloseTo(0.77);
 
     db.close();
@@ -907,15 +1033,16 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "the focused pytest migration workflow worked"
     });
+    service.closeSession(session.sessionId);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);
-      if (calls.some((call) => call.options.operation === "l2.induction.v3")) {
+      if (calls.some((call) => call.options.operation === "l2.induction.v4")) {
         break;
       }
     }
 
-    expect(calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(3);
+    expect(calls.filter((call) => call.options.operation === "l2.induction.v4")).toHaveLength(3);
     const l2Count = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memories
@@ -988,7 +1115,9 @@ describe("MemoryService / evolution / policy induction", () => {
       }, {
         title: "Focused migration diagnosis",
         trigger: "pytest migration output needs focused diagnosis",
-        procedure: "Run the focused pytest workflow and inspect the exact failure."
+        procedure: "Run the focused pytest workflow and inspect the exact failure.",
+        verification: "Rerun the focused test and confirm it passes.",
+        exclusions: ["Do not apply when the failure is unrelated to migrations."]
       }]),
       config: {
         ...DEFAULT_MEMMY_CONFIG,
@@ -1036,15 +1165,16 @@ describe("MemoryService / evolution / policy induction", () => {
       magnitude: 1,
       rationale: "the focused migration diagnosis worked"
     });
+    service.closeSession(session.sessionId);
     makeTraceEligibleForL2(db, complete.l1MemoryId);
     for (let i = 0; i < 8; i += 1) {
       await service.runWorkerOnce(50);
-      if (calls.some((call) => call.options.operation === "l2.induction.v3")) {
+      if (calls.some((call) => call.options.operation === "l2.induction.v4")) {
         break;
       }
     }
 
-    expect(calls.filter((call) => call.options.operation === "l2.induction.v3")).toHaveLength(3);
+    expect(calls.filter((call) => call.options.operation === "l2.induction.v4")).toHaveLength(3);
     const l2Rows = db.db.prepare(
       `SELECT id
        FROM memories
@@ -1084,11 +1214,69 @@ describe("MemoryService / evolution / policy induction", () => {
          )
        ORDER BY job_type`
     ).all(userId, l2Rows[0]!.id) as Array<{ job_type: string }>;
-    expect(downstreamJobs.map((item) => item.job_type)).toEqual([
-      "embedding",
-      "l3_abstraction"
-    ]);
+    expect(downstreamJobs.map((item) => item.job_type)).toEqual(["embedding"]);
 
     db.close();
   });
 });
+
+function createBc08SummaryLlm(): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.summary,
+      provider: "host",
+      endpoint: "http://127.0.0.1/bc-08-summary",
+      model: "bc-08-summary"
+    },
+    isConfigured: () => true,
+    complete: async () => "unused",
+    async completeJson<T extends Record<string, unknown>>(
+      messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
+      options: { operation: string }
+    ): Promise<T> {
+      if (options.operation !== "capture.summarize") return {} as T;
+      const payload = messages.find((message) => message.role === "user")?.content ?? "";
+      if (payload.includes("以后不要写不必要的兜底代码")) {
+        return {
+          l1: {
+            summary: "用户要求代码保持简洁、避免不必要的兜底；本轮已精简并通过测试。",
+            evidence: [{
+              quote: "已精简代码并通过测试",
+              role: "assistant",
+              kind: "task_outcome"
+            }]
+          },
+          user: {
+            action: "create",
+            evidence: [{
+              quote: "我更喜欢简洁的代码",
+              type: "User Preference"
+            }, {
+              quote: "以后不要写不必要的兜底代码",
+              type: "User Preference"
+            }],
+            target: "",
+            replacement: ""
+          }
+        } as unknown as T;
+      }
+      return {
+        l1: {
+          summary: "按既有反馈删除不必要兜底，并通过测试验证。",
+          evidence: [{
+            quote: "测试验证通过",
+            role: "assistant",
+            kind: "task_outcome"
+          }]
+        },
+        user: null
+      } as unknown as T;
+    },
+    status: () => ({
+      provider: "host",
+      model: "bc-08-summary",
+      configured: true,
+      remote: true
+    })
+  };
+}

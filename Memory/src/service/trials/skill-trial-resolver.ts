@@ -26,7 +26,7 @@ import type {
 import { DEFAULT_NAMESPACE_SOURCE } from "../../types.js";
 import { MemoryServiceError } from "../../utils/error.js";
 import { nowIso } from "../../utils/time.js";
-import { recordApiLog } from "../model-audit/model-call-audit.js";
+import { elapsedApiLogMs,recordApiLog } from "../model-audit/model-call-audit.js";
 import {
   namespaceIdFromContext as canonicalNamespaceIdFromContext,
   namespaceForMemory
@@ -148,6 +148,7 @@ pendingTrialsForFeedback(feedback: FeedbackRecord): SkillTrialRecord[] {
   }
 
 updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
+    const startedAt = performance.now();
     const memory = this.deps.repos.memories.get(trial.skillMemoryId);
     if (!memory || memory.memoryLayer !== "Skill") {
       return;
@@ -210,9 +211,9 @@ updateSkillTrialStats(trial: SkillTrialRecord, at: string): void {
         eta,
         reason: "skill trial update"
       },
-      0,
+      elapsedApiLogMs(startedAt),
       true,
-      at
+      nowIso()
     );
     this.deps.onSkillTrialResolved?.({ trial, skillMemory: saved, eta, at });
   }

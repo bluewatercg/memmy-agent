@@ -1,7 +1,8 @@
 import {
   policyMetaFromMemory,
   skillMetaFromMemory,
-  traceMetaFromMemory
+  traceMetaFromMemory,
+  worldModelMetaFromMemory
 } from "../../algorithm/plugin-algorithms.js";
 import type { MemmyConfig } from "../../config/index.js";
 import type { LlmClient } from "../../model/types.js";
@@ -27,6 +28,7 @@ import {
 } from "../namespace/namespace-scope.js";
 import type { EnqueueJobInput } from "../worker/job-handlers.js";
 import { isInactiveEvolutionMemory } from "./evolution-memory-lifecycle.js";
+import { L3WorldModelTraceFieldPipeline } from "./l3-world-model-pipeline.js";
 import { NegativeExperiencePipeline } from "./negative-experience-pipeline.js";
 import { AssetRewardService } from "./asset-reward-service.js";
 import { BigTurnSpanPipeline } from "./big-turn-span-pipeline.js";
@@ -37,10 +39,17 @@ import {
 } from "./reward-pipeline.js";
 import { SkillPipeline } from "./skill-pipeline.js";
 import { SpanPipeline } from "./span-pipeline.js";
-import { WorldModelPipeline } from "./world-model-pipeline.js";
+import type { TurnMemoryCaptureDecision } from "./span-pipeline.js";
 
 type TraceMeta = NonNullable<ReturnType<typeof traceMetaFromMemory>>;
 type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
+
+export interface PolicyEvidencePreflightReport {
+  orphanPolicyIds: string[];
+  affectedWorldModelIds: string[];
+  affectedSkillIds: string[];
+  restorablePolicyIds: string[];
+}
 
 export interface EvolutionJobProcessorDeps {
   repos: Repositories;
@@ -84,6 +93,7 @@ export class EvolutionJobProcessor {
   private readonly worldModel: WorldModelPipeline;
   private readonly assets: AssetLifecycleService;
   private readonly assetRewards: AssetRewardService;
+  private readonly l3WorldModel: L3WorldModelTraceFieldPipeline;
 
   constructor(private readonly deps: EvolutionJobProcessorDeps) {
     const owner = this;
@@ -130,7 +140,7 @@ export class EvolutionJobProcessor {
       namespaceIdFromMemory: deps.namespaceIdFromMemory,
       onSkillRewardDrift: this.skill.applySkillRewardDriftForPolicy.bind(this.skill)
     });
-    this.worldModel = new WorldModelPipeline({
+    this.l3WorldModel = new L3WorldModelTraceFieldPipeline({
       repos: deps.repos,
       get config() { return owner.deps.config; },
       get skillLlm() { return owner.deps.skillLlm; },
@@ -206,7 +216,12 @@ export class EvolutionJobProcessor {
   }
 
   abstractL3(job: EvolutionJobRecord): Promise<void> {
-    return this.worldModel.abstractL3(job);
+    void job;
+    return Promise.resolve();
+  }
+
+  updateL3WorldModel(job: EvolutionJobRecord): Promise<void> {
+    return this.l3WorldModel.updateField(job);
   }
 
   crystallizeSkill(job: EvolutionJobRecord): Promise<void> {
@@ -295,8 +310,147 @@ export class EvolutionJobProcessor {
     return this.span.summarizeTraceForCapture(input, options);
   }
 
+  decideTurnMemoryForCapture(input: {
+    trace: TraceMeta;
+    userText: string;
+    agentText: string;
+    toolCalls: ToolCallPayload[];
+    reflectionText: string;
+  }): Promise<TurnMemoryCaptureDecision> {
+    return this.span.decideTurnMemoryForCapture(input);
+  }
+
   findExistingSkillForPolicy(policy: PolicyMeta) {
     return this.skill.findExistingSkillForPolicy(policy);
+  }
+
+  previewPolicyEvidenceReconciliation(limit = 10000): PolicyEvidencePreflightReport {
+    const orphanPolicyIds: string[] = [];
+    const restorablePolicyIds: string[] = [];
+    for (const { policy, linkedTraceIds, validTraces } of this.activePolicyEvidenceStates(limit)) {
+      if (validTraces.length === 0) {
+        orphanPolicyIds.push(policy.id);
+      } else if (validTraces.some((trace) => !linkedTraceIds.has(trace.id))) {
+        restorablePolicyIds.push(policy.id);
+      }
+    }
+
+    const orphanIds = new Set(orphanPolicyIds);
+    const affectedWorldModelIds = this.deps.repos.memories
+      .list({ memoryLayer: "L3", status: ["activated", "resolving"] }, limit)
+      .filter((memory) => worldModelMetaFromMemory(memory)?.policyIds.some((id) => orphanIds.has(id)))
+      .map((memory) => memory.id);
+    const affectedSkillIds = this.deps.repos.memories
+      .list({ memoryLayer: "Skill", status: ["activated", "resolving"] }, limit)
+      .filter((memory) => skillMetaFromMemory(memory)?.sourcePolicyIds.some((id) => orphanIds.has(id)))
+      .map((memory) => memory.id);
+
+    return {
+      orphanPolicyIds: orphanPolicyIds.sort(),
+      affectedWorldModelIds: affectedWorldModelIds.sort(),
+      affectedSkillIds: affectedSkillIds.sort(),
+      restorablePolicyIds: restorablePolicyIds.sort()
+    };
+  }
+
+  reconcileOrphanedPolicies(at: string, limit = 10000): number {
+    let reconciled = 0;
+    for (const { memory, policy, linkedTraceIds, validTraces } of this.activePolicyEvidenceStates(limit)) {
+      if (validTraces.length === 0) {
+        const updated = this.policy.recomputePolicyStats(policy.id, at);
+        if (updated && policyMetaFromMemory(updated)?.status !== "active") {
+          this.invalidatePolicyDependencies(policy.id, at);
+          reconciled += 1;
+        }
+        continue;
+      }
+
+      let restored = false;
+      for (const trace of validTraces) {
+        if (linkedTraceIds.has(trace.id)) continue;
+        this.deps.repos.runtime.insertTracePolicyLink({
+          userId: memory.userId,
+          l1MemoryId: trace.id,
+          l2MemoryId: policy.id,
+          relation: "supports",
+          strength: 1,
+          createdAt: at
+        });
+        restored = true;
+      }
+      if (!restored) continue;
+      this.deps.repos.runtime.appendChange({
+        memoryId: memory.id,
+        namespaceId: this.deps.namespaceIdFromMemory(memory),
+        kind: "policy",
+        op: "updated",
+        entityId: memory.id,
+        userId: memory.userId,
+        changeType: "policy_evidence_links_restored",
+        before: { linkedTraceIds: Array.from(linkedTraceIds) },
+        after: { linkedTraceIds: validTraces.map((trace) => trace.id) },
+        source: "startup.policy_evidence_reconciliation",
+        createdAt: at
+      });
+      reconciled += 1;
+    }
+    return reconciled;
+  }
+
+  private activePolicyEvidenceStates(limit: number): Array<{
+    memory: MemoryRow;
+    policy: PolicyMeta;
+    linkedTraceIds: Set<string>;
+    validTraces: TraceMeta[];
+  }> {
+    return this.deps.repos.memories
+      .list({ memoryLayer: "L2", status: "activated" }, limit)
+      .map((memory) => ({ memory, policy: policyMetaFromMemory(memory) }))
+      .filter((item): item is { memory: MemoryRow; policy: PolicyMeta } =>
+        item.policy?.status === "active"
+      )
+      .map(({ memory, policy }) => {
+        const linkedTraceIds = new Set(this.deps.repos.runtime.listTracePolicyLinks({
+          l2MemoryId: policy.id,
+          limit: 1000
+        }).map((link) => link.l1MemoryId));
+        const candidateTraceIds = Array.from(new Set([
+          ...policy.sourceTraceIds,
+          ...linkedTraceIds
+        ]));
+        const validTraces = this.deps.repos.memories
+          .getMany(candidateTraceIds)
+          .map((candidate) => this.deps.traceMeta(candidate))
+          .filter((trace): trace is TraceMeta => Boolean(
+            trace && this.policy.isTraceEligibleForL2(trace)
+          ));
+        return { memory, policy, linkedTraceIds, validTraces };
+      });
+  }
+
+  invalidateMemoryDependencies(memory: MemoryRow, at: string): void {
+    if (memory.memoryLayer === "L1") {
+      const policyIds = Array.from(new Set(
+        this.deps.repos.runtime
+          .listTracePolicyLinks({ l1MemoryId: memory.id, limit: 1000 })
+          .map((link) => link.l2MemoryId)
+      ));
+      for (const policyId of policyIds) {
+        const updated = this.policy.recomputePolicyStats(policyId, at);
+        const updatedPolicy = updated ? policyMetaFromMemory(updated) : null;
+        if (updatedPolicy?.status !== "active") {
+          this.invalidatePolicyDependencies(policyId, at);
+        }
+      }
+      return;
+    }
+    if (memory.memoryLayer === "L2") {
+      this.invalidatePolicyDependencies(memory.id, at);
+    }
+  }
+
+  private invalidatePolicyDependencies(policyId: string, at: string): void {
+    this.skill.invalidatePolicySource(policyId, at);
   }
 
   upsertEvolutionMemory(memory: MemoryRow): {

@@ -194,7 +194,7 @@ describe("ingestion service", () => {
     }));
   });
 
-  it("keeps the trace identity stable while changing the idempotency key for revised content", async () => {
+  it("keeps the trace identity stable while changing the idempotency key for explicitly revised content", async () => {
     const added: Array<{ requestId?: string; turnId?: string }> = [];
     const service = createService({
       async addMemory(input) {
@@ -216,10 +216,46 @@ describe("ingestion service", () => {
     const revised = [first[0]!, { ...first[1]!, content: "revised assistant response" }];
 
     await service.ingest(toAsyncIterable(first), { sourceId: "cursor" });
-    await service.ingest(toAsyncIterable(revised), { sourceId: "cursor" });
+    await service.ingest(toAsyncIterable(revised), {
+      sourceId: "cursor",
+      replaySeenConversationIds: new Set(["conv-a"])
+    });
 
     expect(added[0]?.turnId).toBe(added[1]?.turnId);
     expect(added[0]?.requestId).not.toBe(added[1]?.requestId);
+  });
+
+  it("skips seen turns while importing a newly appended turn in the same conversation", async () => {
+    const memoryClient = createMockMemoryClient({ now });
+    const addMemory = vi.fn(memoryClient.addMemory);
+    const service = createService({ addMemory });
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor" }
+    );
+    const stats = await service.ingest(
+      toAsyncIterable([
+        createMessage("conv-a", 1),
+        createMessage("conv-a", 2),
+        createMessage("conv-a", 3),
+        createMessage("conv-a", 4)
+      ]),
+      { sourceId: "cursor" }
+    );
+
+    expect(addMemory).toHaveBeenCalledTimes(2);
+    expect(addMemory.mock.calls[1]?.[0].content).toBe("## user\n\nmessage 3\n\n## assistant\n\nmessage 4");
+    expect(stats).toMatchObject({
+      written: 2,
+      deduped: 2,
+      failed: 0,
+      writtenMemories: 1,
+      dedupedMemories: 1,
+      failedMemories: 0,
+      completedConversationIds: ["conv-a"],
+      errors: []
+    });
   });
 
   it("counts add failures and continues with later conversations", async () => {
@@ -418,45 +454,40 @@ describe("ingestion service", () => {
     });
   });
 
-  it("replays an already-seen conversation idempotently to recover its memory id", async () => {
-    const calls: string[] = [];
+  it("skips an already-seen turn before memory.add so request-shape changes cannot conflict", async () => {
+    const addMemory = vi.fn(async () => {
+      throw new Error("already-seen turns must not call memory.add");
+    });
+    const markSeen = vi.fn(() => false);
     const service = createService(
+      { addMemory },
       {
-        async addMemory() {
-          calls.push("add");
-          return {
-            id: "memory-existing",
-            kind: "trace",
-            memoryLayer: "L1",
-            status: "activated",
-            title: "Existing memory",
-            summary: "Existing memory",
-            tags: [],
-            createdAt: now(),
-            serverTime: now()
-          };
-        }
-      },
-      {
-        hasSeen: () => true
+        hasSeen: () => true,
+        markSeen
       }
     );
 
     const stats = await service.ingest(
-      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2), createMessage("conv-a", 3)]),
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
       { sourceId: "cursor" }
     );
 
-    expect(calls).toEqual(["add"]);
-    expect(stats).toMatchObject({
-      attempted: 3,
+    expect(addMemory).not.toHaveBeenCalled();
+    expect(markSeen).not.toHaveBeenCalled();
+    expect(stats).toEqual({
+      attempted: 2,
       written: 0,
-      deduped: 3,
+      deduped: 2,
       failed: 0,
-      conversations: 1,
+      writtenMemories: 0,
       dedupedMemories: 1,
-      memoryIds: ["memory-existing"],
-      incompleteConversationIds: ["conv-a"]
+      failedMemories: 0,
+      memoryIds: [],
+      conversations: 1,
+      completedConversationIds: ["conv-a"],
+      incompleteConversationIds: [],
+      failedConversationIds: [],
+      errors: []
     });
   });
 
@@ -535,6 +566,53 @@ describe("ingestion service", () => {
     expect(unscoped.requestId).not.toEqual(scoped.requestId);
     expect(scoped.namespace).toEqual({ source: "cursor", profileId: "default", workspacePath: "/repo/one" });
     expect(unscoped.namespace).toBeUndefined();
+  it("counts a QA duplicate returned by memory.add as deduped and marks its source messages seen", async () => {
+    const markSeen = vi.fn(() => true);
+    const succeeded: Array<Record<string, unknown>> = [];
+    const service = createService(
+      {
+        async addMemory(input) {
+          return {
+            id: "hook-memory",
+            kind: "trace",
+            memoryLayer: input.layer ?? "L1",
+            status: "activated",
+            title: input.title ?? "Hook memory",
+            summary: input.content,
+            tags: input.tags ?? [],
+            createdAt: now(),
+            serverTime: now(),
+            duplicate: true
+          };
+        }
+      },
+      { hasSeen: () => false, markSeen },
+      undefined,
+      {
+        trackAddStarted() {},
+        trackAddSucceeded(input) {
+          succeeded.push({ ...input });
+        },
+        trackAddFailed() {}
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "codex" }
+    );
+
+    expect(markSeen).toHaveBeenCalledTimes(2);
+    expect(stats).toMatchObject({
+      written: 0,
+      deduped: 2,
+      writtenMemories: 0,
+      dedupedMemories: 1,
+      memoryIds: []
+    });
+    expect(succeeded).toEqual([
+      expect.objectContaining({ storedCount: 0 })
+    ]);
   });
 
   it("does not import user-only or assistant-only turns as memories", async () => {
@@ -661,12 +739,169 @@ describe("ingestion service", () => {
       )
     ).rejects.toBeInstanceOf(IngestionAssertionError);
   });
+
+  it("emits memory_desktop add analytics for each new addMemory call", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {},
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    await service.ingest(
+      toAsyncIterable([
+        createMessage("conv-a", 1),
+        createMessage("conv-a", 2),
+        createMessage("conv-b", 3),
+        createMessage("conv-b", 4)
+      ]),
+      { sourceId: "cursor", scanMode: "initial_subset" }
+    );
+
+    expect(events.map((event) => event.name)).toEqual(["started", "succeeded", "started", "succeeded"]);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "initial_subset"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "initial_subset",
+      storedCount: 1
+    });
+    expect(typeof events[0]?.payload.turnId).toBe("string");
+    expect(typeof events[1]?.payload.durationMs).toBe("number");
+  });
+
+  it("forwards scanMode into add analytics payloads", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {},
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor", scanMode: "full" }
+    );
+
+    expect(events).toHaveLength(2);
+    expect(events[0]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      scanMode: "full"
+    });
+    expect(events[1]?.payload).toMatchObject({
+      scanMode: "full",
+      storedCount: 1
+    });
+  });
+
+  it("does not call memory.add or emit add analytics for already-seen turns", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const addMemory = vi.fn(async () => {
+      throw new Error("already-seen turns must not call memory.add");
+    });
+    const service = createService(
+      { addMemory },
+      {
+        hasSeen: () => true
+      },
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor" }
+    );
+
+    expect(addMemory).not.toHaveBeenCalled();
+    expect(stats.dedupedMemories).toBe(1);
+    expect(events).toEqual([]);
+  });
+
+  it("emits add_failed analytics when addMemory throws", async () => {
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const service = createService(
+      {
+        async addMemory() {
+          throw new Error("write failed");
+        }
+      },
+      {},
+      undefined,
+      {
+        trackAddStarted(input) {
+          events.push({ name: "started", payload: { ...input } });
+        },
+        trackAddSucceeded(input) {
+          events.push({ name: "succeeded", payload: { ...input } });
+        },
+        trackAddFailed(input) {
+          events.push({ name: "failed", payload: { ...input } });
+        }
+      }
+    );
+
+    const stats = await service.ingest(
+      toAsyncIterable([createMessage("conv-a", 1), createMessage("conv-a", 2)]),
+      { sourceId: "cursor", scanMode: "incremental" }
+    );
+
+    expect(stats.failedMemories).toBe(1);
+    expect(events.map((event) => event.name)).toEqual(["started", "failed"]);
+    expect(events[1]?.payload).toMatchObject({
+      adapterId: "agent-source:cursor",
+      conversationId: "conv-a",
+      scanMode: "incremental"
+    });
+    expect(events[1]?.payload.error).toBeInstanceOf(Error);
+  });
 });
 
 function createService(
   memoryClientPatch: Partial<MemoryClient>,
   repositoryPatch: Partial<AgentSourceRepository> = {},
-  warn?: (warning: IngestionWarning) => void
+  warn?: (warning: IngestionWarning) => void,
+  memoryAddAnalytics?: {
+    trackAddStarted: (input: Record<string, unknown>) => void;
+    trackAddSucceeded: (input: Record<string, unknown>) => void;
+    trackAddFailed: (input: Record<string, unknown>) => void;
+  }
 ): IngestionService {
   return createIngestionService({
     memoryClient: {
@@ -677,6 +912,7 @@ function createService(
       ...createRepository(),
       ...repositoryPatch
     },
+    memoryAddAnalytics: memoryAddAnalytics as never,
     warn
   });
 }

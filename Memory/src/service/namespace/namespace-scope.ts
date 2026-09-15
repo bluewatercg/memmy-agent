@@ -4,6 +4,10 @@ import type { RawTurnRecord, SessionRecord } from "../../storage/repositories.js
 import { stableHash } from "../../utils/id.js";
 
 export const GLOBAL_PROJECT_ID = "global";
+import {
+  resolveWorkspaceIdentity,
+  type ResolvedWorkspaceIdentity
+} from "./workspace-identity.js";
 
 export function normalizeNamespace(namespace?: RuntimeNamespace): RuntimeNamespace & { userId: string; source: string; profileId: string } {
   const workspacePath = normalizeWorkspacePath(namespace?.workspacePath);
@@ -37,6 +41,16 @@ export function sessionScopeForOpenRequest(request: SessionOpenRequest, namespac
     workspaceId: resolved.workspaceId,
     workspacePath: resolved.workspacePath
   };
+}
+
+export function resolveV2WorkspaceIdentityForOpenRequest(
+  request: SessionOpenRequest,
+  namespace: RuntimeNamespace & { userId: string }
+): ResolvedWorkspaceIdentity {
+  return resolveWorkspaceIdentity(namespace.userId, {
+    workspaceUri: request.workspaceUri,
+    workspaceHostId: request.workspaceHostId
+  });
 }
 
 export function namespaceForSession(session: SessionRecord): RuntimeNamespace {

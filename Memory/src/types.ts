@@ -1,10 +1,36 @@
 import type { ProjectContextStableResult } from "./service/project-context/project-context-types.js";
+import type {
+  L3WorldModelFeatures,
+  L3WorldModelProtocolVersion,
+  L3WorldModelTransition,
+  WorkspaceHostId,
+  WorkspaceUri
+} from "./contracts/index.js";
+
+export type {
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelBoundaryTrigger,
+  L3WorldModelFeatures,
+  L3WorldModelFieldName,
+  L3WorldModelFields,
+  L3WorldModelProtocolVersion,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelRuntimeNamespace,
+  L3WorldModelTraceHeadResponse,
+  L3WorldModelTransition,
+  SessionL3WorldModelContextResponse,
+  WorkspaceHostId,
+  WorkspaceIdentityFields,
+  WorkspaceUri
+} from "./contracts/index.js";
 
 export type IsoTime = string;
 export const DEFAULT_NAMESPACE_SOURCE = "unknown";
 export type Cursor = string;
 export type MemoryLayer = "L1" | "L2" | "L3" | "Skill";
-export type MemoryKind = "trace" | "span" | "policy" | "world_model" | "skill";
+export type RecallMemoryLayer = MemoryLayer | "UserMemory";
+export type MemoryKind = "user_memory" | "trace" | "span" | "policy" | "world_model" | "skill";
 export type MemoryStatus = "activated" | "resolving" | "archived" | "deleted";
 export type MemoryRelation = "supersedes";
 
@@ -56,11 +82,13 @@ export interface MemoryProcessingRecord {
   errorCode?: string | null;
   errorMessage?: string | null;
   failedAt?: IsoTime | null;
+  autoRetryScheduled?: boolean;
   updatedAt: IsoTime;
 }
 export type JobType =
   | "episode_idle_close"
   | "trace_summary"
+  | "user_memory_embedding"
   | "import_summary"
   | "reflection"
   | "embedding"
@@ -70,6 +98,8 @@ export type JobType =
   | "l2_association"
   | "l2_induction"
   | "l3_abstraction"
+  | "l3_world_model_update"
+  | "project_environment_profile"
   | "skill_crystallization"
   | "skill_trial_resolve"
   | "topic_ingest"
@@ -92,6 +122,8 @@ export interface RequestEnvelope {
   adapterId?: string;
   source?: string;
   namespace?: RuntimeNamespace;
+  /** IANA timezone for user-facing calendar and relative-time semantics. */
+  timeZone?: string;
 }
 
 export type MemoryAssetType = "chat_memory" | "skill" | "wiki" | "code_graph";
@@ -485,6 +517,20 @@ export interface MemoryRow {
   deletedAt?: IsoTime | null;
 }
 
+/** Narrow projection used by aggregate read models without loading memory payloads or vectors. */
+export interface MemoryStatsRow {
+  conversationId?: string;
+  sessionId?: string;
+  agentId?: string;
+  appId?: string;
+  status: MemoryStatus;
+  memoryLayer: MemoryLayer;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+  infoSource?: unknown;
+  internalSource?: unknown;
+}
+
 export interface MemoryFilter {
   tenantId?: string;
   userId?: string;
@@ -495,6 +541,8 @@ export interface MemoryFilter {
   agentId?: string;
   excludedAgentIds?: string[];
   appId?: string;
+  createdAtGte?: IsoTime;
+  createdAtLt?: IsoTime;
   memoryLayer?: MemoryLayer | MemoryLayer[];
   status?: MemoryStatus | MemoryStatus[];
   tags?: string[];
@@ -504,14 +552,32 @@ export interface MemoryFilter {
 export interface RecallHit {
   id: string;
   kind: MemoryKind;
-  memoryLayer: MemoryLayer;
+  memoryLayer: RecallMemoryLayer;
   status: MemoryStatus;
   title?: string;
   snippet: string;
   score: number;
   tags: string[];
+  createdAt?: IsoTime;
   updatedAt?: IsoTime;
   source: "search" | "episode" | "rule" | "skill";
+  sourceTurnId?: string;
+  memberMemoryIds?: string[];
+  retrievalRoutes?: Array<"user_memory" | "l1" | "agent_memory">;
+  sourceAgentId?: string;
+  sourceSkillId?: string;
+  sourceSkillVersion?: string;
+  readOnly?: boolean;
+  members?: Array<{
+    id: string;
+    kind: MemoryKind;
+    memoryLayer: RecallMemoryLayer;
+    status: MemoryStatus | UserMemoryStatus;
+    content: string;
+    createdAt: IsoTime;
+    updatedAt: IsoTime;
+    retrievalRoute: "user_memory" | "l1" | "agent_memory";
+  }>;
 }
 
 export interface InjectedContext {
@@ -520,7 +586,7 @@ export interface InjectedContext {
     id: string;
     title: string;
     kind: MemoryKind;
-    memoryLayer: MemoryLayer;
+    memoryLayer: RecallMemoryLayer;
     memoryIds: string[];
     content: string;
     tokenEstimate?: number;
@@ -546,6 +612,19 @@ export interface MemoryListItem {
   updatedAt: IsoTime;
   version: number;
   processing?: MemoryProcessingRecord;
+}
+
+export type WorldModelScope =
+  | { kind: "general" }
+  | {
+      kind: "project";
+      projectLabel: string | null;
+      workspaceDisplayPath: string | null;
+    };
+
+export interface PanelMemoryListItem extends Omit<MemoryListItem, "memoryLayer"> {
+  memoryLayer: RecallMemoryLayer;
+  worldModelScope?: WorldModelScope;
 }
 
 export interface MemoryDetailItem extends MemoryListItem {
@@ -631,6 +710,10 @@ export interface SessionCheckpointRequest extends RequestEnvelope {
 export interface SessionOpenRequest extends RequestEnvelope {
   source?: string;
   profileId?: string;
+  l3WorldModelProtocolVersion?: L3WorldModelProtocolVersion;
+  l3WorldModelTransition?: L3WorldModelTransition;
+  workspaceUri?: WorkspaceUri;
+  workspaceHostId?: WorkspaceHostId;
   projectId?: string;
   workspaceId?: string;
   workspacePath?: string;
@@ -660,6 +743,7 @@ export interface TurnStartRequest extends RequestEnvelope {
   sessionId: string;
   query: string;
   turnId?: string;
+  layers?: MemoryLayer[];
   contextHints?: Record<string, unknown>;
   contextBudget?: number;
   protocolVersion?: string;
@@ -681,6 +765,34 @@ export interface TurnCompleteRequest extends RequestEnvelope {
   provenance?: Partial<MemoryProvenance>;
   usage?: Record<string, unknown>;
   status?: "succeeded" | "failed" | "cancelled";
+  userMemoryCorrection?: {
+    targetMemoryId: string;
+    revisedContent: string;
+  };
+}
+
+export type UserMemoryType = "User Fact" | "User Preference" | "User Directive";
+export type UserMemoryStatus = "active" | "archived" | "deleted";
+
+export interface UserMemoryRecord {
+  id: string;
+  sourceTurnId: string;
+  userId: string;
+  memoryTypes: UserMemoryType[];
+  content: string;
+  normalizedUserTextHash: string;
+  sourceTurnRefs: string[];
+  status: UserMemoryStatus;
+  replacesMemoryId?: string;
+  replacedByMemoryId?: string;
+  archivedAt?: IsoTime | null;
+  archiveReason?: string;
+  embedding?: number[];
+  embeddingModel?: string;
+  embeddingProvider?: string;
+  createdAt: IsoTime;
+  updatedAt: IsoTime;
+  deletedAt?: IsoTime | null;
 }
 
 export interface ToolObserveRequest extends RequestEnvelope {
@@ -751,6 +863,11 @@ export interface MemoryAddRequest extends RequestEnvelope {
   supersessionReason?: string;
   /** Escape hatch for semantic-dedup merge-tier blocks: why a parallel version must be created. */
   allowCreateReason?: string;
+  sourceAgentId?: string;
+  sourceSkillId?: string;
+  sourceSkillPath?: string;
+  sourceSkillVersion?: string;
+  sourceContentHash?: string;
 }
 
 export interface FeedbackTarget {
@@ -819,10 +936,13 @@ export interface RawTurnRedactRequest extends RequestEnvelope {
 
 export interface HealthResponse {
   ok: boolean;
+  serviceVersion: string;
+  protocolVersion: number;
+  viewerVersion: string;
+  viewerUrl: string;
   version: string;
   uptimeMs: number;
   mode: "local" | "cloud" | "dev";
-  activeProfile: "account" | "byok";
   storage: {
     backend: "sqlite" | "openmem-cloud-rest";
     backendId?: "sqlite-local" | "openmem-cloud-rest";
@@ -844,6 +964,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      routing: "follow" | "fixed" | null;
     };
     evolution: {
       provider: string;
@@ -852,6 +973,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      routing: "follow" | "fixed" | null;
     };
     embedding: {
       provider: string;
@@ -860,6 +982,7 @@ export interface HealthResponse {
       remote: boolean;
       lastOkAt?: string;
       lastError?: string;
+      mode: "cloud" | "local" | "custom" | null;
     };
   };
   capabilities: {
@@ -871,7 +994,9 @@ export interface HealthResponse {
       enabled: true;
       models: string[];
     };
+    service: string[];
   };
+  features?: L3WorldModelFeatures;
   serverTime: IsoTime;
 }
 
@@ -881,7 +1006,6 @@ export interface MemoryReloadConfigRequest extends RequestEnvelope {
 }
 
 export interface MemoryReloadConfigResponse {
-  activeProfile: "account" | "byok";
   changed: boolean;
   requiresRestart: boolean;
   models: HealthResponse["models"];

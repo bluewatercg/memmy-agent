@@ -137,6 +137,19 @@ export function resolveHermesHomeDirectory(options: ResolveAgentPathOptions = {}
   );
 }
 
+export function resolveDeepseekHarnessHomeDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.DSH_HOME,
+    runtime.pathApi.join(runtime.homeDirectory, ".dsh"),
+    runtime
+  );
+}
+
+export function resolveDeepseekHarnessSessionsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolveDeepseekHarnessHomeDirectory(options), "sessions");
+}
+
 export function resolveWorkbuddyHomeDirectory(options: ResolveAgentPathOptions = {}): string {
   const runtime = createAgentPathRuntime(options);
   return resolveConfiguredDirectory(
@@ -149,6 +162,32 @@ export function resolveWorkbuddyHomeDirectory(options: ResolveAgentPathOptions =
 
 export function resolveWorkbuddyProjectsDirectory(options: ResolveAgentPathOptions = {}): string {
   return createAgentPathRuntime(options).pathApi.join(resolveWorkbuddyHomeDirectory(options), "projects");
+}
+
+export function resolvePiAgentDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.PI_CODING_AGENT_DIR,
+    runtime.pathApi.join(runtime.homeDirectory, ".pi", "agent"),
+    runtime
+  );
+}
+
+export function resolvePiSessionsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolvePiAgentDirectory(options), "sessions");
+}
+
+export function resolveQwenworkHomeDirectory(options: ResolveAgentPathOptions = {}): string {
+  const runtime = createAgentPathRuntime(options);
+  return resolveConfiguredDirectory(
+    runtime.environment.QWENWORK_CONFIG_DIR,
+    runtime.pathApi.join(runtime.homeDirectory, ".qwenworkcn"),
+    runtime
+  );
+}
+
+export function resolveQwenworkProjectsDirectory(options: ResolveAgentPathOptions = {}): string {
+  return createAgentPathRuntime(options).pathApi.join(resolveQwenworkHomeDirectory(options), "projects");
 }
 
 export function resolveCursorDataPaths(options: ResolveCursorDataPathsOptions = {}): CursorDataPaths {

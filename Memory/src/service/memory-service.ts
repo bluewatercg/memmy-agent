@@ -1,9 +1,22 @@
 import {
   automaticTurnStartLayers,
+} from "../algorithm/plugin-algorithms.js";
+import {
+  assertJsonValue,
+  canonicalJson,
+  isLocalWorkspaceUri,
+  sha256Hex
+} from "../contracts/index.js";
+import {
   skillMetaFromMemory,
   traceMetaFromMemory
 } from "../algorithm/plugin-algorithms.js";
 import { PROJECT_VERSION } from "../cli/project-version.js";
+import {
+  MEMORY_CAPABILITIES,
+  MEMORY_PROTOCOL_VERSION,
+  MEMORY_VIEWER_VERSION
+} from "../version.js";
 import {
   DEFAULT_MEMMY_CONFIG,
   loadMemmyConfig,
@@ -11,11 +24,14 @@ import {
   type MemmyConfig
 } from "../config/index.js";
 import { createMemoryLogger } from "../logging/logger.js";
-import { resolveMemoryAgentRegion } from "../model/agent-region.js";
 import { createEmbedder } from "../model/embedder.js";
 import { DshImportState, type DshClaim } from "./import/dsh/import-state.js";
 import { DshImportService, type DshImportOptions, type DshImportResult } from "./import/dsh/dsh-import-service.js";
 import { createLlmClient } from "../model/llm.js";
+import {
+  MemoryModelTaskRouter,
+  type MemoryModelTaskContext
+} from "../model/task-routing.js";
 import type { MemoryLlmModelRole } from "../model/token-usage.js";
 import type { Embedder,LlmClient } from "../model/types.js";
 import {
@@ -27,6 +43,7 @@ import type { MemoryDb } from "../storage/db.js";
 import {
   MemoryVersionConflictError,
   Repositories,
+  isStrictL3WorldModelV2Memory,
   jobToRef,
   kindFromMemory,
   type ChangeLogRecord,
@@ -47,6 +64,10 @@ import type {
   HealthResponse,
   InjectedContext,
   JobRef,
+  L3WorldModelBoundaryRequest,
+  L3WorldModelBoundaryResponse,
+  L3WorldModelRequestEnvelope,
+  L3WorldModelTraceHeadResponse,
   MemoryAddRequest,
   MemoryDetailItem,
   MemoryExportRequest,
@@ -58,6 +79,7 @@ import type {
   MemoryLayer,
   MemoryListItem,
   MemoryProvenance,
+  PanelMemoryListItem,
   MemoryProcessingRecord,
   MemoryReloadConfigRequest,
   MemoryReloadConfigResponse,
@@ -65,6 +87,7 @@ import type {
   MemorySearchRequest,
   RawTurnRedactRequest,
   RecallHit,
+  RecallMemoryLayer,
   RepairSuggestionRequest,
   RequestEnvelope,
   RetrievalMode,
@@ -72,6 +95,7 @@ import type {
   SessionCheckpointPayload,
   SessionCheckpointRequest,
   SessionCompactRequest,
+  SessionL3WorldModelContextResponse,
   SessionOpenRequest,
   SkillUseRequest,
   SubagentCompleteRequest,
@@ -85,8 +109,9 @@ import type {
 import { MemoryServiceError } from "../utils/error.js";
 import { newId,stableHash,stableStringify } from "../utils/id.js";
 import { isRecord,stringifyForMemory } from "../utils/json.js";
+import { memoryCaptureQaHash, normalizeMemoryCaptureSource } from "../utils/memory-capture-claim.js";
 import { clip,firstLine } from "../utils/text.js";
-import { nowIso } from "../utils/time.js";
+import { nowIso, resolveTimeZone } from "../utils/time.js";
 import {
   EmbeddingJobProcessor
 } from "./embedding/embedding-job-processor.js";
@@ -123,12 +148,14 @@ import {
   isAgentSourceImportMemoryAdd,
   memoryAddImportTrace,
   memoryAddKey,
+  memoryAddQaPair,
   memoryAddTags,
   normalizeMemoryAddCreatedAt,
   titleFromImportTrace,
   toolCallsFromUnknown
 } from "./import/memory-import-pipeline.js";
 import { recordApiLog } from "./model-audit/model-call-audit.js";
+import { ProjectEnvironmentService } from "./project-environment/project-environment-service.js";
 import {
   parseMemoryMarkdownBundle,
   renderMemoryMarkdownBundle
@@ -156,6 +183,7 @@ import {
   memoryEtag,
   procedureFromSkillMemory
 } from "./read-model/memory.js";
+import { L3WorldModelContextReadModel } from "./read-model/l3-world-model-context.js";
 import { PanelReadModel } from "./read-model/panel-read.js";
 import { ProjectContextService } from "./project-context/project-context-service.js";
 import type {
@@ -209,18 +237,10 @@ const serviceLogger = createMemoryLogger("memory-service");
 export type { FeedbackResponse } from "./feedback/feedback-experience.js";
 
 
-function evolutionUsesSharedLlm(config: MemmyConfig): boolean {
-  const evolution = config.evolution;
-  return !evolution.provider && !evolution.model && !evolution.endpoint && !evolution.apiKey;
-}
-
 function createConfiguredMemoryLlm(config: MemmyConfig, modelRole: MemoryLlmModelRole): LlmClient {
   return createLlmClient(
     modelRole === "memory_summary" ? config.summary : resolveEvolutionConfig(config),
-    {
-      modelRole,
-      agentRegion: resolveMemoryAgentRegion(config.activeProfile)
-    }
+    { modelRole }
   );
 }
 
@@ -245,6 +265,8 @@ export interface CompleteTurnResponse {
   sessionId: string;
   episodeId: string;
   rawTurnId: string;
+  userMemoryId: string;
+  userMemoryIds: string[];
   l1MemoryId: string;
   l1MemoryIds: string[];
   closedEpisodeIds: string[];
@@ -277,6 +299,8 @@ type InternalMemorySearchRequest = MemorySearchRequest & {
   targetSkillId?: string;
   contextHints?: Record<string, unknown>;
   injectedContextQuery?: string;
+  turnIntentDecision?: unknown;
+  routeProposal?: unknown;
   recordEvent?: boolean;
 };
 
@@ -295,6 +319,8 @@ export class MemoryService {
   private readonly skillTrials: SkillTrialResolver;
   private readonly episodeReadModel: EpisodeReadModel;
   private readonly importJobs: ImportJobProcessor;
+  private readonly l3WorldModelContextReadModel: L3WorldModelContextReadModel;
+  private readonly projectEnvironment: ProjectEnvironmentService;
   private readonly panelReadModel: PanelReadModel;
   private readonly projectContext: ProjectContextService;
   private readonly retrieval: RetrievalService;
@@ -314,6 +340,7 @@ export class MemoryService {
   private readonly startedAt = Date.now();
   private readonly mode: "local" | "cloud" | "dev";
   private config: MemmyConfig;
+  private readonly modelTasks: MemoryModelTaskRouter;
   private llm: LlmClient;
   private skillLlm: LlmClient;
   private embedder: Embedder;
@@ -321,6 +348,7 @@ export class MemoryService {
 
   constructor(private readonly options: MemoryServiceOptions) {
     this.repos = options.backend?.repositories() ?? new Repositories(requireMemoryDb(options).db);
+    this.l3WorldModelContextReadModel = new L3WorldModelContextReadModel(this.repos);
     this.mode = options.mode ?? "local";
     this.config = cloneMemmyConfig(options.config ?? DEFAULT_MEMMY_CONFIG);
     this.llm = options.llm ?? createConfiguredMemoryLlm(this.config, "memory_summary");
@@ -331,6 +359,12 @@ export class MemoryService {
     this.embedder = options.embedder ?? createEmbedder(this.config.embedding);
     this.agentLoadouts = new AgentLoadoutService({ repositories: this.repos, now: nowIso, id: newId });
     this.temporalValidity = new TemporalValidityService({ repositories: this.repos, now: nowIso, id: newId });
+    this.modelTasks = new MemoryModelTaskRouter(() => this.resolveModelTaskContext());
+    const projectEnvironmentOwner = this;
+    this.projectEnvironment = new ProjectEnvironmentService({
+      repos: this.repos,
+      get llm() { return projectEnvironmentOwner.skillLlm; }
+    });
     const workerHandlerOwner = this;
     this.workerHandlers = createWorkerJobHandlers({
       repos: this.repos,
@@ -350,6 +384,8 @@ export class MemoryService {
           induceL2: (job) => this.evolutionJobs.induceL2(job),
           materializeNegativeExperience: (job) => this.evolutionJobs.materializeNegativeExperience(job),
           abstractL3: (job) => this.evolutionJobs.abstractL3(job),
+          updateL3WorldModel: (job) => this.evolutionJobs.updateL3WorldModel(job),
+          updateProjectEnvironment: (job) => this.projectEnvironment.processProfileJob(job),
           crystallizeSkill: (job) => this.evolutionJobs.crystallizeSkill(job),
           associateL2: (job) => this.evolutionJobs.associateL2(job),
           splitBigTurn: (job) => this.evolutionJobs.splitBigTurn(job)
@@ -360,7 +396,8 @@ export class MemoryService {
           resolveSkillTrial: (job) => this.skillTrials.resolveSkillTrial(job)
         },
         embedding: {
-          embedMemory: this.embedMemory.bind(this)
+          embedMemory: this.embedMemory.bind(this),
+          embedUserMemory: (job) => this.embeddingJobs.embedUserMemory(job)
         },
         topic: {
           ingest: async (job) => {
@@ -482,6 +519,9 @@ export class MemoryService {
       assertSessionInScope: this.assertSessionInScope.bind(this),
       normalizeMemoryAddCreatedAt,
       memoryAddImportTrace,
+      memoryAddQaPair,
+      memoryCaptureQaHash,
+      normalizeMemoryCaptureSource,
       isAgentSourceImportMemoryAdd,
       titleFromImportTrace,
       memoryAddTags,
@@ -496,6 +536,7 @@ export class MemoryService {
       recordApiLog: (operation, request, result, latencyMs, success, at, agentId) =>
         recordApiLog(this.repos.runtime, operation, request, result, latencyMs, success, at, agentId),
       memories: this.repos.memories,
+      captureClaims: this.repos.captureClaims,
       processing: this.repos.processing,
       runtime: this.repos.runtime
     });
@@ -510,7 +551,9 @@ export class MemoryService {
       enqueueImportSummaryIfMissing: this.workerHandlers.enqueueImportSummaryIfMissing,
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
-      summarizeTraceForCapture: this.evolutionJobs.summarizeTraceForCapture.bind(this.evolutionJobs)
+      summarizeTraceForCapture: this.evolutionJobs.summarizeTraceForCapture.bind(this.evolutionJobs),
+      decideTurnMemoryForCapture: this.evolutionJobs.decideTurnMemoryForCapture.bind(this.evolutionJobs),
+      finalizeClosedEpisode: (episode, at) => this.workerHandlers.finalizeClosedEpisode(episode, at, "capture_decided")
     });
     const workerRunnerOwner = this;
     this.workerRunner = new WorkerRunner({
@@ -524,11 +567,17 @@ export class MemoryService {
       namespaceIdFromMemory,
       runWorkerNoWrite: this.runWorkerNoWrite.bind(this),
       restartFailedProcessing: this.restartFailedProcessing.bind(this),
+      previewPolicyEvidenceReconciliation: this.evolutionJobs.previewPolicyEvidenceReconciliation.bind(this.evolutionJobs),
+      reconcileOrphanedPolicies: this.evolutionJobs.reconcileOrphanedPolicies.bind(this.evolutionJobs),
       enqueueJob: this.workerHandlers.enqueueJob,
       enqueueEmbeddingRetry: this.workerHandlers.enqueueEmbeddingRetry,
       appendJobChange: this.workerHandlers.appendJobChange,
       appendEmbeddingRetryChange: this.workerHandlers.appendEmbeddingRetryChange,
-      jobHandlers: this.workerHandlers,
+      jobHandlers: {
+        processJob: (job) => this.withModelTaskContext(
+          () => this.workerHandlers.processJob(job)
+        )
+      },
       embeddingJobs: this.embeddingJobs
     });
     this.episodeReadModel = new EpisodeReadModel({
@@ -583,9 +632,18 @@ export class MemoryService {
       schemaVersion: this.schemaVersion.bind(this),
       health: this.health.bind(this),
       models: () => ({
-        summary: panelReadOwner.llm.status(),
-        evolution: panelReadOwner.skillLlm.status(),
-        embedding: panelReadOwner.embedder.status()
+        summary: {
+          ...panelReadOwner.llm.status(),
+          routing: panelReadOwner.config.roleRouting.summary
+        },
+        evolution: {
+          ...panelReadOwner.skillLlm.status(),
+          routing: panelReadOwner.config.roleRouting.evolution
+        },
+        embedding: {
+          ...panelReadOwner.embedder.status(),
+          mode: panelReadOwner.config.embedding.mode
+        }
       }),
       resolveContext: this.resolveContext.bind(this),
       encodeChangeCursor: this.encodeChangeCursor.bind(this),
@@ -671,8 +729,38 @@ export class MemoryService {
     serviceLogger.info("initialized", memoryConfigLogFields(this.config));
   }
 
+  private resolveModelTaskContext(): MemoryModelTaskContext {
+    const taskConfig = cloneMemmyConfig(
+      this.options.configPath || this.options.configLoader
+        ? (this.options.configLoader ?? loadMemmyConfig)(this.options.configPath).config
+        : this.config
+    );
+    const summary = this.options.llm
+      ?? createConfiguredMemoryLlm(taskConfig, "memory_summary");
+    const evolution = this.options.skillLlm
+      ?? createConfiguredMemoryLlm(taskConfig, "memory_evolution");
+    const embedding = this.options.embedder ?? createEmbedder(taskConfig.embedding);
+    freezeModelSelectionConfig(taskConfig);
+    return {
+      config: taskConfig,
+      summary,
+      evolution,
+      embedding
+    };
+  }
+
+  private withModelTaskContext<T>(operation: () => T): T {
+    return this.modelTasks.run(operation);
+  }
+
   private memoryAddEnabled(): boolean {
     return this.config.algorithm.enableMemoryAdd;
+  }
+
+  private projectEnvironmentScanEnabled(): boolean {
+    return this.mode !== "cloud" &&
+      this.memoryAddEnabled() &&
+      this.storageCapabilities().backendId === "sqlite-local";
   }
 
   private memorySearchEnabled(): boolean {
@@ -693,10 +781,13 @@ export class MemoryService {
     const backend = this.storageCapabilities();
     return {
       ok: true,
+      serviceVersion: PROJECT_VERSION,
+      protocolVersion: MEMORY_PROTOCOL_VERSION,
+      viewerVersion: MEMORY_VIEWER_VERSION,
+      viewerUrl: viewerUrlFromEndpoint(this.config.storage.endpoint),
       version: PROJECT_VERSION,
       uptimeMs: Date.now() - this.startedAt,
       mode: this.mode,
-      activeProfile: this.config.activeProfile,
       storage: {
         ...backend,
         schemaVersion: String(schema.version),
@@ -704,9 +795,18 @@ export class MemoryService {
         lastMigrationId: schema.lastMigrationId
       },
       models: {
-        summary: this.llm.status(),
-        evolution: this.skillLlm.status(),
-        embedding: this.embedder.status()
+        summary: {
+          ...this.llm.status(),
+          routing: this.config.roleRouting.summary
+        },
+        evolution: {
+          ...this.skillLlm.status(),
+          routing: this.config.roleRouting.evolution
+        },
+        embedding: {
+          ...this.embedder.status(),
+          mode: this.config.embedding.mode
+        }
       },
       capabilities: {
         routes,
@@ -727,14 +827,30 @@ export class MemoryService {
         ...(this.topicDecisions.enabled
           ? { topicDecisions: { enabled: true as const, models: [...this.config.algorithm.topicDecisions.models] } }
           : {}),
-        supportsCli: true
+        supportsCli: true,
+        service: [...MEMORY_CAPABILITIES]
       },
+      ...(backend.backendId === "sqlite-local" && schema.version >= 6
+        ? {
+            features: {
+              l3WorldModelProtocolVersions: [2]
+            }
+          }
+        : {}),
       serverTime: nowIso()
     };
   }
 
   topicDecisionsEnabled(): boolean {
     return this.topicDecisions.enabled;
+  }
+
+  async testModels(): Promise<{
+    ok: boolean;
+    checkedAt: string;
+    models: {
+      summary: ModelProbeResult;
+      evolution: ModelProbeResult;
   }
 
   reloadConfig(request: MemoryReloadConfigRequest = {}): MemoryReloadConfigResponse {
@@ -746,9 +862,6 @@ export class MemoryService {
     const reloadedAt = nowIso();
 
     this.config = nextConfig;
-    this.llm = createConfiguredMemoryLlm(nextConfig, "memory_summary");
-    this.skillLlm = createConfiguredMemoryLlm(nextConfig, "memory_evolution");
-    this.embedder = createEmbedder(nextConfig.embedding);
     if (!requiresRestart && request.restartFailedProcessing !== false) {
       this.restartFailedProcessing(reloadedAt);
     }
@@ -760,13 +873,21 @@ export class MemoryService {
     });
 
     return {
-      activeProfile: this.config.activeProfile,
       changed,
       requiresRestart,
       models: {
-        summary: this.llm.status(),
-        evolution: this.skillLlm.status(),
-        embedding: this.embedder.status()
+        summary: {
+          ...this.llm.status(),
+          routing: this.config.roleRouting.summary
+        },
+        evolution: {
+          ...this.skillLlm.status(),
+          routing: this.config.roleRouting.evolution
+        },
+        embedding: {
+          ...this.embedder.status(),
+          mode: this.config.embedding.mode
+        }
       },
       reloadedAt
     };
@@ -793,6 +914,13 @@ export class MemoryService {
     const idempotencyKey = request.adapterId && request.requestId ? `${operation}:${namespaceScope}:${request.adapterId}:${request.requestId}` : undefined;
     if (!idempotencyKey) return run();
     const legacyKey = request.adapterId && request.requestId ? `${operation}:${request.adapterId}:${request.requestId}` : undefined;
+  }
+
+  private withTimeZone<T extends RequestEnvelope>(request: T): T {
+    return {
+      ...request,
+      timeZone: resolveTimeZone(this.config.timeZone ?? request.timeZone)
+    };
     const requestHash = stableHash({ operation, fingerprint });
     if (legacyKey && legacyKey !== idempotencyKey && !this.repos.runtime.getIdempotency(idempotencyKey)) {
       let legacy = this.repos.runtime.claimLegacyIdempotency(legacyKey, idempotencyKey, requestHash);
@@ -867,7 +995,7 @@ export class MemoryService {
     userId: string;
     source: string;
     profileId: string;
-    projectId?: string;
+    projectId?: string | null;
     workspaceId?: string;
     conversationId?: string;
     status: "open";
@@ -878,7 +1006,15 @@ export class MemoryService {
     openedAt: string;
     serverTime: string;
   } {
-    return this.sessionTurns.openSession(request);
+    const response = this.sessionTurns.openSession(this.withTimeZone(request));
+    if (this.projectEnvironmentScanEnabled() && response.projectId) {
+      const session = this.requireSession(response.sessionId);
+      const scope = this.repos.l3WorldModels.getScope(session.userId, response.projectId);
+      if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
+        this.projectEnvironment.requestSessionScan(session);
+      }
+    }
+    return response;
   }
 
   closeSession(sessionId: string, request: RequestEnvelope = {}): {
@@ -891,7 +1027,68 @@ export class MemoryService {
     closedAt: string;
     serverTime: string;
   } {
-    return this.sessionTurns.closeSession(sessionId, request);
+    return this.sessionTurns.closeSession(sessionId, this.withTimeZone(request));
+  }
+
+  l3WorldModelTraceHead(
+    sessionId: string,
+    request: L3WorldModelRequestEnvelope
+  ): L3WorldModelTraceHeadResponse {
+    this.assertMemorySearchEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    return this.repos.l3WorldModels.traceHead(sessionId);
+  }
+
+  l3WorldModelBoundary(
+    sessionId: string,
+    request: L3WorldModelBoundaryRequest
+  ): L3WorldModelBoundaryResponse {
+    this.assertMemoryAddEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    if (!this.repos.l3WorldModels.inputTraceByL1MemoryId(sessionId, request.throughL1MemoryId)) {
+      throw new MemoryServiceError("conflict", "through L1 memory was not registered for this Session");
+    }
+    const result = this.repos.l3WorldModels.freezeBatches({
+      sessionId,
+      trigger: request.trigger,
+      throughL1MemoryId: request.throughL1MemoryId
+    });
+    if (!result.throughTraceSeq) {
+      throw new MemoryServiceError("conflict", "through L1 memory was not registered");
+    }
+    if (
+      request.trigger === "token_compaction" &&
+      this.projectEnvironmentScanEnabled() &&
+      session.projectId
+    ) {
+      const scope = this.repos.l3WorldModels.getScope(session.userId, session.projectId);
+      if (scope?.workspaceUri && isLocalWorkspaceUri(scope.workspaceUri)) {
+        this.projectEnvironment.requestCompactionScan(session, result.throughTraceSeq);
+      }
+    }
+    return {
+      scheduled: result.scheduled,
+      throughL1MemoryId: request.throughL1MemoryId,
+      throughTraceSeq: result.throughTraceSeq,
+      batchIds: result.batchIds,
+      targetCount: result.targetCount,
+      serverTime: nowIso()
+    };
+  }
+
+  l3WorldModelContext(
+    sessionId: string,
+    request: L3WorldModelRequestEnvelope
+  ): SessionL3WorldModelContextResponse {
+    this.assertMemorySearchEnabled();
+    const session = this.requireSession(sessionId);
+    this.assertL3WorldModelSessionScope(session, request.namespace);
+    if (session.status !== "open") {
+      throw new MemoryServiceError("conflict", "l3_world_model_session_not_open");
+    }
+    return this.l3WorldModelContextReadModel.load(session);
   }
 
   compactSession(sessionId: string, request: SessionCompactRequest = {}): {
@@ -909,7 +1106,7 @@ export class MemoryService {
     jobs: JobRef[];
     serverTime: string;
   } {
-    return this.sessionTurns.compactSession(sessionId, request);
+    return this.sessionTurns.compactSession(sessionId, this.withTimeZone(request));
   }
 
   checkpointSession(sessionId: string, request: SessionCheckpointRequest): {
@@ -973,9 +1170,21 @@ export class MemoryService {
   async startTurn(request: TurnStartRequest & Record<string, unknown>): Promise<TurnStartResponse> {
     return this.sessionTurns.startTurn(request);
   }
+      tokenEstimate?: number;
+    };
+    contextPacketId: string;
+    rawTurnId?: string;
+    l1MemoryId?: string;
+    changeSeq?: number;
+    syncCursor?: string;
+    jobs: JobRef[];
+    serverTime: string;
+  }> {
+    return this.withModelTaskContext(() => this.sessionTurns.startTurn(this.withTimeZone(request)));
+  }
 
   completeTurn(turnId: string, request: TurnCompleteRequest & Record<string, unknown>): CompleteTurnResponse {
-    return this.sessionTurns.completeTurn(turnId, request);
+    return this.sessionTurns.completeTurn(turnId, this.withTimeZone(request));
   }
 
   async observeTool(input: ToolObserveRequest): Promise<{
@@ -987,7 +1196,7 @@ export class MemoryService {
     syncCursor?: string;
     serverTime: string;
   }> {
-    return this.sessionTurns.observeTool(input);
+    return this.withModelTaskContext(() => this.sessionTurns.observeTool(this.withTimeZone(input)));
   }
 
 
@@ -1000,11 +1209,11 @@ export class MemoryService {
     syncCursor: string;
     serverTime: string;
   } {
-    return this.sessionTurns.subagentStart(input);
+    return this.sessionTurns.subagentStart(this.withTimeZone(input));
   }
 
   subagentComplete(input: SubagentCompleteRequest): CompleteTurnResponse {
-    return this.sessionTurns.subagentComplete(input);
+    return this.sessionTurns.subagentComplete(this.withTimeZone(input));
   }
 
   async repairSuggestion(input: RepairSuggestionRequest): Promise<{
@@ -1020,7 +1229,7 @@ export class MemoryService {
     reason?: string;
     sourceMemoryIds: string[];
   }> {
-    return this.sessionTurns.repairSuggestion(input);
+    return this.withModelTaskContext(() => this.sessionTurns.repairSuggestion(this.withTimeZone(input)));
   }
 
   async search(request: InternalMemorySearchRequest): Promise<{
@@ -1032,7 +1241,7 @@ export class MemoryService {
     droppedDueToBudget: Array<{
       id: string;
       kind: MemoryKind;
-      memoryLayer: MemoryLayer;
+      memoryLayer: RecallMemoryLayer;
       reason: "token_budget";
       tokenEstimate?: number;
     }>;
@@ -1046,7 +1255,7 @@ export class MemoryService {
     verbose: boolean;
     serverTime: string;
   }> {
-    return this.retrieval.search(request);
+    return this.withModelTaskContext(() => this.retrieval.search(this.withTimeZone(request)));
   }
 
   recallAvailableAssets(request: AssetRecallRequest): RecalledAsset[] {
@@ -1184,6 +1393,7 @@ export class MemoryService {
     mmrLambda: number;
     rrfConstant: number;
     relativeThresholdFloor: number;
+    minRecallScore: number;
     minSkillEta: number;
     minTraceSim: number;
     episodeGoalMinSim: number;
@@ -1214,6 +1424,7 @@ export class MemoryService {
     tags: string[];
     createdAt: string;
     serverTime: string;
+    duplicate?: boolean;
   } {
     const previous = request.supersedesMemoryId
       ? this.requireExistingMemory(request.supersedesMemoryId)
@@ -1269,131 +1480,6 @@ export class MemoryService {
     return added;
   }
 
-  exportMarkdown(request: MemoryMarkdownExportRequest = {}): {
-    markdown: string;
-    count: number;
-    projectId?: string;
-    generatedAt: string;
-  } {
-    this.assertMemorySearchEnabled();
-    const context = this.resolveContext(request);
-    const memories = this.repos.memories.list({
-      ...memoryFilterForNamespace(context.namespace),
-      status: request.includeArchived ? ["activated", "resolving", "archived"] : ["activated", "resolving"]
-    }, 100_000);
-    return {
-      markdown: renderMemoryMarkdownBundle(memories),
-      count: memories.length,
-      projectId: context.namespace.projectId,
-      generatedAt: nowIso()
-    };
-  }
-
-  importMarkdown(request: MemoryMarkdownImportRequest): {
-    applied: boolean;
-    count: number;
-    updated: string[];
-    created: string[];
-    rejected: Array<{ id: string; reason: string }>;
-    serverTime: string;
-  } {
-    this.assertMemoryAddEnabled();
-    if (!request.markdown?.trim()) {
-      throw new MemoryServiceError("invalid_argument", "markdown audit import requires markdown");
-    }
-    const context = this.resolveContext(request);
-    const documents = parseMemoryMarkdownBundle(request.markdown);
-    const updated: string[] = [];
-    const created: string[] = [];
-    const rejected: Array<{ id: string; reason: string }> = [];
-    for (const document of documents) {
-      try {
-        const existing = this.repos.memories.get(document.frontMatter.id);
-        if (existing) {
-          this.assertMemoryInScope(existing, request.namespace);
-          if (document.frontMatter.memoryLayer !== existing.memoryLayer) {
-            throw new MemoryServiceError("conflict", "markdown audit cannot change memory layer");
-          }
-          if (request.apply !== false) {
-            const at = nowIso();
-            const next = this.repos.memories.update({
-              ...existing,
-              memoryValue: document.body,
-              tags: uniq(document.frontMatter.tags),
-              info: { ...existing.info, title: document.frontMatter.title, tags: uniq(document.frontMatter.tags) },
-              properties: {
-                ...existing.properties,
-                tags: uniq(document.frontMatter.tags),
-                info: { ...existing.properties.info, title: document.frontMatter.title, tags: uniq(document.frontMatter.tags) },
-                internal_info: {
-                  ...existing.properties.internal_info,
-                  title: document.frontMatter.title,
-                  provenance: document.frontMatter.provenance ?? existing.properties.internal_info.provenance
-                }
-              },
-              updatedAt: at,
-              contentHash: stableHash(document.body)
-            });
-            this.repos.runtime.appendChange({
-              memoryId: next.id,
-              namespaceId: namespaceIdFromMemory(next),
-              kind: kindFromMemory(next),
-              op: "updated",
-              entityId: next.id,
-              userId: next.userId,
-              changeType: "markdown_audit_update",
-              before: existing,
-              after: next,
-              source: "markdown.audit",
-              createdAt: at
-            });
-            this.repos.runtime.insertAudit({
-              userId: next.userId,
-              sessionId: next.sessionId,
-              actor: request.namespace ? { ...request.namespace } : {},
-              action: "markdown_update",
-              targetKind: kindFromMemory(next),
-              targetId: next.id,
-              before: existing,
-              after: next,
-              meta: {},
-              createdAt: at
-            });
-          }
-          updated.push(existing.id);
-          continue;
-        }
-        if (request.apply === false) {
-          created.push(document.frontMatter.id);
-          continue;
-        }
-        const added = this.addMemory({
-          namespace: request.namespace,
-          source: context.namespace.source,
-          content: document.body,
-          layer: document.frontMatter.memoryLayer as MemoryLayer,
-          title: document.frontMatter.title,
-          tags: document.frontMatter.tags,
-          provenance: document.frontMatter.provenance
-        });
-        created.push(added.id);
-      } catch (error) {
-        rejected.push({
-          id: document.frontMatter.id,
-          reason: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-    return {
-      applied: request.apply !== false,
-      count: documents.length,
-      updated,
-      created,
-      rejected,
-      serverTime: nowIso()
-    };
-  }
-
   timeline(input: RequestEnvelope & {
     userId?: string;
     sessionId?: string;
@@ -1411,11 +1497,11 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.episodeReadModel.timeline(input);
+    return this.episodeReadModel.timeline(this.withTimeZone(input));
   }
 
   getMemory(id: string, request: RequestEnvelope = {}): MemoryGetResponse {
-    return this.episodeReadModel.getMemory(id, request);
+    return this.episodeReadModel.getMemory(id, this.withTimeZone(request));
   }
 
   async worldModelQuery(input: InternalMemorySearchRequest): Promise<{
@@ -1433,7 +1519,7 @@ export class MemoryService {
     status: string[];
     serverTime: string;
   }> {
-    return this.retrieval.worldModelQuery(input);
+    return this.withModelTaskContext(() => this.retrieval.worldModelQuery(this.withTimeZone(input)));
   }
 
   listSkills(input: RequestEnvelope & {
@@ -1461,7 +1547,7 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.skillReadModel.listSkills(input);
+    return this.skillReadModel.listSkills(this.withTimeZone(input));
   }
 
   getSkill(skillId: string, request: RequestEnvelope = {}): MemoryDetailItem & {
@@ -1487,7 +1573,7 @@ export class MemoryService {
       trialsPassed: number;
     };
   } {
-    return this.skillReadModel.getSkill(skillId, request);
+    return this.skillReadModel.getSkill(skillId, this.withTimeZone(request));
   }
 
   useSkill(skillId: string, request: SkillUseRequest): {
@@ -1499,11 +1585,11 @@ export class MemoryService {
     serverTime: string;
     duplicate?: boolean;
   } {
-    return this.skillReadModel.useSkill(skillId, request);
+    return this.skillReadModel.useSkill(skillId, this.withTimeZone(request));
   }
 
   async feedback(request: FeedbackRequest): Promise<FeedbackResponse> {
-    return this.feedbackExperience.feedback(request);
+    return this.withModelTaskContext(() => this.feedbackExperience.feedback(request));
   }
 
   exportBundle(request: MemoryExportRequest = {}): {
@@ -1558,6 +1644,17 @@ export class MemoryService {
         tables: Object.keys(tables)
       },
       tables,
+      serverTime: nowIso()
+    };
+  }
+
+  clearAllData(): { ok: true; cleared: Record<string, number>; clearedAt: string; serverTime: string } {
+    this.assertMemoryAddEnabled();
+    const clearedAt = nowIso();
+    return {
+      ok: true,
+      cleared: this.repos.clearAllMemoryData(),
+      clearedAt,
       serverTime: nowIso()
     };
   }
@@ -1651,7 +1748,8 @@ export class MemoryService {
     const memory = this.requireExistingMemory(id);
     this.assertMemoryInScope(memory, request.namespace);
     const kind = kindFromMemory(memory);
-    const archived = this.repos.memories.archive(memory.id, nowIso());
+    const at = nowIso();
+    const archived = this.repos.memories.archive(memory.id, at);
     if (!archived) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
@@ -1681,6 +1779,7 @@ export class MemoryService {
       meta: { reason: request.reason },
       createdAt: archived.updatedAt
     });
+    this.evolutionJobs.invalidateMemoryDependencies(memory, at);
     return {
       ok: true,
       id: archived.id,
@@ -1704,10 +1803,80 @@ export class MemoryService {
     serverTime: string;
   } {
     this.assertMemoryAddEnabled();
+    const userMemory = this.repos.userMemories.get(id);
+    if (userMemory) {
+      const namespaceUserId = request.namespace?.userId;
+      if (namespaceUserId && namespaceUserId !== userMemory.userId) {
+        throw new MemoryServiceError("forbidden", "user memory belongs to a different user");
+      }
+      const deleted = this.repos.userMemories.softDelete(userMemory.id, nowIso());
+      if (!deleted) throw new MemoryServiceError("not_found", `user memory not found: ${id}`);
+      const changeSeq = this.repos.runtime.appendChange({
+        memoryId: deleted.id,
+        kind: "user_memory",
+        op: "deleted",
+        entityId: deleted.id,
+        userId: deleted.userId,
+        changeType: "user_memory_delete",
+        before: {
+          id: userMemory.id,
+          sourceTurnId: userMemory.sourceTurnId,
+          status: userMemory.status
+        },
+        after: { id: deleted.id, status: deleted.status, deletedAt: deleted.deletedAt },
+        source: "panel.delete",
+        createdAt: deleted.updatedAt
+      });
+      const audit = this.repos.runtime.insertAudit({
+        userId: deleted.userId,
+        actor: request.namespace ? { ...request.namespace } : {},
+        action: "delete",
+        targetKind: "user_memory",
+        targetId: deleted.id,
+        before: {
+          id: userMemory.id,
+          sourceTurnId: userMemory.sourceTurnId,
+          status: userMemory.status
+        },
+        after: { id: deleted.id, status: deleted.status, deletedAt: deleted.deletedAt },
+        meta: { reason: request.reason },
+        createdAt: deleted.updatedAt
+      });
+      return {
+        ok: true,
+        id: deleted.id,
+        kind: "user_memory",
+        status: "deleted",
+        changeSeq,
+        syncCursor: this.encodeChangeCursor(changeSeq, request.namespace),
+        auditId: audit.id,
+        serverTime: nowIso()
+      };
+    }
     const memory = this.requireExistingMemory(id);
-    this.assertMemoryInScope(memory, request.namespace);
+    const claimsV2WorldModel = memory.properties.internal_info.schema_version === 2 &&
+      memory.memoryLayer === "L3";
+    const strictV2WorldModel = isStrictL3WorldModelV2Memory(memory);
+    if (claimsV2WorldModel && !strictV2WorldModel) {
+      throw new MemoryServiceError("conflict", "invalid L3 World Model v2 record");
+    }
+    if (strictV2WorldModel) {
+      const effectiveUserId = normalizeNamespace(request.namespace).userId;
+      const projectId = typeof memory.info.project_id === "string" ? memory.info.project_id : null;
+      if (effectiveUserId !== memory.userId) {
+        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different user");
+      }
+      if (request.namespace?.projectId && request.namespace.projectId !== projectId) {
+        throw new MemoryServiceError("forbidden", "L3 World Model belongs to a different project");
+      }
+    } else {
+      this.assertMemoryInScope(memory, request.namespace);
+    }
     const kind = kindFromMemory(memory);
-    const deleted = this.repos.memories.softDelete(memory.id, nowIso());
+    const at = nowIso();
+    const deleted = strictV2WorldModel
+      ? this.repos.l3WorldModels.deleteScopeMemory(memory.id, at)?.deleted
+      : this.repos.memories.softDelete(memory.id, at);
     if (!deleted) {
       throw new MemoryServiceError("not_found", `memory not found: ${id}`);
     }
@@ -1737,6 +1906,7 @@ export class MemoryService {
       meta: { reason: request.reason },
       createdAt: deleted.updatedAt
     });
+    this.evolutionJobs.invalidateMemoryDependencies(memory, at);
     return {
       ok: true,
       id: deleted.id,
@@ -1745,6 +1915,71 @@ export class MemoryService {
       changeSeq,
       syncCursor: this.encodeChangeCursor(changeSeq, request.namespace ?? namespaceForMemory(deleted)),
       auditId: audit.id,
+      serverTime: nowIso()
+    };
+  }
+
+  recallEvidence(queryId: string, request: RequestEnvelope = {}): {
+    recallEventId: string;
+    queryId: string;
+    query: string;
+    hits: RecallHit[];
+    diagnostics: {
+      candidateMemoryIds: string[];
+      injectedMemoryIds: string[];
+      capture?: Record<string, unknown>;
+    };
+    createdAt: string;
+    serverTime: string;
+  } {
+    this.assertMemorySearchEnabled();
+    const event = this.repos.runtime.getRecallEventByQueryId(queryId);
+    if (!event) throw new MemoryServiceError("not_found", `recall event not found: ${queryId}`);
+    if (request.namespace?.userId && request.namespace.userId !== event.userId) {
+      throw new MemoryServiceError("forbidden", "recall event belongs to a different user");
+    }
+    const eventRequest = isRecord(event.request) ? event.request : {};
+    const evidence = isRecord(eventRequest.recallEvidence) ? eventRequest.recallEvidence : {};
+    const storedHits = Array.isArray(evidence.hits)
+      ? evidence.hits.filter(isRecord) as unknown as RecallHit[]
+      : [];
+    const hits = storedHits.flatMap((hit) => {
+      if (!hit.members?.length) {
+        return this.isDeletedRecallMemory(hit.id) ? [] : [hit];
+      }
+      const members = hit.members.filter((member) => !this.isDeletedRecallMemory(member.id));
+      if (members.length === 0) return [];
+      const memberIds = new Set(members.map((member) => member.id));
+      return [{
+        ...hit,
+        members,
+        memberMemoryIds: (hit.memberMemoryIds ?? members.map((member) => member.id))
+          .filter((id) => memberIds.has(id)),
+        retrievalRoutes: [...new Set(members.map((member) => member.retrievalRoute))]
+      }];
+    });
+    const rawTurn = event.sessionId && event.turnId
+      ? this.repos.runtime.getRawTurnBySessionTurn(event.sessionId, event.turnId)
+      : undefined;
+    const turnComplete = rawTurn && isRecord(rawTurn.messagePayload?.turn_complete)
+      ? rawTurn.messagePayload.turn_complete
+      : undefined;
+    const recordedCapture = turnComplete && isRecord(turnComplete.memory_capture)
+      ? turnComplete.memory_capture
+      : undefined;
+    return {
+      recallEventId: event.id,
+      queryId: event.queryId ?? queryId,
+      query: event.query,
+      hits,
+      diagnostics: {
+        candidateMemoryIds: event.candidateMemoryIds ?? [],
+        injectedMemoryIds: event.injectedMemoryIds ?? [],
+        ...(recordedCapture
+          ? { capture: recordedCapture }
+          : rawTurn ? { capture: { status: "pending" } } : {})
+      },
+      createdAt: event.createdAt,
       serverTime: nowIso()
     };
   }
@@ -1960,12 +2195,13 @@ export class MemoryService {
     etag: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelOverview(input);
+    return this.panelReadModel.panelOverview(this.withTimeZone(input));
   }
 
   panelOverviewSummary(input: RequestEnvelope & { userId?: string } = {}): {
     counts: {
       memories: number;
+      userMemories: number;
       skills: number;
       experiences: number;
       worldModels: number;
@@ -1977,7 +2213,7 @@ export class MemoryService {
     }>;
     dailyActivity: Array<{ date: string; count: number }>;
   } {
-    return this.panelReadModel.panelOverviewSummary(input);
+    return this.panelReadModel.panelOverviewSummary(this.withTimeZone(input));
   }
 
   evolutionOverview(input: RequestEnvelope & { userId?: string } = {}) {
@@ -2184,12 +2420,12 @@ export class MemoryService {
       series: Array<{ name: string; points: Array<{ date: string; avgMs: number }> }>;
     };
   } {
-    return this.panelReadModel.panelAnalysis(input);
+    return this.panelReadModel.panelAnalysis(this.withTimeZone(input));
   }
 
   panelItems(input: RequestEnvelope & {
     userId?: string;
-    layer?: MemoryLayer;
+    layer?: RecallMemoryLayer;
     status?: "activated" | "resolving" | "archived" | "deleted";
     q?: string;
     tags?: string[];
@@ -2201,7 +2437,7 @@ export class MemoryService {
     limit?: number;
     cursor?: string | number;
   }): {
-    items: MemoryListItem[];
+    items: PanelMemoryListItem[];
     page: number;
     pageSize: number;
     total: number;
@@ -2212,10 +2448,10 @@ export class MemoryService {
     nextCursor?: string;
     serverTime: string;
   } {
-    return this.panelReadModel.panelItems(input);
+    return this.panelReadModel.panelItems(this.withTimeZone(input));
   }
 
-  panelTasks(input: RequestEnvelope & { q?: string; page?: number }): {
+  panelTasks(input: RequestEnvelope & { q?: string; sourceAgent?: string; page?: number }): {
     tasks: Array<{
       id: string;
       episode: Record<string, unknown>;
@@ -2231,7 +2467,7 @@ export class MemoryService {
     hasPrev: boolean;
     serverTime: string;
   } {
-    return this.panelReadModel.panelTasks(input);
+    return this.panelReadModel.panelTasks(this.withTimeZone(input));
   }
 
   panelChanges(input: RequestEnvelope & {
@@ -2620,31 +2856,7 @@ export class MemoryService {
       const memory = this.requireExistingMemory(memoryId);
       return this.enqueueJob({
         jobType: "l2_induction", userId: memory.userId, sessionId: memory.sessionId, targetMemoryId: memory.id,
-        payload: { sourceMemoryId: memory.id, reason: "manual_candidate_promotion" }, createdAt: nowIso()
-      });
-    });
-    return { accepted: jobs.length, candidateCount: candidates.length, memoryIds, jobs: jobs.map(jobToRef), serverTime: nowIso() };
-  }
-
-  retryFailedWorkerJobs(request: RequestEnvelope & { limit?: number } = {}) {
-    this.assertMemoryAddEnabled();
-    const limit = Math.max(1, Math.min(request.limit ?? 100, 10_000));
-    const failed = [
-      ...this.panelReadModel.panelJobs({ ...request, status: "failed", limit }).items,
-      ...this.panelReadModel.panelJobs({ ...request, status: "dead_letter", limit }).items
-    ].slice(0, limit);
-    const retried = this.repos.runtime.retryFailedJobIds(failed.map((job) => job.id));
-    for (const { before, after } of retried) this.workerHandlers.appendJobChange(after, "queued", before);
-    return { retried: retried.length, jobIds: retried.map((item) => item.after.id), serverTime: nowIso() };
-  }
-
-  async runWorkerWithEvolutionSummary(limit = 100, request: RequestEnvelope & { targetMemoryIds?: string[] } = {}) {
-    const before = this.panelReadModel.panelOverviewSummary(request).layerCounts;
-    const worker = await this.runWorkerOnce(limit, request);
-    const after = this.panelReadModel.panelOverviewSummary(request).layerCounts;
-    return {
-      ...worker,
-      generated: { L2: Math.max(0, after.L2 - before.L2), L3: Math.max(0, after.L3 - before.L3), Skill: Math.max(0, after.Skill - before.Skill) }
+        payload: { sourceMemoryId: memory.id, r
     };
   }
 
@@ -2680,7 +2892,10 @@ export class MemoryService {
 
   runWorkerOnce(
     limit = 100,
-    request: RequestEnvelope & { targetMemoryIds?: string[] } = {}
+    request: RequestEnvelope & {
+      targetMemoryIds?: string[];
+      priorityCohortOnly?: boolean;
+    } = {}
   ): ReturnType<WorkerRunner["runWorkerOnce"]> {
     if (request.namespace && !request.targetMemoryIds) {
       const targetMemoryIds = this.repos.memories.list({ ...memoryFilterForNamespace(request.namespace) }, 10_000)
@@ -2930,8 +3145,11 @@ export class MemoryService {
     request: TurnStartRequest & Record<string, unknown>
   ): ReturnType<MemoryService["startTurn"]> {
     const turnId = request.turnId ?? newId("turn");
-    const episodeId = `episode_${stableHash(`readonly:${request.sessionId}:${turnId}`).slice(0, 20)}`;
     const contextHints = turnStartContextHints(request);
+    const defaultLayers: MemoryLayer[] = ["Skill", "L2", "L1", "L3"];
+    const requestedLayers = request.layers === undefined
+      ? defaultLayers
+      : defaultLayers.filter((layer) => request.layers?.includes(layer));
     const search = await this.search({
       requestId: request.requestId,
       adapterId: request.adapterId,
@@ -2939,7 +3157,7 @@ export class MemoryService {
       sessionId: request.sessionId,
       turnId,
       query: buildSearchQuery({ ...request, contextHints }, this.config.domain),
-      layers: automaticTurnStartLayers(),
+      layers: requestedLayers,
       limit: this.turnStartRetrievalLimit(),
       contextBudget: typeof request.contextBudget === "number" ? request.contextBudget : undefined,
       includeInjectedContext: true,
@@ -2962,11 +3180,9 @@ export class MemoryService {
     };
     const supplementalMarkdown = search.injectedContext.markdown.trim();
     return {
-      contextPacketId: `ctx_${stableHash(`${request.sessionId}:${episodeId}:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
+      contextPacketId: `ctx_${stableHash(`${request.sessionId}:unbound:${turnId}:${search.searchEventId}`).slice(0, 20)}`,
       turnId,
       sessionId: request.sessionId,
-      episodeId,
-      closedEpisodeIds: [],
       searchEventId: search.searchEventId,
       hits: search.hits,
       injectedContext: {
@@ -2993,6 +3209,8 @@ export class MemoryService {
       sessionId: request.sessionId,
       episodeId,
       rawTurnId,
+      userMemoryId: "",
+      userMemoryIds: [],
       l1MemoryId: "",
       l1MemoryIds: [],
       closedEpisodeIds: [],
@@ -3081,6 +3299,13 @@ export class MemoryService {
     return memory;
   }
 
+  private isDeletedRecallMemory(id: string): boolean {
+    const userMemory = this.repos.userMemories.getIncludingDeleted(id);
+    if (userMemory) return userMemory.status === "deleted" || Boolean(userMemory.deletedAt);
+    const memory = this.repos.memories.getIncludingDeleted(id);
+    return Boolean(memory && (memory.status === "deleted" || memory.deletedAt));
+  }
+
   private requireRawTurn(rawTurnId: string): RawTurnRecord {
     const rawTurn = this.repos.runtime.getRawTurn(rawTurnId);
     if (!rawTurn) {
@@ -3107,6 +3332,24 @@ export class MemoryService {
   private assertSessionInScope(session: SessionRecord, namespace?: RuntimeNamespace): void {
     if (namespace && !sameProjectScope(namespaceForSession(session), namespace)) {
       throw new MemoryServiceError("not_found", `session not found: ${session.id}`);
+    }
+  }
+
+  private assertL3WorldModelSessionScope(session: SessionRecord, namespace: RuntimeNamespace): void {
+    if (session.meta.l3_world_model_protocol_version !== 2) {
+      throw new MemoryServiceError("conflict", "l3_world_model_protocol_v2_required");
+    }
+    const normalized = normalizeNamespace(namespace);
+    const conflicts = [
+      normalized.userId !== session.userId,
+      normalized.source !== session.source,
+      normalized.profileId !== session.profileId,
+      (normalized.projectId ?? null) !== (session.projectId ?? null),
+      Boolean(namespace.workspaceId && namespace.workspaceId !== session.workspaceId),
+      Boolean(namespace.sessionKey && namespace.sessionKey !== session.hostSessionKey)
+    ];
+    if (conflicts.some(Boolean)) {
+      throw new MemoryServiceError("conflict", "l3_world_model_session_scope_conflict");
     }
   }
 
@@ -3664,10 +3907,24 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(value, 1));
 }
 
+function freezeModelSelectionConfig(config: MemmyConfig): void {
+  for (const model of [config.summary, config.evolution, config.embedding]) {
+    if (model.actualModelContext) {
+      Object.freeze(model.actualModelContext.capabilities);
+      Object.freeze(model.actualModelContext);
+    }
+    if (model.extraHeaders) Object.freeze(model.extraHeaders);
+    if (model.extraBody) Object.freeze(model.extraBody);
+    Object.freeze(model);
+  }
+}
+
 function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
   const evolution = resolveEvolutionConfig(config);
   return {
-    activeProfile: config.activeProfile,
+    summaryRouting: config.roleRouting.summary,
+    evolutionRouting: config.roleRouting.evolution,
+    embeddingMode: config.embedding.mode,
     memoryAddEnabled: config.algorithm.enableMemoryAdd,
     memorySearchEnabled: config.algorithm.enableMemorySearch,
     summaryModel: {
@@ -3708,4 +3965,82 @@ function memoryConfigLogFields(config: MemmyConfig): Record<string, unknown> {
       skillMinGain: config.algorithm.skill.minGain
     }
   };
+}
+
+function viewerUrlFromEndpoint(endpoint?: string): string {
+  const base = new URL(endpoint ?? "http://127.0.0.1:18960");
+  base.pathname = "/viewer";
+  base.search = "";
+  base.hash = "";
+  return base.toString().replace(/\/$/, "");
+}
+
+interface ModelProbeResult {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  latencyMs: number;
+  dimensions?: number;
+  error?: string;
+}
+
+async function probeLlm(client: LlmClient, operation: string): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = client.status();
+  if (!client.isConfigured()) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: 0,
+      error: "model is not configured"
+    };
+  }
+  try {
+    const text = await client.complete(
+      [{ role: "user", content: "Reply with OK." }],
+      { operation, temperature: 0, maxTokens: 8, timeoutMs: 15_000, maxRetries: 0 }
+    );
+    if (!text.trim()) throw new Error("model returned an empty response");
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function probeEmbedding(embedder: Embedder): Promise<ModelProbeResult> {
+  const startedAt = Date.now();
+  const status = embedder.status();
+  try {
+    const vector = await embedder.embedOne("Memmy model connectivity test", "query");
+    if (vector.length === 0 || vector.some((value) => !Number.isFinite(value))) {
+      throw new Error("embedding model returned an invalid vector");
+    }
+    return {
+      ok: true,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      dimensions: vector.length
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      provider: status.provider,
+      model: status.model,
+      latencyMs: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
 }

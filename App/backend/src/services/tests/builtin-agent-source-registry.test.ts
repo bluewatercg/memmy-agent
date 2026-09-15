@@ -3,6 +3,7 @@ import { createBuiltinAgentSourceRegistry } from "../builtin-agent-source-regist
 
 describe("built-in agent source registry", () => {
   it("exposes OMP and FreeBuff without duplicating the Pi-compatible runtime", () => {
+  it("keeps every built-in source available to both the main service and scan process", () => {
     const registry = createBuiltinAgentSourceRegistry();
 
     expect(registry.list().map((adapter) => adapter.descriptor.sourceId)).toEqual([
@@ -13,11 +14,18 @@ describe("built-in agent source registry", () => {
       "opencode",
       "openclaw",
       "hermes",
-      "workbuddy",
       "freebuff"
     ]);
     expect(registry.get("pi")).toBeUndefined();
     expect(registry.require("omp").descriptor.displayName).toBe("OMP");
     expect(registry.require("freebuff").descriptor.displayName).toBe("FreeBuff");
+      "deepseek_harness",
+      "workbuddy",
+      "pi",
+      "qwenwork"
+    ]);
+    expect(registry.require("workbuddy").descriptor.displayName).toBe("WorkBuddy");
+    expect(registry.require("pi").descriptor.displayName).toBe("Pi");
+    expect(registry.require("qwenwork").descriptor.displayName).toBe("QwenWork");
   });
 });

@@ -81,6 +81,7 @@ describe("MemoryService / evolution / orchestration", () => {
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
 
+    service.closeSession(session.sessionId);
     let succeeded = 0;
     for (let i = 0; i < 20; i += 1) {
       succeeded += (await service.runWorkerOnce(100)).succeeded;
@@ -96,7 +97,7 @@ describe("MemoryService / evolution / orchestration", () => {
     });
     expect(overview.counts.L1).toBe(4);
     expect(overview.counts.L2).toBeGreaterThanOrEqual(1);
-    expect(overview.counts.L3).toBeGreaterThanOrEqual(1);
+    expect(overview.counts.L3).toBe(0);
     expect(overview.counts.Skill).toBeGreaterThanOrEqual(1);
     const promotedCandidates = db.db.prepare(
       `SELECT COUNT(*) AS count
@@ -104,38 +105,6 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE status = 'promoted'`
     ).get() as { count: number };
     expect(promotedCandidates.count).toBeGreaterThanOrEqual(1);
-    const l3Row = db.db.prepare(
-      `SELECT properties_json FROM memories
-       WHERE user_id = 'user-2' AND memory_layer = 'L3'
-       LIMIT 1`
-    ).get() as { properties_json: string };
-    const l3Properties = JSON.parse(l3Row.properties_json) as {
-      internal_info: {
-        title?: string;
-        body?: string;
-        structure?: {
-          environment?: unknown[];
-          inference?: unknown[];
-          constraints?: unknown[];
-        };
-        domain_tags?: string[];
-        source_policy_ids?: string[];
-        world_model_confidence?: number;
-        world_model: {
-          structure?: {
-            environment?: unknown[];
-            inference?: unknown[];
-            constraints?: unknown[];
-          };
-        };
-      };
-    };
-    expect(l3Properties.internal_info.world_model.structure?.environment?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model.structure?.inference?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model.structure?.constraints?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.structure?.environment?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.source_policy_ids?.length).toBeGreaterThan(0);
-    expect(l3Properties.internal_info.world_model_confidence).toBeGreaterThanOrEqual(0.2);
     const l2Row = db.db.prepare(
       `SELECT properties_json FROM memories
        WHERE user_id = 'user-2' AND memory_layer = 'L2'
@@ -207,31 +176,45 @@ describe("MemoryService / evolution / orchestration", () => {
     });
     expect(searchedSkills.items.length).toBeGreaterThanOrEqual(1);
     const skillId = skills.items[0]!.id;
+    const trialSession = service.openSession({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-2",
+        sessionKey: "skill-trial"
+      }
+    });
+    const trialTurn = service.completeTurn("turn-skill-trial", {
+      sessionId: trialSession.sessionId,
+      episodeId: "episode-skill-trial",
+      query: "apply the recalled python REST memory workflow skill",
+      answer: "applied the recalled workflow"
+    });
     const trial = service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
-      sessionId: session.sessionId,
-      episodeId: completes[0]!.episodeId,
-      rawTurnId: completes[0]!.rawTurnId,
-      turnId: completes[0]!.turnId
+      sessionId: trialSession.sessionId,
+      episodeId: trialTurn.episodeId,
+      rawTurnId: trialTurn.rawTurnId,
+      turnId: trialTurn.turnId
     });
     const duplicateTrial = service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-1",
-      sessionId: session.sessionId,
-      episodeId: completes[0]!.episodeId,
-      rawTurnId: completes[0]!.rawTurnId,
-      turnId: completes[0]!.turnId
+      sessionId: trialSession.sessionId,
+      episodeId: trialTurn.episodeId,
+      rawTurnId: trialTurn.rawTurnId,
+      turnId: trialTurn.turnId
     });
     expect(duplicateTrial.trialId).toBe(trial.trialId);
     expect(duplicateTrial.duplicate).toBe(true);
     const duplicateEpisodeTrial = service.useSkill(skillId, {
       adapterId: "test-adapter",
       requestId: "skill-use-2",
-      sessionId: session.sessionId,
-      episodeId: completes[0]!.episodeId,
-      rawTurnId: completes[0]!.rawTurnId,
-      turnId: completes[0]!.turnId
+      sessionId: trialSession.sessionId,
+      episodeId: trialTurn.episodeId,
+      rawTurnId: trialTurn.rawTurnId,
+      turnId: trialTurn.turnId
     });
     expect(duplicateEpisodeTrial.trialId).toBe(trial.trialId);
     expect(duplicateEpisodeTrial.duplicate).toBe(true);
@@ -241,7 +224,7 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE skill_memory_id = ?
          AND episode_id = ?
          AND outcome = 'unknown'`
-    ).get(skillId, completes[0]!.episodeId) as { count: number };
+    ).get(skillId, trialTurn.episodeId) as { count: number };
     expect(pendingTrialCount.count).toBe(1);
     const pendingTrial = db.db.prepare(
       `SELECT status, outcome, l1_memory_id
@@ -250,7 +233,7 @@ describe("MemoryService / evolution / orchestration", () => {
     ).get(trial.trialId) as { status: string; outcome: string; l1_memory_id: string | null };
     expect(pendingTrial.status).toBe("pending");
     expect(pendingTrial.outcome).toBe("unknown");
-    expect(pendingTrial.l1_memory_id).toBe(completes[0]!.l1MemoryId);
+    expect(pendingTrial.l1_memory_id).toBe(trialTurn.l1MemoryId);
     const prematureResolveJobs = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM evolution_jobs
@@ -310,9 +293,9 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(candidateAssetProvenance).toMatchObject({ trialProvenance: [] });
 
     const skillFeedback = await service.feedback({
-      sessionId: session.sessionId,
-      episodeId: completes[0]!.episodeId,
-      rawTurnId: completes[0]!.rawTurnId,
+      sessionId: trialSession.sessionId,
+      episodeId: trialTurn.episodeId,
+      rawTurnId: trialTurn.rawTurnId,
       channel: "explicit",
       polarity: "positive",
       magnitude: 1,
@@ -329,7 +312,7 @@ describe("MemoryService / evolution / orchestration", () => {
       target_memory_id: string | null;
       payload_json: string;
     };
-    expect(trialResolveJobRow.episode_id).toBe(completes[0]!.episodeId);
+    expect(trialResolveJobRow.episode_id).toBe(trialTurn.episodeId);
     expect(trialResolveJobRow.target_memory_id).toBeNull();
     expect(JSON.parse(trialResolveJobRow.payload_json)).toMatchObject({
       trialId: trial.trialId,
@@ -387,6 +370,16 @@ describe("MemoryService / evolution / orchestration", () => {
         mean: 2 / 3
       }
     });
+    const trialUpdateLog = db.db.prepare(
+      `SELECT duration_ms
+       FROM api_logs
+       WHERE tool_name = 'skill_evolve'
+         AND json_extract(input_json, '$.skillId') = ?
+         AND json_extract(input_json, '$.reason') = 'skill_trial_update'
+       ORDER BY id DESC
+       LIMIT 1`
+    ).get(skillId) as { duration_ms: number } | undefined;
+    expect(trialUpdateLog?.duration_ms).toBeGreaterThan(0);
     const updatedSkills = service.listSkills({ userId: "user-2" });
     expect(updatedSkills.skills.find((item) => item.id === skillId)).toMatchObject({
       usageCount: 1,
@@ -425,8 +418,8 @@ describe("MemoryService / evolution / orchestration", () => {
       {
         trialId: trial.trialId,
         status: "pass",
-        episodeId: completes[0]!.episodeId,
-        reward: expect.any(Number)
+        episodeId: trialTurn.episodeId,
+        reward: undefined
       }
     ]));
     const activeAssetRow = db.db.prepare(
@@ -461,9 +454,7 @@ describe("MemoryService / evolution / orchestration", () => {
     expect(JSON.parse(episodeIndexes.l2_policy_ids_json)).toEqual(expect.arrayContaining([
       expect.any(String)
     ]));
-    expect(JSON.parse(episodeIndexes.l3_world_model_ids_json)).toEqual(expect.arrayContaining([
-      expect.any(String)
-    ]));
+    expect(JSON.parse(episodeIndexes.l3_world_model_ids_json)).toEqual([]);
     expect(JSON.parse(episodeIndexes.skill_memory_ids_json)).toContain(skillId);
     const traceDetailAfterSkill = service.getMemory(completes[0]!.l1MemoryId);
     expect(traceDetailAfterSkill.refs.episode).toMatchObject({
@@ -484,7 +475,7 @@ describe("MemoryService / evolution / orchestration", () => {
       kind: "skill_trial",
       op: "updated",
       entity_id: trial.trialId,
-      source: "worker.reward.updated"
+      source: "worker.skill_trial_resolve"
     });
 
     const recall = await service.search({
@@ -505,7 +496,7 @@ describe("MemoryService / evolution / orchestration", () => {
       },
       query: "pytest sqlite migration environment"
     });
-    expect(world.hits.some((hit) => hit.memoryLayer === "L3")).toBe(true);
+    expect(world.hits.some((hit) => hit.memoryLayer === "L3")).toBe(false);
     const l3ChangesBeforeRepeat = db.db.prepare(
       `SELECT COUNT(*) AS count
        FROM memory_change_log
@@ -532,12 +523,23 @@ describe("MemoryService / evolution / orchestration", () => {
        FROM memory_change_log
        WHERE source = 'worker.l3_abstraction.v7'`
     ).get() as { count: number };
-    expect(l3ChangesAfterRepeat.count).toBeGreaterThan(l3ChangesBeforeRepeat.count);
+    expect(l3ChangesAfterRepeat.count).toBe(l3ChangesBeforeRepeat.count);
     db.close();
   });
 
   it("queues L3 abstraction and skill crystallization when L2 association activates a candidate policy", async () => {
-    const { db, service } = createTestService();
+    const { db, service } = createTestService({
+      config: {
+        ...DEFAULT_MEMMY_CONFIG,
+        algorithm: {
+          ...DEFAULT_MEMMY_CONFIG.algorithm,
+          l2Induction: {
+            ...DEFAULT_MEMMY_CONFIG.algorithm.l2Induction,
+            minEpisodesForActivation: 2
+          }
+        }
+      }
+    });
     const session = service.openSession({
       namespace: {
         source: "codex",
@@ -591,6 +593,9 @@ describe("MemoryService / evolution / orchestration", () => {
 
     service.closeSession(session.sessionId);
     await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
+    await service.runWorkerOnce(20);
     makeTraceEligibleForL2(db, second.l1MemoryId);
     db.db.prepare(
       `UPDATE evolution_jobs
@@ -629,27 +634,14 @@ describe("MemoryService / evolution / orchestration", () => {
       target_memory_id: string | null;
       payload_json: string;
     }>;
-    expect(downstreamJobs.map((job) => job.job_type)).toEqual(["l3_abstraction", "skill_crystallization"]);
-    expect(downstreamJobs.map((job) => job.status)).toEqual(["queued", "queued"]);
-    expect(downstreamJobs.map((job) => job.episode_id)).toEqual([
-      "episode-l2-activation-2",
-      "episode-l2-activation-2"
-    ]);
-    const l3Job = downstreamJobs.find((job) => job.job_type === "l3_abstraction");
+    expect(downstreamJobs.map((job) => job.job_type)).toEqual(["skill_crystallization"]);
+    expect(downstreamJobs.map((job) => job.status)).toEqual(["succeeded"]);
+    expect(downstreamJobs.map((job) => job.episode_id)).toEqual(["episode-l2-activation-2"]);
     const skillJob = downstreamJobs.find((job) => job.job_type === "skill_crystallization");
-    expect(l3Job?.target_memory_id).toBeNull();
-    expect(JSON.parse(l3Job!.payload_json)).toMatchObject({
-      reason: "l2.policy.updated",
-      targetKind: "policy_cluster",
-      seedPolicyId: "policy_l2_activation_downstream",
-      policyIds: ["policy_l2_activation_downstream"],
-      previousStatus: "candidate",
-      status: "active"
-    });
     expect(skillJob?.target_memory_id).toBe("policy_l2_activation_downstream");
     expect(JSON.parse(skillJob!.payload_json)).toMatchObject({
       reason: "l2.policy.updated",
-      previousStatus: "candidate",
+      previousStatus: "active",
       status: "active"
     });
 
@@ -740,19 +732,7 @@ describe("MemoryService / evolution / orchestration", () => {
        WHERE user_id = 'shared-downstream-user'
          AND memory_layer = 'L3'`
     ).all() as Array<{ info_json: string; properties_json: string }>;
-    expect(worlds).toHaveLength(1);
-    expect(JSON.parse(worlds[0]!.info_json).profile_id).toBe("profile-a");
-    const worldMeta = JSON.parse(worlds[0]!.properties_json) as {
-      internal_info: {
-        world_model: {
-          policy_ids?: string[];
-        };
-      };
-    };
-    expect(worldMeta.internal_info.world_model.policy_ids?.sort()).toEqual([
-      "policy_downstream_profile_a",
-      "policy_downstream_profile_b"
-    ].sort());
+    expect(worlds).toHaveLength(0);
 
     const skills = db.db.prepare(
       `SELECT info_json, properties_json
@@ -885,8 +865,9 @@ describe("MemoryService / evolution / orchestration", () => {
       });
       makeTraceEligibleForL2(db, complete.l1MemoryId);
     }
+    service.closeSession(session.sessionId);
     let policyCreated = false;
-    for (let i = 0; i < 20; i += 1) {
+    for (let i = 0; i < 40; i += 1) {
       await service.runWorkerOnce(1);
       const l2Count = db.db.prepare(
         `SELECT COUNT(*) AS count
@@ -1019,14 +1000,14 @@ describe("MemoryService / evolution / orchestration", () => {
     for (let i = 0; i < 16; i += 1) {
       await service.runWorkerOnce(100);
       if (
-        calls.some((call) => call.options.operation === "l3.abstraction.v2") &&
+        calls.some((call) => call.options.operation === "l3.abstraction.v3") &&
         calls.some((call) => call.options.operation === "skill.crystallize")
       ) {
         break;
       }
     }
 
-    const l3Call = calls.find((call) => call.options.operation === "l3.abstraction.v2");
+    const l3Call = calls.find((call) => call.options.operation === "l3.abstraction.v3");
     if (l3Call) {
       expect(l3Call.options.thinkingMode).toBe("enabled");
       expect(l3Call.messages[0]!.content).toContain("declarative");

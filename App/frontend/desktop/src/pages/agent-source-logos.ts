@@ -1,9 +1,12 @@
 import claudeCodeLogoUrl from "../assets/agent-logos/claude-code.svg";
 import codexLogoUrl from "../assets/agent-logos/codex.svg";
 import cursorLogoUrl from "../assets/agent-logos/cursor.svg";
+import deepseekHarnessLogoUrl from "../assets/agent-logos/deepseek-harness.svg";
 import hermesLogoUrl from "../assets/agent-logos/hermes.svg";
 import openclawLogoUrl from "../assets/agent-logos/openclaw.svg";
 import opencodeLogoUrl from "../assets/agent-logos/opencode.svg";
+import piLogoUrl from "../assets/agent-logos/pi.svg";
+import qwenworkLogoUrl from "../assets/agent-logos/qwenwork.svg";
 import workbuddyLogoUrl from "../assets/agent-logos/workbuddy.png";
 import memmyRiceLogoUrl from "../assets/mascot/memmy-rice.png";
 
@@ -15,9 +18,12 @@ export const MEMORY_AGENT_SOURCE_VALUES = [
   "opencode",
   "openclaw",
   "hermes",
+  "deepseek_harness",
   "workbuddy",
   "omp",
-  "freebuff"
+  "freebuff",
+  "pi",
+  "qwenwork"
 ] as const;
 
 const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
@@ -30,9 +36,11 @@ const AGENT_SOURCE_DISPLAY_NAMES: Record<string, string> = {
   opencode: "OpenCode",
   openclaw: "OpenClaw",
   hermes: "Hermes",
+  deepseek_harness: "DeepSeek Harness",
   workbuddy: "WorkBuddy",
   omp: "OMP",
-  freebuff: "FreeBuff"
+  freebuff: "FreeBuff",
+  qwenwork: "QwenWork"
 };
 
 export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
@@ -42,7 +50,10 @@ export const AGENT_SOURCE_LOGOS: Partial<Record<string, string>> = {
   opencode: opencodeLogoUrl,
   openclaw: openclawLogoUrl,
   hermes: hermesLogoUrl,
+  deepseek_harness: deepseekHarnessLogoUrl,
   workbuddy: workbuddyLogoUrl,
+  pi: piLogoUrl,
+  qwenwork: qwenworkLogoUrl,
   memmy: memmyRiceLogoUrl,
   memmy_agent: memmyRiceLogoUrl
 };

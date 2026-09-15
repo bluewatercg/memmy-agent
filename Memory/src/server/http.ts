@@ -1,8 +1,17 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import {
+  createAgentSourceExecutor,
+  type AgentSourceExecutor
+} from "../agent-source/runtime.js";
+import {
+  L3WorldModelBoundaryRequestSchema,
+  L3WorldModelRequestEnvelopeSchema,
+  OpenSessionInputSchema
+} from "../contracts/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
-import { memoryPanelHtml } from "../viewer/static.js";
+import { isMemoryViewerPath, memoryViewerAsset } from "../viewer/static.js";
 import type {
   ProjectGoalDecisionRequest,
   ProjectWorkItemCreateRequest,
@@ -38,6 +47,7 @@ import { createAgentTokenStatsService } from "../service/agent-token-stats-servi
 import { namespaceIdFromContext, normalizeNamespace } from "../service/namespace/namespace-scope.js";
 import { MemoryServiceError, statusForCode } from "../utils/error.js";
 import { TopicVersionConflictError } from "../service/topic-inbox/project-topic-inbox.js";
+import { resolveTimeZone } from "../utils/time.js";
 import {
   createPluginRuntimeAnalytics,
   hitCountFromGetResponse,
@@ -48,6 +58,14 @@ import {
   trackExternalToolCall,
   type PluginRuntimeAnalytics,
 } from "./plugin-runtime-analytics.js";
+import type { ViewerCliOptions } from "./viewer-cli.js";
+import {
+  VIEWER_API_ROUTES,
+  assertLocalViewerRequest,
+  isViewerApiRequest,
+  routeViewerRequest,
+  streamViewerEvents
+} from "./viewer-api.js";
 
 const logger = createMemoryLogger("http");
 const workerLogger = createMemoryLogger("worker");
@@ -69,13 +87,19 @@ const TOPIC_DECISION_API_ROUTES = [
 ] as const;
 
 export const API_ROUTES = [
+  "GET /health",
   "GET /api/v1/health",
   ...TOPIC_DECISION_API_ROUTES,
   "POST /api/v1/admin/reload-config",
   "POST /api/v1/admin/shutdown",
+  "GET /api/v1/admin/export",
+  "DELETE /api/v1/admin/data",
   "POST /api/v1/sessions/open",
   "POST /api/v1/sessions/:sessionId/checkpoint",
   "POST /api/v1/sessions/:sessionId/close",
+  "GET /api/v1/sessions/:sessionId/l3-world-model-trace-head",
+  "POST /api/v1/sessions/:sessionId/l3-world-model-boundary",
+  "GET /api/v1/l3-world-model/sessions/:sessionId/context",
   "POST /api/v1/turns/start",
   "POST /api/v1/turns/:turnId/complete",
   "POST /api/v1/dsh/claims",
@@ -85,6 +109,7 @@ export const API_ROUTES = [
   "POST /api/v1/dsh/claims/reap",
   "POST /api/v1/dsh/import",
   "POST /api/v1/memory/search",
+  "GET /api/v1/memory/recalls/:queryId",
   "POST /api/v1/memory/add",
   "GET /api/v1/memory/audit/markdown",
   "POST /api/v1/memory/audit/markdown/import",
@@ -153,6 +178,7 @@ export const API_ROUTES = [
   "POST /api/v1/asset-recalls/:offeredEventId/outcome",
   "POST /api/v1/memory/:memoryId/temporal-validity",
   "GET /api/v1/memory/:memoryId/temporal-validity",
+  ...VIEWER_API_ROUTES
 ] as const;
 
 function advertisedApiRoutes(service: MemoryService): string[] {
@@ -163,12 +189,19 @@ function advertisedApiRoutes(service: MemoryService): string[] {
 
 export interface MemoryHttpServerOptions {
   service: MemoryService;
+  /** Configured agent timezone. Request headers are used only when this is absent. */
+  timeZone?: string;
   apiKey?: string;
   auth?: MemoryHttpAuthOptions;
   workerStartupFallbackMs?: number;
   workerPostHealthDelayMs?: number;
   onShutdownRequested?: () => void;
   pluginRuntimeAnalytics?: PluginRuntimeAnalytics;
+  configPath?: string;
+  viewerCli?: ViewerCliOptions;
+  onRestartRequested?: () => void | Promise<void>;
+  agentSourceExecutor?: AgentSourceExecutor;
+  startAgentSourceAutomation?: boolean;
 }
 
 export interface MemoryHttpAuthOptions {
@@ -183,21 +216,23 @@ export interface MemoryHttpAuthOptions {
 }
 
 interface AuthPrincipal {
-  kind: "anonymous" | "local" | "cloud" | "scoped";
+  kind: "anonymous" | "local" | "cloud" | "scoped" | "viewer";
   tokenId?: string;
   namespace?: RuntimeNamespace;
   scopes: string[];
+  timeZone?: string;
 }
 
 interface AutoWorkerDrain {
   start(): void;
   afterHealthCheck(): void;
   schedule(): void;
-  dispose(): void;
+  dispose(): Promise<void>;
 }
 
 const DEFAULT_WORKER_STARTUP_FALLBACK_MS = 5_000;
 const DEFAULT_WORKER_POST_HEALTH_DELAY_MS = 250;
+const serverCleanup = new WeakMap<Server, () => Promise<void>>();
 
 export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server {
   const autoWorker = createAutoWorkerDrain(options.service, {
@@ -205,31 +240,82 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
     postHealthDelayMs: options.workerPostHealthDelayMs ?? DEFAULT_WORKER_POST_HEALTH_DELAY_MS
   });
   const pluginRuntimeAnalytics = options.pluginRuntimeAnalytics ?? createPluginRuntimeAnalytics();
-  const server = createServer(async (request, response) => {
+  const agentSources = options.agentSourceExecutor ?? createAgentSourceExecutor({
+    service: options.service,
+    configPath: options.configPath,
+    scheduleWorker: autoWorker.schedule
+  });
+  const activeRequests = new Set<Promise<void>>();
+  const server = createServer((request, response) => {
+    const handling = handleRequest(request, response);
+    activeRequests.add(handling);
+    void handling.finally(() => activeRequests.delete(handling));
+  });
+  async function handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const startedAt = Date.now();
     const requestId = requestIdFromHeaders(request) ?? randomUUID();
     const requestPath = request.url?.split("?", 1)[0] ?? "<missing>";
-    setCors(response);
-    if (request.method === "OPTIONS") {
-      response.writeHead(204);
-      response.end();
-      return;
-    }
+    setSecurityHeaders(response);
 
     try {
       if (!request.url || !request.method) {
         throw new MemoryServiceError("invalid_argument", "missing request url or method");
       }
       const url = new URL(request.url, "http://127.0.0.1");
-      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+      if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/v1/health")) {
         response.once("finish", () => autoWorker.afterHealthCheck());
       }
-      if (request.method === "GET" && isViewerPath(url.pathname)) {
-        writeHtml(response, memoryPanelHtml());
+      if (request.method === "GET" && isMemoryViewerPath(url.pathname)) {
+        assertLocalViewerRequest(request, url);
+        const asset = memoryViewerAsset(url.pathname);
+        if (!asset) throw new MemoryServiceError("not_found", `Viewer asset not found: ${url.pathname}`);
+        writeViewerAsset(response, asset);
         return;
       }
-      const principal = authenticate(request, url, options);
+      const viewerRequest = isViewerApiRequest(request, url);
+      if (viewerRequest) assertLocalViewerRequest(request, url);
+      if (viewerRequest && request.method === "GET" && url.pathname === "/api/v1/events") {
+        streamViewerEvents({
+          service: options.service,
+          configPath: options.configPath,
+          routes: API_ROUTES,
+          scheduleWorker: autoWorker.schedule,
+          timeZone: requestTimeZone(request, options.timeZone),
+          agentSources
+        }, request, response, url);
+        return;
+      }
+      const principal = {
+        ...(viewerRequest ? viewerPrincipal() : authenticate(request, url, options)),
+        timeZone: requestTimeZone(request, options.timeZone)
+      };
       const body = await readJson(request);
+      if (viewerRequest) {
+        const viewerResult = await routeViewerRequest({
+          service: options.service,
+          configPath: options.configPath,
+          routes: API_ROUTES,
+          scheduleWorker: autoWorker.schedule,
+          timeZone: principal.timeZone,
+          viewerCli: options.viewerCli,
+          restartService: options.onRestartRequested,
+          agentSources
+        }, request.method, url, body);
+        if (viewerResult) {
+          if (viewerResult.afterResponse) {
+            response.once("finish", () => {
+              void Promise.resolve()
+                .then(() => viewerResult.afterResponse?.())
+                .catch((error) => logger.error("service.restart.failed", {
+                  requestId,
+                  ...memoryErrorFields(error)
+                }));
+            });
+          }
+          writeJson(response, viewerResult.status ?? 200, viewerResult.body, viewerResult.headers);
+          return;
+        }
+      }
       const result = await routeRequest(
         options.service,
         autoWorker,
@@ -238,7 +324,8 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
         body,
         principal,
         Boolean(options.onShutdownRequested),
-        pluginRuntimeAnalytics
+        pluginRuntimeAnalytics,
+        requestId
       );
       if (request.method === "POST" && url.pathname === "/api/v1/admin/shutdown") {
         response.once("finish", () => options.onShutdownRequested?.());
@@ -269,10 +356,35 @@ export function createMemoryHttpServer(options: MemoryHttpServerOptions): Server
       }
       writeError(response, error, requestId);
     }
+  }
+  server.once("listening", () => {
+    autoWorker.start();
+    if (options.startAgentSourceAutomation) agentSources.startAutomation();
   });
-  server.once("listening", () => autoWorker.start());
-  server.on("close", () => autoWorker.dispose());
+  let cleanup: Promise<void> | undefined;
+  const dispose = () => cleanup ??= Promise.all([
+    autoWorker.dispose(),
+    agentSources.dispose(),
+    ...activeRequests,
+  ]).then(() => undefined);
+  serverCleanup.set(server, dispose);
+  server.on("close", () => {
+    void dispose().catch((error) => logger.error("service.cleanup.failed", memoryErrorFields(error)));
+  });
   return server;
+}
+
+export async function closeMemoryHttpServer(server: Server): Promise<void> {
+  // Closing sockets alone does not settle workers, scans or async request handlers.
+  const cleanup = serverCleanup.get(server)?.();
+  await Promise.all([
+    cleanup,
+    new Promise<void>((resolveClose, rejectClose) => {
+      if (!server.listening) { resolveClose(); return; }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+      server.closeAllConnections();
+    }),
+  ]);
 }
 
 export async function listenMemoryHttpServer(options: MemoryHttpServerOptions & {
@@ -314,10 +426,11 @@ function createAutoWorkerDrain(
   let startupReconciled = false;
   let startupTimer: ReturnType<typeof setTimeout> | undefined;
   let delayedTimer: ReturnType<typeof setTimeout> | undefined;
+  let scheduledTimer: ReturnType<typeof setTimeout> | undefined;
+  let drainStopped: (() => void) | undefined;
+  let activeDrain: Promise<void> | undefined;
   const maxCycles = 40;
-  const priorityJobLimit = 100;
-  const priorityBatchSize = 20;
-  const standardBatchSize = 100;
+  const workerBatchSize = 4;
 
   async function drain(): Promise<void> {
     if (disposed) {
@@ -328,6 +441,7 @@ function createAutoWorkerDrain(
       return;
     }
     running = true;
+    activeDrain = new Promise<void>((done) => { drainStopped = done; });
     let continueSoon = false;
     try {
       if (!startupReconciled) {
@@ -340,31 +454,30 @@ function createAutoWorkerDrain(
       }
       do {
         requested = false;
-        let prioritySummariesDuringDrain = 0;
-        for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-          const limit = prioritySummariesDuringDrain < priorityJobLimit ? priorityBatchSize : standardBatchSize;
-          const result = await service.runWorkerOnce(limit, {});
+        for (let cycle = 0; cycle < maxCycles && !disposed; cycle += 1) {
+          const result = await service.runWorkerOnce(workerBatchSize, {
+            priorityCohortOnly: true
+          });
           if (result.leased === 0 && result.embeddingRetries.leased === 0) {
             break;
           }
-          prioritySummariesDuringDrain += result.jobs.filter((job) =>
-            job.jobType === "trace_summary" || job.jobType === "import_summary"
-          ).length;
           if (cycle === maxCycles - 1) {
             continueSoon = true;
           }
           await yieldToEventLoop();
         }
-      } while (requested && !continueSoon);
+      } while (requested && !continueSoon && !disposed);
     } catch (error) {
       workerLogger.error("drain.failed", memoryErrorFields(error));
     } finally {
       running = false;
+      drainStopped?.();
       if (disposed) {
         return;
       }
       if (requested || continueSoon) {
-        setTimeout(() => {
+        scheduledTimer = setTimeout(() => {
+          scheduledTimer = undefined;
           requested = true;
           void drain();
         }, 0);
@@ -410,7 +523,8 @@ function createAutoWorkerDrain(
       return;
     }
     scheduled = true;
-    setTimeout(() => {
+    scheduledTimer = setTimeout(() => {
+      scheduledTimer = undefined;
       scheduled = false;
       void drain();
     }, 0);
@@ -440,7 +554,7 @@ function createAutoWorkerDrain(
       }, Math.max(0, options.postHealthDelayMs));
     },
     schedule,
-    dispose(): void {
+    async dispose(): Promise<void> {
       disposed = true;
       requested = false;
       if (startupTimer) {
@@ -451,6 +565,11 @@ function createAutoWorkerDrain(
         clearTimeout(delayedTimer);
         delayedTimer = undefined;
       }
+      if (scheduledTimer) {
+        clearTimeout(scheduledTimer);
+        scheduledTimer = undefined;
+      }
+      await activeDrain;
     }
   };
 }
@@ -474,7 +593,8 @@ async function routeRequest(
   body: unknown,
   principal: AuthPrincipal,
   canShutdown: boolean,
-  pluginRuntimeAnalytics: PluginRuntimeAnalytics
+  pluginRuntimeAnalytics: PluginRuntimeAnalytics,
+  requestId: string
 ): Promise<unknown> {
   const path = url.pathname;
   const assetNamespace = (): { namespaceId: string; actorId: string; agentId: string } => {
@@ -710,7 +830,7 @@ async function routeRequest(
     })) };
   }
 
-  if (method === "GET" && path === "/api/v1/health") {
+  if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
     return service.health(advertisedApiRoutes(service));
   }
   if (method === "POST" && path === "/api/v1/admin/reload-config") {
@@ -720,6 +840,7 @@ async function routeRequest(
       requestId: typeof request.requestId === "string" ? request.requestId : undefined,
       adapterId: typeof request.adapterId === "string" ? request.adapterId : undefined,
       reason: typeof request.reason === "string" ? request.reason : undefined,
+      timeZone: request.timeZone,
       restartFailedProcessing: typeof request.restartFailedProcessing === "boolean"
         ? request.restartFailedProcessing
         : undefined
@@ -739,24 +860,20 @@ async function routeRequest(
   }
   if (method === "POST" && path === "/api/v1/sessions/open") {
     requireMemoryWrite(principal);
-    const request = envelopeWithPrincipal(asObject(body, "sessions.create"), principal) as SessionOpenRequest;
-    const publicRequest: SessionOpenRequest = {
+    const rawRequest = asObject(body, "sessions.create");
+    const request = rawRequest.l3WorldModelProtocolVersion === 2
+      ? parseV2OpenSessionRequest(strictEnvelopeWithPrincipal(rawRequest, principal))
+      : envelopeWithPrincipal(rawRequest, principal) as SessionOpenRequest;
+    const publicRequest: SessionOpenRequest = request.l3WorldModelProtocolVersion === 2
+      ? request
+      : {
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
       source: request.source ?? request.namespace?.source,
-      profileId: request.profileId ?? request.namespace?.profileId,
-      projectId: request.namespace?.projectId,
-      workspaceId: request.namespace?.workspaceId,
-      sessionId: request.sessionId,
-      workspacePath: request.workspacePath ?? request.namespace?.workspacePath,
-      meta: isRecord(request.meta) ? request.meta : undefined,
-      protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
-      provenance: isRecord(request.provenance) ? request.provenance : undefined
-    };
-    return publicOpenSessionResponse(
-      await service.idempotent("sessions.create", publicRequest, publicRequest, () => service.openSession(publicRequest))
     );
+    if (request.l3WorldModelProtocolVersion === 2 && result.projectId) autoWorker.schedule();
+    return publicOpenSessionResponse(result);
   }
 
   const sessionCheckpoint = match(path, /^\/api\/v1\/sessions\/([^/]+)\/checkpoint$/);
@@ -797,42 +914,6 @@ async function routeRequest(
     return service.importDshHistory({
       root: optionalString(request.root),
       maxSessionsPerRun: optionalPositiveInteger(request.maxSessionsPerRun, "dsh.import.maxSessionsPerRun"),
-      maxTurnsPerSession: optionalPositiveInteger(request.maxTurnsPerSession, "dsh.import.maxTurnsPerSession"),
-      maxSessionBytes: optionalPositiveInteger(request.maxSessionBytes, "dsh.import.maxSessionBytes"),
-      maxSessionTokens: optionalPositiveInteger(request.maxSessionTokens, "dsh.import.maxSessionTokens")
-    });
-  }
-
-  if (method === "POST" && path === "/api/v1/dsh/claims") {
-    requireMemoryWrite(principal);
-    const request = asObject(body, "dsh.claim");
-    const channel = request.channel;
-    if (channel !== "realtime" && channel !== "historical") throw new MemoryServiceError("invalid_argument", "dsh.claim channel must be realtime or historical");
-    return service.claimDshSession(requiredBodyString(request, "sessionId", "dsh.claim"), channel, requiredBodyString(request, "owner", "dsh.claim"));
-  }
-  if (method === "POST" && path === "/api/v1/dsh/claims/reap") {
-    requireMemoryWrite(principal);
-    return service.reapDshClaims();
-  }
-  const dshClaimHeartbeat = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)\/heartbeat$/);
-  if (method === "POST" && dshClaimHeartbeat) {
-    requireMemoryWrite(principal);
-    const request = asObject(body, "dsh.claim.heartbeat");
-    return service.renewDshClaim(decodeMatchSegment(dshClaimHeartbeat, 1), requiredBodyString(request, "owner", "dsh.claim.heartbeat"));
-  }
-  const dshClaim = match(path, /^\/api\/v1\/dsh\/claims\/([^/]+)$/);
-  if (method === "GET" && dshClaim) {
-    requireMemoryRead(principal);
-    const claim = service.getDshClaim(decodeMatchSegment(dshClaim, 1));
-    if (!claim) throw new MemoryServiceError("not_found", "dsh claim not found");
-    return { claim };
-  }
-  if (method === "DELETE" && dshClaim) {
-    requireMemoryWrite(principal);
-    const request = asObject(body, "dsh.claim.release");
-    return service.releaseDshClaim(decodeMatchSegment(dshClaim, 1), requiredBodyString(request, "owner", "dsh.claim.release"));
-  }
-
 
   if (method === "POST" && path === "/api/v1/turns/start") {
     requireMemoryRead(principal);
@@ -843,9 +924,11 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       sessionId: request.sessionId,
       query: request.query,
       turnId: request.turnId,
+      layers: normalizeLayerSelection(request.layers),
       contextHints: request.contextHints,
       contextBudget: request.contextBudget,
       protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
@@ -872,6 +955,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       sessionId: request.sessionId,
       episodeId: request.episodeId,
       query: request.query,
@@ -885,7 +969,8 @@ async function routeRequest(
       protocolVersion: typeof request.protocolVersion === "string" ? request.protocolVersion : undefined,
       provenance: isRecord(request.provenance) ? request.provenance : undefined,
       usage: request.usage,
-      status: request.status
+      status: request.status,
+      userMemoryCorrection: request.userMemoryCorrection
     };
     const result = await trackExternalHookCapture(
       pluginRuntimeAnalytics,
@@ -909,6 +994,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       query: request.query,
       sessionId: request.sessionId,
       episodeId: request.episodeId,
@@ -935,6 +1021,14 @@ async function routeRequest(
     ));
   }
 
+  const recallEvidence = match(path, /^\/api\/v1\/memory\/recalls\/([^/]+)$/);
+  if (method === "GET" && recallEvidence) {
+    requireMemoryRead(principal);
+    const queryId = decodeMatchSegment(recallEvidence, 1);
+    const request = envelopeWithPrincipal({}, principal) as RequestEnvelope;
+    return service.recallEvidence(queryId, request);
+  }
+
   if (method === "POST" && path === "/api/v1/memory/add") {
     requireMemoryWrite(principal);
     const request = requestWithPrincipal<MemoryAddRequest>(body, "memory.add", principal);
@@ -943,6 +1037,7 @@ async function routeRequest(
       requestId: request.requestId,
       adapterId: request.adapterId,
       namespace: request.namespace,
+      timeZone: request.timeZone,
       content: request.content,
       layer: parseLayerValue(request.layer),
       title: request.title,
@@ -955,7 +1050,12 @@ async function routeRequest(
       sourceMemoryIds: parseOptionalStringArray(request.sourceMemoryIds, "memory.add sourceMemoryIds"),
       provenance: isRecord(request.provenance) ? request.provenance : undefined,
       supersedesMemoryId: typeof request.supersedesMemoryId === "string" ? request.supersedesMemoryId : undefined,
-      supersessionReason: typeof request.supersessionReason === "string" ? request.supersessionReason : undefined
+      supersessionReason: typeof request.supersessionReason === "string" ? request.supersessionReason : undefined,
+      sourceAgentId: typeof request.sourceAgentId === "string" ? request.sourceAgentId : undefined,
+      sourceSkillId: typeof request.sourceSkillId === "string" ? request.sourceSkillId : undefined,
+      sourceSkillPath: typeof request.sourceSkillPath === "string" ? request.sourceSkillPath : undefined,
+      sourceSkillVersion: typeof request.sourceSkillVersion === "string" ? request.sourceSkillVersion : undefined,
+      sourceContentHash: typeof request.sourceContentHash === "string" ? request.sourceContentHash : undefined
     };
     const result = await trackExternalToolCall(
       pluginRuntimeAnalytics,
@@ -994,12 +1094,14 @@ async function routeRequest(
     const request = envelopeWithPrincipal(asObject(body, "worker.run"), principal) as RequestEnvelope & {
       limit?: unknown;
       targetMemoryIds?: unknown;
+      priorityCohortOnly?: unknown;
     };
     return service.runWorkerWithEvolutionSummary(
       parseNumberValue(request.limit) ?? parseNumber(url.searchParams.get("limit")) ?? 20,
       {
         ...request,
-        targetMemoryIds: parseOptionalStringArray(request.targetMemoryIds, "worker.run.targetMemoryIds")
+        targetMemoryIds: parseOptionalStringArray(request.targetMemoryIds, "worker.run.targetMemoryIds"),
+        priorityCohortOnly: request.priorityCohortOnly === true
       }
     );
   }
@@ -1024,7 +1126,8 @@ async function routeRequest(
   if (method === "GET" && path === "/api/v1/panel/overview") {
     requirePanelRead(principal);
     return service.panelOverviewSummary({
-      namespace: principal.namespace
+      namespace: principal.namespace,
+      timeZone: principal.timeZone
     });
   }
 
@@ -1284,26 +1387,6 @@ async function routeRequest(
       const run = await service.idempotent("topic-decision.approve", request, { sessionId, proposalId, request }, async () => {
         return service.approveProposal(request.namespace, sessionId, proposalId, request.expectedProposalVersion, decisionActor(request));
       }, { exactReplay: true });
-      return publicTopicExecutionRun(run);
-    } catch (error) {
-      throw mapTopicDecisionError(error);
-    }
-  }
-
-  const topicDecisionResume = match(path, /^\/api\/v1\/topic-inbox\/decisions\/([^\/]+)\/executions\/([^\/]+)\/resume$/);
-  if (method === "POST" && topicDecisionResume) {
-    requirePanelWrite(principal);
-    const request = topicDecisionMutation(body, "topic-decision.resume", principal);
-    const sessionId = decodeMatchSegment(topicDecisionResume, 1);
-    const runId = decodeMatchSegment(topicDecisionResume, 2);
-    try {
-      const run = await service.idempotent("topic-decision.resume", request, { sessionId, runId, request }, async () => {
-        const detail = service.readTopicDecisionSession(request.namespace, sessionId);
-        if (!(detail.executionRuns ?? []).some((candidate) => candidate.id === runId && candidate.sessionId === sessionId)) {
-          throw new MemoryServiceError("conflict", "execution run does not belong to session", 409);
-        }
-        return service.resumeExecution(request.namespace, runId);
-      }, { exactReplay: true });
       return { result: publicTopicExecutionRun(run) };
     } catch (error) {
       throw mapTopicDecisionError(error);
@@ -1368,10 +1451,26 @@ async function routeRequest(
     return service.namespaceAudit({ namespace: principal.namespace });
   }
 
+  if (method === "GET" && path === "/api/v1/admin/export") {
+    requirePanelRead(principal);
+    return service.exportBundle({
+      namespace: principal.namespace,
+      timeZone: principal.timeZone,
+      includeRawText: url.searchParams.get("includeRawText") === "true",
+      includeAudit: url.searchParams.get("includeAudit") === "true"
+    });
+  }
+
+  if (method === "DELETE" && path === "/api/v1/admin/data") {
+    requireMemoryWrite(principal);
+    return service.clearAllData();
+  }
+
   if (method === "GET" && path === "/api/v1/panel/analysis") {
     requirePanelRead(principal);
     return service.panelAnalysis({
-      namespace: principal.namespace
+      namespace: principal.namespace,
+      timeZone: principal.timeZone
     });
   }
 
@@ -1414,7 +1513,8 @@ async function routeRequest(
     requirePanelRead(principal);
     return publicPanelItemsResponse(service.panelItems({
       namespace: principal.namespace,
-      layer: parseLayer(url.searchParams.get("layer")),
+      timeZone: principal.timeZone,
+      layer: parseRecallLayer(url.searchParams.get("layer")),
       status: parseStatus(url.searchParams.get("status")),
       q: url.searchParams.get("q") ?? undefined,
       sourceAgent: url.searchParams.get("sourceAgent") ?? undefined,
@@ -1463,6 +1563,7 @@ async function routeRequest(
     requirePanelRead(principal);
     return publicPanelTasksResponse(service.panelTasks({
       namespace: principal.namespace,
+      timeZone: principal.timeZone,
       q: url.searchParams.get("q") ?? undefined,
       page: parseNumber(url.searchParams.get("page"))
     }));
@@ -1626,7 +1727,7 @@ async function routeRequest(
       () =>
         service.getMemory(
           decodeMatchSegment(memoryGet, 1),
-          { namespace: principal.namespace }
+          { namespace: principal.namespace, timeZone: principal.timeZone }
         ),
       (result) => ({ hit_count: hitCountFromGetResponse(result) }),
     );
@@ -1662,6 +1763,7 @@ function publicOpenSessionResponse(result: unknown): Record<string, unknown> {
     workspacePath: record.workspacePath,
     status: record.status,
     resumed: record.resumed,
+    projectId: record.projectId ?? null,
     serverTime: record.serverTime
   };
 }
@@ -1685,6 +1787,9 @@ function publicCloseSessionResponse(result: unknown): Record<string, unknown> {
     ok: record.ok,
     sessionId: record.sessionId,
     status: record.status,
+    closedEpisodeIds: record.closedEpisodeIds,
+    changeSeq: record.changeSeq,
+    syncCursor: record.syncCursor,
     serverTime: record.serverTime
   };
 }
@@ -1696,11 +1801,16 @@ function publicCompleteTurnResponse(result: unknown): Record<string, unknown> {
     sessionId: record.sessionId,
     episodeId: record.episodeId,
     rawTurnId: record.rawTurnId,
+    userMemoryId: record.userMemoryId,
+    userMemoryIds: record.userMemoryIds,
     l1MemoryId: record.l1MemoryId,
+    l1MemoryIds: record.l1MemoryIds,
+    closedEpisodeIds: record.closedEpisodeIds,
     scheduledEvolution: record.scheduledEvolution,
     jobs: record.jobs,
     changeSeq: record.changeSeq,
-    serverTime: record.serverTime
+    serverTime: record.serverTime,
+    ...(record.duplicate === true ? { duplicate: true } : {})
   };
 }
 
@@ -1841,21 +1951,31 @@ async function readJson(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function writeJson(response: ServerResponse, status: number, body: unknown): void {
+function writeJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {}
+): void {
   const payload = JSON.stringify(body, null, 2);
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
-    "content-length": Buffer.byteLength(payload)
+    "content-length": Buffer.byteLength(payload),
+    ...headers
   });
   response.end(payload);
 }
 
-function writeHtml(response: ServerResponse, html: string): void {
+function writeViewerAsset(
+  response: ServerResponse,
+  asset: NonNullable<ReturnType<typeof memoryViewerAsset>>
+): void {
   response.writeHead(200, {
-    "content-type": "text/html; charset=utf-8",
-    "content-length": Buffer.byteLength(html)
+    "content-type": asset.contentType,
+    "content-length": asset.body.byteLength,
+    "cache-control": asset.cacheControl
   });
-  response.end(html);
+  response.end(asset.body);
 }
 
 function writeError(response: ServerResponse, error: unknown, requestId?: string): void {
@@ -1888,7 +2008,7 @@ function authenticate(
   url: URL,
   options: MemoryHttpServerOptions
 ): AuthPrincipal {
-  if (url.pathname === "/api/v1/health") {
+  if (url.pathname === "/health" || url.pathname === "/api/v1/health") {
     return { kind: "anonymous", scopes: ["health:read"] };
   }
   const auth = options.auth;
@@ -1930,6 +2050,10 @@ function authenticate(
   throw new MemoryServiceError("unauthorized", "invalid memory service token", 401, requestIdFromHeaders(request));
 }
 
+function viewerPrincipal(): AuthPrincipal {
+  return { kind: "viewer", scopes: ["*"] };
+}
+
 function tokenFromRequest(request: IncomingMessage, url: URL): string | undefined {
   const authorization = request.headers.authorization;
   const bearer = authorization?.startsWith("Bearer ")
@@ -1938,10 +2062,6 @@ function tokenFromRequest(request: IncomingMessage, url: URL): string | undefine
   const headerKey = request.headers["x-api-key"];
   const apiKey = Array.isArray(headerKey) ? headerKey[0] : headerKey;
   return bearer ?? apiKey ?? url.searchParams.get("token") ?? url.searchParams.get("access_token") ?? undefined;
-}
-
-function isViewerPath(path: string): boolean {
-  return path === "/" || path === "/viewer" || path === "/viewer/";
 }
 
 function namespaceFromRequest(request: IncomingMessage, url: URL): RuntimeNamespace | undefined {
@@ -2060,7 +2180,8 @@ function envelopeWithPrincipal<T extends Record<string, unknown>>(
   assertNamespaceScope(existing, principal.namespace);
   return {
     ...body,
-    namespace
+    namespace,
+    timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
   } as T & RequestEnvelope;
 }
 
@@ -2305,14 +2426,80 @@ function parseShared<T>(schema: { safeParse(value: unknown): { success: true; da
   if (!parsed.success) throw new MemoryServiceError("invalid_argument", parsed.error.message);
   return parsed.data;
 }
-function nullableString(value: unknown, routeName: string): string | null | undefined { if (value === undefined || value === null || typeof value === "string") return value; throw new MemoryServiceError("invalid_argument", `${routeName} field must be a string or null`); }
-function workItemStatus(value: unknown, routeName: string): ProjectWorkItemCreateRequest["status"] | undefined {
+function nullableString(value: unknown, routeName: string): string | null | undefined {
+  if (value === null) return null;
   if (value === undefined) return undefined;
-  if (value === "pending" || value === "active" || value === "blocked" || value === "completed" || value === "archived") return value;
+  if (typeof value !== "string") throw new MemoryServiceError("invalid_argument", `${routeName} field must be a string or null`);
+  return value;
+}
+function workItemStatus(value: unknown, routeName: string): "active" | "completed" | "archived" {
+  if (value === "active" || value === "completed" || value === "archived") return value;
   throw new MemoryServiceError("invalid_argument", `${routeName} status is invalid`);
 }
 function nullableWorkItemStatus(value: unknown, routeName: string): ProjectWorkItemUpdateRequest["status"] {
   return value === null ? null : workItemStatus(value, routeName);
+}
+
+function strictEnvelopeWithPrincipal(
+  body: Record<string, unknown>,
+  principal: AuthPrincipal
+): Record<string, unknown> {
+  const requestNamespace = isRecord(body.namespace)
+    ? body.namespace as unknown as RuntimeNamespace
+    : undefined;
+  const principalNamespace = principal.namespace;
+  const fields: Array<keyof RuntimeNamespace> = [
+    "userId",
+    "tenantId",
+    "projectId",
+    "workspaceId",
+    "profileId",
+    "sessionKey",
+    "source"
+  ];
+  for (const field of fields) {
+    const requested = requestNamespace?.[field];
+    const scoped = principalNamespace?.[field];
+    if (typeof requested === "string" && requested && typeof scoped === "string" && scoped && requested !== scoped) {
+      throw new MemoryServiceError("forbidden", `namespace.${field} conflicts with authenticated scope`);
+    }
+  }
+  const namespace = mergeNamespaces(
+    mergeNamespaces(namespaceFromSource(body.source), requestNamespace),
+    principalNamespace
+  );
+  if (!namespace) {
+    throw new MemoryServiceError("invalid_argument", "protocol v2 requires namespace");
+  }
+  const source = namespace.source ?? (typeof body.source === "string" ? body.source : undefined);
+  return {
+    ...body,
+    ...(source ? { source } : {}),
+    namespace,
+    timeZone: principal.timeZone ?? (typeof body.timeZone === "string" ? body.timeZone : undefined)
+  };
+}
+
+function parseV2OpenSessionRequest(value: Record<string, unknown>): SessionOpenRequest {
+  const parsed = OpenSessionInputSchema.safeParse(value);
+  if (!parsed.success || !("l3WorldModelProtocolVersion" in parsed.data) || parsed.data.l3WorldModelProtocolVersion !== 2) {
+    const message = parsed.success
+      ? "invalid protocol v2 session open request"
+      : parsed.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`).join("; ");
+    throw new MemoryServiceError("invalid_argument", message);
+  }
+  return parsed.data as SessionOpenRequest;
+}
+
+function requestTimeZone(request: IncomingMessage, configuredTimeZone?: string): string {
+  try {
+    return resolveTimeZone(configuredTimeZone ?? headerString(request, "x-memmy-time-zone"));
+  } catch (error) {
+    throw new MemoryServiceError(
+      "invalid_argument",
+      error instanceof Error ? error.message : "invalid timezone"
+    );
+  }
 }
 function namespaceFromSource(source: unknown): RuntimeNamespace | undefined {
   if (typeof source !== "string" || !source.trim()) {
@@ -2371,26 +2558,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function setCors(response: ServerResponse): void {
-  response.setHeader("access-control-allow-origin", "*");
-  response.setHeader("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("x-frame-options", "DENY");
+  response.setHeader("referrer-policy", "no-referrer");
   response.setHeader(
-    "access-control-allow-headers",
-    [
-      "content-type",
-      "authorization",
-      "x-api-key",
-      "x-request-id",
-      "x-correlation-id",
-      "x-memmy-user-id",
-      "x-memmy-tenant-id",
-      "x-memmy-project-id",
-      "x-memmy-workspace-id",
-      "x-memmy-workspace-path",
-      "x-memmy-profile-id",
-      "x-memmy-profile-label",
-      "x-memmy-session-key"
-    ].join(",")
+    "content-security-policy",
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
   );
 }
 
@@ -2446,6 +2620,10 @@ function parseLayer(value: string | null): MemoryLayer | undefined {
   return parseLayerValue(value);
 }
 
+function parseRecallLayer(value: string | null): MemoryLayer | "UserMemory" | undefined {
+  return value === "UserMemory" ? value : parseLayerValue(value);
+}
+
 function parseLayerValue(value: unknown): MemoryLayer | undefined {
   if (value === "L1" || value === "L2" || value === "L3" || value === "Skill") {
     return value;
@@ -2461,6 +2639,23 @@ function normalizeLayers(value: unknown): MemoryLayer[] | undefined {
     .map(parseLayerValue)
     .filter((layer): layer is MemoryLayer => Boolean(layer));
   return layers.length > 0 ? layers : undefined;
+}
+
+function normalizeLayerSelection(value: unknown): MemoryLayer[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const layers = value.map((item) => {
+    const layer = parseLayerValue(item);
+    if (!layer) {
+      throw new MemoryServiceError(
+        "invalid_argument",
+        "turn.start layers must contain only L1, L2, L3, or Skill"
+      );
+    }
+    return layer;
+  });
+  return [...new Set(layers)];
 }
 
 function parseStatus(value: string | null): "activated" | "resolving" | "archived" | "deleted" | undefined {

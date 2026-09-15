@@ -20,6 +20,8 @@ export interface DesktopAppInfo {
   version: string;
   platform: string;
   arch: string;
+  isPackaged: boolean;
+  isWindowsStore: boolean;
   updateManifestUrl?: string;
 }
 

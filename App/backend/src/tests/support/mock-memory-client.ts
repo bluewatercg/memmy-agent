@@ -43,7 +43,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
           version: "mock-0.0.0",
           uptimeMs: Math.max(0, Date.now() - bootedAt),
           mode: "dev",
-          activeProfile: "byok",
           storage: {
             backend: "sqlite",
             schemaVersion: "mock",
@@ -64,7 +63,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     async reloadConfig() {
       failIfNeeded();
       return {
-        activeProfile: "byok",
         changed: true,
         requiresRestart: false,
         models: mockModels(),
@@ -101,7 +99,6 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         turnId: input.turnId ?? randomUUID(),
         contextPacketId: randomUUID(),
         sessionId: input.sessionId,
-        episodeId: randomUUID(),
         injectedContext: {
           markdown: "",
           sections: []
@@ -122,6 +119,8 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
         episodeId: randomUUID(),
         rawTurnId: randomUUID(),
         l1MemoryId: randomUUID(),
+        l1MemoryIds: [],
+        closedEpisodeIds: [],
         scheduledEvolution: false,
         jobs: [],
         ...nextChange(),
@@ -281,7 +280,7 @@ export function createMockMemoryClient(options: CreateMockMemoryClientOptions = 
     async panelOverview() {
       failIfNeeded();
       return {
-        counts: { memories: 0, skills: 0, experiences: 0, worldModels: 0 },
+        counts: { memories: 0, userMemories: 0, skills: 0, experiences: 0, worldModels: 0 },
         dailyActivity: emptyPanelDays(now()),
         sourceDistribution: []
       };
@@ -354,19 +353,22 @@ function mockModels() {
       provider: "mock",
       model: "mock-summary",
       configured: true,
-      remote: false
+      remote: false,
+      routing: "fixed" as const
     },
     evolution: {
       provider: "mock",
       model: "mock-skill",
       configured: true,
-      remote: false
+      remote: false,
+      routing: "follow" as const
     },
     embedding: {
       provider: "mock",
       model: "mock-embedding",
       configured: true,
-      remote: false
+      remote: false,
+      mode: "local" as const
     }
   };
 }

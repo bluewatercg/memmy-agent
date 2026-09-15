@@ -7,7 +7,8 @@ import { buildInvitationSignupEvent } from "../app/invitation-analytics.js";
 import { resolveInvitationToastKind } from "../app/invitation-result.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
-import { buildAccountOnboardingStartPatch, resolvePostLoginRoute } from "../app/routes.js";
+import { buildAccountOnboardingStartPatch, resolvePostLoginRoute, shouldShowFirstEncounterReport } from "../app/routes.js";
+import { setAnalyticsUserId } from "../analytics/analytics-context.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { AuthCodeForm } from "../components/auth-code-form.js";
 import { LanguageToggleButton, PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
@@ -30,6 +31,7 @@ export function TokenDetailPage() {
   const [inviteCode, setInviteCode] = useState("");
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [modePersistenceFeedback, setModePersistenceFeedback] = useState<{ text: string; tone: "error" | "success" } | null>(null);
+  const [pendingAccountOnboarding, setPendingAccountOnboarding] = useState<Partial<OnboardingStateDto> | null>(null);
   const channel = resolveDesktopAccountChannel();
   const invitationEnabled = state.bootstrap?.promotions?.invitation?.enabled === true;
   const canContinue = Boolean(identifier.trim() && code.trim());
@@ -40,6 +42,7 @@ export function TokenDetailPage() {
     setCode("");
     setInviteCode("");
     setModePersistenceFeedback(null);
+    setPendingAccountOnboarding(null);
     verificationCodeAuth.resetInteractionState();
   }, [channel, verificationCodeAuth.resetInteractionState]);
 
@@ -52,10 +55,15 @@ export function TokenDetailPage() {
   }
 
   async function submitLogin() {
-    if (!canContinue || verificationCodeAuth.loginPending || modePersistencePending) {
+    if (verificationCodeAuth.loginPending || modePersistencePending) {
       return;
     }
     setModePersistenceFeedback(null);
+    if (pendingAccountOnboarding) {
+      await continueAfterRegistration(pendingAccountOnboarding);
+      return;
+    }
+    if (!canContinue) return;
 
     const loginResult = await verificationCodeAuth.login(
       channel,
@@ -67,6 +75,8 @@ export function TokenDetailPage() {
       return;
     }
     const session = loginResult.session;
+    // Set before the signup event so it is attributed to the cloud account.
+    setAnalyticsUserId(session.profile.userId);
     const invitationToastKind = resolveInvitationToastKind(loginResult.invitationResult);
     if (invitationToastKind) {
       dispatch(appActions.showInvitationToast(invitationToastKind));
@@ -79,30 +89,31 @@ export function TokenDetailPage() {
     }));
 
     dispatch(appActions.accountUpdated({
+      userId: session.profile.userId,
       email: session.profile.email ?? "",
       phoneNumber: session.profile.phoneNumber,
       nickname: session.profile.nickname,
       registeredAt: session.profile.registeredAt
     }));
 
-    if (session.profile.hasFinishedGuide) {
-      await continueAfterRegistration({
+    const onboardingPatch: Partial<OnboardingStateDto> =
+      session.profile.hasFinishedGuide && state.bootstrap && !shouldShowFirstEncounterReport(state.bootstrap.onboarding)
+      ? {
         completed: true,
         currentStep: "completed",
         completedAt: new Date().toISOString(),
         hasAcceptedTerms: true
-      });
-      return;
-    }
-
-    await continueAfterRegistration();
+      }
+      : buildAccountOnboardingStartPatch(state.bootstrap?.onboarding);
+    setPendingAccountOnboarding(onboardingPatch);
+    await continueAfterRegistration(onboardingPatch);
   }
 
   async function continueAfterRegistration(forcedOnboarding?: Partial<OnboardingStateDto>) {
     const onboarding = state.bootstrap?.onboarding;
-    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch();
+    const onboardingPatch = forcedOnboarding ?? buildAccountOnboardingStartPatch(onboarding);
     const nextOnboarding = {
-      ...buildAccountOnboardingStartPatch(),
+      ...buildAccountOnboardingStartPatch(onboarding),
       ...onboarding,
       ...onboardingPatch
     };
@@ -116,6 +127,7 @@ export function TokenDetailPage() {
         userMode: "account",
         onboarding: onboardingPatch
       });
+      setPendingAccountOnboarding(null);
       dispatch(appActions.navigate(nextRoute));
     } catch (error) {
       console.error("persist account mode failed", error);
@@ -169,7 +181,7 @@ export function TokenDetailPage() {
                 identifierType={channel}
                 code={code}
                 inviteCode={inviteCode}
-                disabled={!canContinue || verificationCodeAuth.loginPending || modePersistencePending}
+                disabled={(!canContinue && !pendingAccountOnboarding) || verificationCodeAuth.loginPending || modePersistencePending}
                 sendCodeDisabled={verificationCodeAuth.sendCodeDisabled}
                 sendCodeLabel={verificationCodeAuth.sendCodeLabel}
                 feedback={modePersistenceFeedback ?? verificationCodeAuth.feedback}

@@ -22,7 +22,12 @@ import { logEvolutionDecision } from "./evolution-logging.js";
 import { isInactiveEvolutionMemory } from "./evolution-memory-lifecycle.js";
 import { extractProjectEvidence } from "./project-evidence.js";
 
-export type PolicyDraft = ReturnType<typeof buildPolicyDraft>;
+export type PolicyDraft = ReturnType<typeof buildPolicyDraft> & {
+  expectedOutcome?: string;
+  exclusions?: string[];
+  freshnessClass?: "stable" | "dynamic";
+  revalidateAfterDays?: number;
+};
 export type PolicyEnhancementResult =
   | { ok: true; draft: PolicyDraft }
   | { ok: false; reason: string };
@@ -31,7 +36,13 @@ type PolicyMeta = NonNullable<ReturnType<typeof policyMetaFromMemory>>;
 const L2_INDUCTION_DRAFT_MAX_ATTEMPTS = 3;
 
 type JobChangeKind = "created" | "updated" | "skipped";
-type PolicyLifecycleStatus = "candidate" | "active" | "archived";
+type PolicyLifecycleStatus =
+  | "candidate"
+  | "active"
+  | "verification_required"
+  | "quarantined"
+  | "superseded"
+  | "archived";
 
 type CandidatePoolRecord = {
   sourceMemoryId: string;
@@ -247,12 +258,18 @@ export class PolicyInductionEngine {
         signature,
         evidenceTraces: bucket,
         allTraces: this.l2GainReferenceTraces(bucket, sourceTrace.episodeId),
-        minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForInduction,
+        minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForActivation,
         minGain: this.deps.config.algorithm.l2Induction.minGain,
         archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
         tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
         gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha,
-        currentStatus: existingPolicy?.status,
+        currentStatus: existingPolicy?.status === "active"
+          ? "active"
+          : existingPolicy?.status === "candidate"
+            ? "candidate"
+            : existingPolicy
+              ? "archived"
+              : undefined,
         currentGain: existingPolicy?.gain,
         currentSupport: existingPolicy?.support
       });
@@ -283,6 +300,10 @@ export class PolicyInductionEngine {
         ...enhancement.draft,
         key: policyKey
       };
+      const freshnessClass = draft.freshnessClass ?? inferPolicyFreshness(`${draft.trigger}\n${draft.procedure}`);
+      const revalidateAfter = freshnessClass === "dynamic"
+        ? new Date(Date.parse(at) + (draft.revalidateAfterDays ?? 30) * 24 * 60 * 60 * 1000).toISOString()
+        : undefined;
 
       const l2 = this.deps.buildMemory({
         userId: source.userId,
@@ -318,11 +339,16 @@ export class PolicyInductionEngine {
           procedure: draft.procedure,
           verification: draft.verification,
           boundary: draft.boundary,
+          expected_outcome: draft.expectedOutcome,
+          exclusions: draft.exclusions,
           support: draft.support,
           gain: draft.gain,
           raw_gain: draft.rawGain,
           policy_confidence: draft.confidence,
-          status: "candidate",
+          freshness_class: freshnessClass,
+          last_verified_at: at,
+          ...(revalidateAfter ? { revalidate_after: revalidateAfter } : {}),
+          status: draft.status,
           source_episode_ids: draft.sourceEpisodeIds,
           source_trace_ids: draft.sourceTraceIds,
           policy: {
@@ -331,11 +357,16 @@ export class PolicyInductionEngine {
             procedure: draft.procedure,
             verification: draft.verification,
             boundary: draft.boundary,
+            expected_outcome: draft.expectedOutcome,
+            exclusions: draft.exclusions,
             support: draft.support,
             gain: draft.gain,
             raw_gain: draft.rawGain,
             policy_confidence: draft.confidence,
-            status: "candidate",
+            freshness_class: freshnessClass,
+            last_verified_at: at,
+            ...(revalidateAfter ? { revalidate_after: revalidateAfter } : {}),
+            status: draft.status,
             experience_type: "success_pattern",
             evidence_polarity: "positive",
             skill_eligible: true,
@@ -388,19 +419,6 @@ export class PolicyInductionEngine {
           createdAt: at
         });
       }
-      this.deps.enqueueJob({
-        jobType: "l3_abstraction",
-        userId: source.userId,
-        sessionId: source.sessionId,
-        episodeId: sourceTrace.episodeId,
-        payload: {
-          targetKind: "policy_cluster",
-          seedPolicyId: upsert.memory.id,
-          policyIds: [upsert.memory.id],
-          signature
-        },
-        createdAt: at
-      });
       this.deps.enqueueJob({
         jobType: "skill_crystallization",
         userId: source.userId,
@@ -492,6 +510,13 @@ export class PolicyInductionEngine {
           confidence?: unknown;
           support_trace_ids?: unknown;
           tags?: unknown;
+          should_generate?: unknown;
+          shouldGenerate?: unknown;
+          expected_outcome?: unknown;
+          expectedOutcome?: unknown;
+          exclusions?: unknown;
+          freshness_class?: unknown;
+          revalidate_after_days?: unknown;
         }>([
           {
             role: "system",
@@ -520,15 +545,33 @@ export class PolicyInductionEngine {
           maxTokens: 1200
         });
 
+        if (result.should_generate === false || result.shouldGenerate === false) {
+          return { ok: false, reason: "generator-declined:no-reusable-policy" };
+        }
         const invalidReason = l2InductionInvalidReason(result);
         if (invalidReason) {
           lastInvalidReason = invalidReason;
           continue;
         }
 
-        const boundary = typeof result.boundary === "string" ? skillMarkdown(result.boundary) : "";
+        const exclusions = stringArray(result.exclusions).map(skillMarkdown).filter(Boolean);
+        const caveats = stringArray(result.caveats).map(skillMarkdown).filter(Boolean);
+        const boundary = typeof result.boundary === "string"
+          ? skillMarkdown(result.boundary)
+          : exclusions.join("; ") || caveats.join("; ") || fallback.boundary;
         const procedure = skillMarkdown(firstString(result.procedure, result.action));
-        const verification = typeof result.verification === "string" ? skillMarkdown(result.verification) : "";
+        const verification = typeof result.verification === "string"
+          ? skillMarkdown(result.verification)
+          : fallback.verification;
+        const expectedOutcome = skillMarkdown(result.expected_outcome ?? result.expectedOutcome) || verification;
+        const freshnessClass = result.freshness_class === "dynamic"
+          ? "dynamic"
+          : result.freshness_class === "stable"
+            ? "stable"
+            : inferPolicyFreshness(`${result.trigger ?? ""}\n${procedure}`);
+        const revalidateAfterDays = freshnessClass === "dynamic"
+          ? clampNumber(numberOr(result.revalidate_after_days, 30), 1, 365)
+          : undefined;
         const next = {
           ...fallback,
           title: skillText(result.title),
@@ -536,6 +579,10 @@ export class PolicyInductionEngine {
           procedure,
           verification,
           boundary,
+          expectedOutcome,
+          exclusions,
+          freshnessClass,
+          revalidateAfterDays,
           confidence: clampNumber(numberOr(result.confidence, fallback.confidence), 0, 1)
         };
 
@@ -590,11 +637,11 @@ export class PolicyInductionEngine {
     return best?.policy ?? null;
   }
 
-  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): void {
+  recomputePolicyStats(policyId: string, at: string, triggerEpisodeId?: string): MemoryRow | undefined {
     const memory = this.deps.repos.memories.get(policyId);
-    if (!memory || memory.memoryLayer !== "L2") return;
+    if (!memory || memory.memoryLayer !== "L2") return undefined;
     const policy = policyMetaFromMemory(memory);
-    if (!policy) return;
+    if (!policy) return undefined;
 
     const linkedTraceIds = new Set(
       this.deps.repos.runtime
@@ -611,29 +658,60 @@ export class PolicyInductionEngine {
 
     const linkedTraces = allTraces.filter((trace) => linkedTraceIds.has(trace.id));
     const evidenceTraces = linkedTraces;
-    if (evidenceTraces.length === 0) return;
+    if (evidenceTraces.length === 0) {
+      const archived = this.deps.repos.memories.update(updatePolicyStats(memory, {
+        support: 0,
+        gain: policy.gain,
+        rawGain: policy.gain,
+        status: "quarantined",
+        sourceEpisodeIds: [],
+        sourceTraceIds: [],
+        updatedAt: at
+      }));
+      this.deps.enqueueChange({
+        memoryId: archived.id,
+        namespaceId: this.deps.namespaceIdFromMemory(archived),
+        kind: kindFromMemory(archived),
+        op: "updated",
+        entityId: archived.id,
+        userId: archived.userId,
+        changeType: "policy_evidence_invalidated",
+        before: memory,
+        after: archived,
+        source: "governance.l1_invalidation",
+        createdAt: at
+      });
+      return archived;
+    }
 
     const gainReferenceTraces = this.l2GainReferenceTraces(evidenceTraces, triggerEpisodeId);
     const stats = buildPolicyDraft({
       signature: policy.signature,
       evidenceTraces,
       allTraces: gainReferenceTraces,
-      minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForInduction,
+      minSupport: this.deps.config.algorithm.l2Induction.minEpisodesForActivation,
       minGain: this.deps.config.algorithm.l2Induction.minGain,
       archiveGain: this.deps.config.algorithm.l2Induction.archiveGain,
       tauSoftmax: this.deps.config.algorithm.l2Induction.tauSoftmax,
       gainEmaAlpha: this.deps.config.algorithm.l2Induction.gainEmaAlpha,
-      currentStatus: policy.status,
+      currentStatus: policy.status === "active"
+        ? "active"
+        : policy.status === "archived"
+          ? "archived"
+          : "candidate",
       currentGain: policy.gain,
       currentSupport: policy.support
     });
 
     const previous = memory;
+    const nextStatus: PolicyLifecycleStatus = policy.status === "active" && stats.status !== "active"
+      ? "verification_required"
+      : stats.status;
     const next = updatePolicyStats(memory, {
       support: stats.support,
       gain: stats.gain,
       rawGain: stats.rawGain,
-      status: stats.status,
+      status: nextStatus,
       sourceEpisodeIds: stats.sourceEpisodeIds,
       sourceTraceIds: stats.sourceTraceIds,
       updatedAt: at
@@ -662,21 +740,6 @@ export class PolicyInductionEngine {
     if (savedPolicy) {
       if (savedPolicy.status === "active") {
         this.deps.enqueueJob({
-          jobType: "l3_abstraction",
-          userId: saved.userId,
-          sessionId: saved.sessionId,
-          episodeId: triggerEpisodeId,
-          payload: {
-            reason: "l2.policy.updated",
-            targetKind: "policy_cluster",
-            seedPolicyId: saved.id,
-            policyIds: [saved.id],
-            previousStatus: policy.status,
-            status: savedPolicy.status
-          },
-          createdAt: at
-        });
-        this.deps.enqueueJob({
           jobType: "skill_crystallization",
           userId: saved.userId,
           sessionId: saved.sessionId,
@@ -692,6 +755,7 @@ export class PolicyInductionEngine {
       }
       this.deps.onSkillRewardDrift(savedPolicy, at);
     }
+    return saved;
   }
 
   private l2GainReferenceTraces(evidenceTraces: TraceMeta[], triggerEpisodeId?: string): TraceMeta[] {
@@ -764,6 +828,9 @@ export class PolicyInductionEngine {
     });
     const reusableCandidate = evidence.candidateType === "policy" || evidence.candidateType === "avoidance";
     return reusableCandidate && evidence.risk !== "high" && evidence.activation !== "rejected" &&
+      trace.memory.properties.internal_info.policy_eligible !== false &&
+      trace.memory.properties.internal_info.evidence_status !== "provisional" &&
+      trace.memory.properties.internal_info.evidence_status !== "disputed" &&
       trace.value >= this.deps.config.algorithm.l2Induction.minTraceValue &&
       Boolean(trace.vecSummary ?? trace.vecAction);
   }
@@ -904,7 +971,21 @@ function l2InductionInvalidReason(result: unknown): string | null {
   if (!firstString(result.procedure, result.action)) {
     return "llm-failed: l2.induction.invalid: missing procedure";
   }
+  if (
+    !firstString(result.boundary) &&
+    stringArray(result.exclusions).length === 0 &&
+    stringArray(result.caveats).length === 0
+  ) {
+    return "llm-failed: l2.induction.invalid: missing exclusions";
+  }
   return null;
+}
+
+function inferPolicyFreshness(text: string): "stable" | "dynamic" {
+  return /(?:当前|实时|最新|业务数据|数据源|市场|库存|价格|策略变化|产品行为|外部\s*API)|\b(?:current|latest|live|real[- ]time|business data|data source|market|inventory|price|external api|product behavior)\b/i
+    .test(text)
+    ? "dynamic"
+    : "stable";
 }
 
 function uniq<T>(values: T[]): T[] {
@@ -916,6 +997,12 @@ function firstString(...values: unknown[]): string | undefined {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
   return undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
+    : [];
 }
 
 
@@ -983,7 +1070,7 @@ function roundNumber(value: number, digits = 4): number {
 }
 
 function memoryStatusForLifecycleStatus(status: PolicyLifecycleStatus): "activated" | "resolving" | "archived" {
-  if (status === "archived") return "archived";
+  if (status !== "candidate" && status !== "active") return "archived";
   return status === "candidate" ? "resolving" : "activated";
 }
 

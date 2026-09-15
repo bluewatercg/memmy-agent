@@ -1,15 +1,22 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { ChevronLeft, Image as ImageIcon, Mic } from "lucide-react";
-import type { ModelProviderConfig } from "../api/config-client.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
 import { persistLoginModeSelection } from "../app/login-mode.js";
 import { useApiClients } from "../app/providers.js";
 import { buildByokOnboardingGuidePatch, resolveByokModelCompletion } from "../app/routes.js";
 import { PAGE_CORNER_ACTION_CONTAINER_STYLE, PageCornerActionButton } from "../components/language-toggle-button.js";
+import { ModelProviderLogo } from "../components/model-provider-logo.js";
 import { Select } from "../components/Select.js";
 import { useTranslation } from "../i18n/use-translation.js";
 import { appActions } from "../state/app-actions.js";
 import { useAppState } from "../state/app-state.js";
+import {
+  assignedCatalogEndpointId,
+  assignCatalogPreset,
+  createModelWorkspace,
+  modelConfigInput,
+  upsertByokPreset
+} from "../state/model-workspace.js";
 import {
   API_KEY_CARD_CLASS,
   API_KEY_PRIMARY_BTN_CLASS,
@@ -36,14 +43,17 @@ import {
   IMAGE_DEFAULT_MODEL_IDS,
   IMAGE_PROTOCOL_OPTIONS,
   createAsrModelFormValues,
-  createAsrProviderConfig,
   createImageGenModelFormValues,
-  createImageGenProviderConfig,
   createTestModelConnectionMessages,
   hydrateModelConfigForm,
   testModelConnection,
   type ImageProtocol
 } from "./model-config.js";
+
+interface SavedEndpointIdentity {
+  endpointId: string;
+  credentialSignature: string;
+}
 
 export function ApiKeyOptionalPage() {
   const { state, dispatch } = useAppState();
@@ -76,9 +86,43 @@ export function ApiKeyOptionalPage() {
   const isImageGenUsable = canSaveModelConfig(imageGenFormValues, imageGenValidation);
   const imageGenTestKey = createModelConfigValidationKey(imageGenFormValues);
   const isImageGenTestStale = Boolean(imageGenValidation.testedKey && imageGenValidation.testedKey !== imageGenTestKey);
+  const imageGenEndpointProtocol = imageGenProtocol === "qwen"
+    ? "dashscope-multimodal-generation"
+    : "openai-images";
+  const asrCredentialSignature = endpointCredentialSignature(
+    "qwen",
+    "dashscope-input-audio-chat",
+    asrEndpoint,
+    asrApiKey,
+    asrApiKeyMasked
+  );
+  const imageGenCredentialSignature = endpointCredentialSignature(
+    imageGenProtocol,
+    imageGenEndpointProtocol,
+    imageGenEndpoint,
+    imageGenApiKey,
+    imageGenApiKeyMasked
+  );
+  const saveSignature = JSON.stringify({
+    asr: isAsrUsable ? asrTestKey : null,
+    imageGeneration: isImageGenUsable ? imageGenTestKey : null
+  });
+  const savedCatalogSignatureRef = useRef<string | null>(null);
+  const initialWorkspace = createModelWorkspace(state.modelConfig);
+  const initialAsrEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "asr");
+  const initialImageEndpointId = assignedCatalogEndpointId(initialWorkspace, "byok", "image_generation");
+  const savedEndpointIdentitiesRef = useRef<Partial<Record<"asr" | "imageGeneration", SavedEndpointIdentity>>>({
+    ...(initialAsrEndpointId
+      ? { asr: { endpointId: initialAsrEndpointId, credentialSignature: asrCredentialSignature } }
+      : {}),
+    ...(initialImageEndpointId
+      ? { imageGeneration: { endpointId: initialImageEndpointId, credentialSignature: imageGenCredentialSignature } }
+      : {})
+  });
   const [optionalModelMissingWarning, setOptionalModelMissingWarning] = useState<OptionalModelMissingWarningKind | null>(null);
   const [modePersistencePending, setModePersistencePending] = useState(false);
   const [nextValidationError, setNextValidationError] = useState<"noInput" | "testRequired" | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   function changeImageGenProtocol(nextProtocol: string) {
     const next = (IMAGE_PROTOCOL_OPTIONS.find((option) => option.value === nextProtocol)?.value ?? "openai") as ImageProtocol;
@@ -124,33 +168,75 @@ export function ApiKeyOptionalPage() {
     void continueAfterWarning();
   }
 
-  function createModelConfigDraft(): ModelProviderConfig {
-    return {
-      ...state.modelConfig,
-      asr: isAsrUsable ? createAsrProviderConfig(asrModel, asrEndpoint, asrApiKey, asrApiKeyMasked) : null,
-      imageGen: isImageGenUsable
-        ? createImageGenProviderConfig(imageGenProtocol, imageGenModel, imageGenEndpoint, imageGenApiKey, imageGenApiKeyMasked)
-        : null
-    };
-  }
-
   async function continueAfterWarning() {
-    if (modePersistencePending) {
+    if (modePersistencePending || !clients?.config) {
       return;
     }
 
-    const configDraft = createModelConfigDraft();
-    dispatch(appActions.modelConfigUpdated(configDraft));
-
+    setSaveError(null);
     try {
       setModePersistencePending(true);
-      const savedConfig = await (clients?.config.saveModelConfig(configDraft) ?? Promise.resolve(configDraft));
-      dispatch(appActions.modelConfigUpdated(savedConfig));
+      if (savedCatalogSignatureRef.current !== saveSignature) {
+        const latest = await clients.config.getModelConfig();
+        let workspace = createModelWorkspace(latest);
+        if (isAsrUsable) {
+          const savedAsrIdentity = savedEndpointIdentitiesRef.current.asr;
+          const asrEndpointId = savedAsrIdentity?.credentialSignature === asrCredentialSignature
+            ? savedAsrIdentity.endpointId
+            : undefined;
+          const asr = upsertByokPreset(workspace, {
+            provider: "qwen",
+            ...(asrEndpointId ? { endpointId: asrEndpointId } : {}),
+            endpoint: asrEndpoint,
+            protocol: "dashscope-input-audio-chat",
+            ...(asrApiKey.trim() ? { apiKey: asrApiKey.trim() } : {}),
+            ...(asrApiKeyMasked ? { apiKeyMasked: asrApiKeyMasked } : {}),
+            model: asrModel || ASR_MODEL_ID,
+            capabilities: ["asr"]
+          });
+          workspace = assignCatalogPreset(asr.workspace, "byok", "asr", asr.presetId);
+        }
+        if (isImageGenUsable) {
+          const savedImageIdentity = savedEndpointIdentitiesRef.current.imageGeneration;
+          const imageEndpointId = savedImageIdentity?.credentialSignature === imageGenCredentialSignature
+            ? savedImageIdentity.endpointId
+            : undefined;
+          const image = upsertByokPreset(workspace, {
+            provider: imageGenProtocol,
+            ...(imageEndpointId ? { endpointId: imageEndpointId } : {}),
+            endpoint: imageGenEndpoint,
+            protocol: imageGenEndpointProtocol,
+            ...(imageGenApiKey.trim() ? { apiKey: imageGenApiKey.trim() } : {}),
+            ...(imageGenApiKeyMasked ? { apiKeyMasked: imageGenApiKeyMasked } : {}),
+            model: imageGenModel,
+            capabilities: ["image_generation"]
+          });
+          workspace = assignCatalogPreset(image.workspace, "byok", "image_generation", image.presetId);
+        }
+        const savedConfig = await clients.config.saveModelCatalog(modelConfigInput(workspace));
+        if (!savedConfig.catalog?.modelAssignments.byok.agent.candidates.length) {
+          throw new Error("persisted BYOK Agent assignment is empty");
+        }
+        dispatch(appActions.modelConfigUpdated(savedConfig));
+        const savedWorkspace = createModelWorkspace(savedConfig);
+        const savedAsrEndpointId = assignedCatalogEndpointId(savedWorkspace, "byok", "asr");
+        const savedImageEndpointId = assignedCatalogEndpointId(savedWorkspace, "byok", "image_generation");
+        savedEndpointIdentitiesRef.current = {
+          ...savedEndpointIdentitiesRef.current,
+          ...(isAsrUsable && savedAsrEndpointId
+            ? { asr: { endpointId: savedAsrEndpointId, credentialSignature: asrCredentialSignature } }
+            : {}),
+          ...(isImageGenUsable && savedImageEndpointId
+            ? { imageGeneration: { endpointId: savedImageEndpointId, credentialSignature: imageGenCredentialSignature } }
+            : {})
+        };
+        savedCatalogSignatureRef.current = saveSignature;
+      }
       const byokCompletion = resolveByokModelCompletion({
         onboarding: state.bootstrap?.onboarding ?? buildByokOnboardingGuidePatch()
       });
       await persistLoginModeSelection({
-        configClient: clients?.config,
+        configClient: clients.config,
         dispatch,
         userMode: "byok",
         onboarding: byokCompletion.onboardingPatch
@@ -159,6 +245,7 @@ export function ApiKeyOptionalPage() {
       track({ name: "byok_completed", params: { user_mode: "byok" }, consentTier: "basic" });
     } catch (error) {
       console.error("save byok optional model config failed", error);
+      setSaveError(optionalStepSaveErrorText(error, t));
     } finally {
       setModePersistencePending(false);
     }
@@ -169,6 +256,7 @@ export function ApiKeyOptionalPage() {
       return;
     }
 
+    setSaveError(null);
     setNextValidationError(null);
 
     const nextWarning = resolveOptionalModelMissingWarning({
@@ -188,6 +276,7 @@ export function ApiKeyOptionalPage() {
       return;
     }
 
+    setSaveError(null);
     setNextValidationError(null);
 
     const asrHasInput = Boolean(asrApiKey.trim());
@@ -284,7 +373,8 @@ export function ApiKeyOptionalPage() {
               className="select-control--subtle"
               options={IMAGE_PROTOCOL_OPTIONS.map((option) => ({
                 value: option.value,
-                label: t(option.labelKey)
+                label: t(option.labelKey),
+                icon: <ModelProviderLogo provider={option.value} size={16} />
               }))}
             />
             <ConfigField
@@ -330,6 +420,14 @@ export function ApiKeyOptionalPage() {
           </div>
         )}
 
+        {saveError ? (
+          <div className="agent-model-error-notice mb-3" role="alert">
+            <div className="agent-model-error-notice__header">
+              <p className="agent-model-error-notice__title">{saveError}</p>
+            </div>
+          </div>
+        ) : null}
+
         <div className="flex gap-3">
           <button
             type="button"
@@ -353,4 +451,33 @@ export function ApiKeyOptionalPage() {
       {optionalModelMissingWarning && <OptionalModelMissingWarningModal kind={optionalModelMissingWarning} onClose={closeOptionalModelMissingWarning} />}
     </div>
   );
+}
+
+function endpointCredentialSignature(
+  provider: string,
+  protocol: string,
+  endpoint: string,
+  apiKey: string,
+  apiKeyMasked: string
+): string {
+  const normalizedApiKey = apiKey.trim();
+  const normalizedMaskedApiKey = apiKeyMasked.trim();
+  return JSON.stringify({
+    provider: provider.trim().toLowerCase(),
+    protocol,
+    endpoint: endpoint.trim().replace(/\/+$/, ""),
+    credential: normalizedMaskedApiKey ? `masked:${normalizedMaskedApiKey}` : `raw:${normalizedApiKey}`
+  });
+}
+
+function optionalStepSaveErrorText(
+  error: unknown,
+  t: ReturnType<typeof useTranslation>["t"]
+): string {
+  const code = error && typeof error === "object" && "code" in error ? error.code : null;
+  if (code === "model_config_changed") return t("settings.model.configChanged");
+  if (code === "config_write_busy") return t("settings.modelWorkspace.saveBusy");
+  return error instanceof Error && error.message
+    ? error.message
+    : t("settings.modelWorkspace.saveFailed");
 }

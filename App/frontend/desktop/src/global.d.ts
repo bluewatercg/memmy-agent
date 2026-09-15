@@ -27,8 +27,10 @@ declare global {
   interface Window {
     memmy?: {
       platform: string;
+      notifyRendererReady(): void;
       getRuntimeConfig(): Promise<unknown>;
       getAppInfo(): Promise<DesktopAppInfo>;
+      getInstallationId(): Promise<string>;
       checkForUpdates(): Promise<DesktopUpdateCheckResult>;
       downloadUpdate(update: DesktopUpdateCheckResult, options?: import("@memmy/desktop-interface").DesktopUpdateDownloadOptions): Promise<DesktopUpdateInstallResult>;
       onUpdateDownloadProgress(callback: (progress: DesktopUpdateDownloadProgress) => void): () => void;
@@ -45,6 +47,8 @@ declare global {
       exportDiagnosticsReport(): Promise<MemmyDiagnosticsReportExportResult>;
       getLogLevel(): Promise<"error" | "warn" | "info" | "debug">;
       setLogLevel(level: "error" | "warn" | "info" | "debug"): Promise<void>;
+      getLaunchAtLogin(): Promise<boolean>;
+      setLaunchAtLogin(enabled: boolean): Promise<boolean>;
       getMicrophoneAccessStatus(): Promise<MemmyMicrophoneAccessStatus>;
       requestMicrophoneAccess(): Promise<MemmyMicrophoneAccessStatus>;
       selectProjectDirectory(): Promise<DesktopProjectDirectorySelection>;

@@ -1,20 +1,29 @@
-
 <br>
 <div align="center">
-  <a href="https://memmy.bot/">
+  <a href="https://memmy.cn/">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-      <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-      <img alt="Memmy Logo" src="docs/assets/logo-light.svg" width="50%">
+      <img alt="Memmy Logo" src="docs/assets/banner-zh.png">
     </picture>
   </a>
 </div>
 <br>
 <br>
+<p align="center">
+    <a href="https://memmy.cn/docs/"><img src="https://img.shields.io/badge/Docs-Get--Start-64716C?labelColor=gray&style=for-the-badge&logo=googledocs&logoColor=white" alt="Docs"></a>
+    <a href="https://memmy.cn/"><img src="https://img.shields.io/badge/Visit-Memmy_官网-006400?labelColor=gray&style=for-the-badge&logo=safari&logoColor=white" alt="Memmy 官网"></a>
+    <a href="https://github.com/MemTensor/memmy-agent/releases/latest"><img src="https://img.shields.io/badge/News-安装Memmy-ED8D45?labelColor=gray&style=for-the-badge&logo=applenews&logoColor=white" alt="Memmy 最新版"></a>
+    <a href="docs/assets/wechat-code.png"><img src="https://img.shields.io/badge/WeCom-Memmy_社区-07C160?labelColor=gray&style=for-the-badge&logo=wechat&logoColor=white" alt="WeChat"></a>
+    <a href="https://x.com/Memmy_ai"><img src="https://img.shields.io/badge/Follow-Memmy-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
+</p>
+<p align="center">
+    <a href="https://www.producthunt.com/products/memmy?embed=true&utm_source=badge-top-post-badge&utm_medium=badge&utm_campaign=badge-memmy-agent" target="_blank" rel="noopener noreferrer"><img alt="Memmy Agent - Let every AI remember the same you. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/top-post-badge.svg?post_id=1203499&theme=light&period=daily&t=1786083567983"></a>
+</p>
 
 <div align="center">
 
-## Memmy — 跨 Agent 记忆层，自托管部署
+## 让你的工作在 DeepSeek Harness、Claude Code 和 Codex 等 Agent 之间接着做。
+
+  [项目简介](#memmy-是什么) · [快速开始](#如何使用-memmy) · [技术实现](#memmy-如何实现的) · [路线图](#路线图) · [致谢](#致谢) · [贡献者](#贡献者)
 
 </div>
 
@@ -181,67 +190,41 @@ memmy-memory namespace current              # 显示当前命名空间
 | Hermes Agent | ✅ Rollouts + state DB | — | `hermes` |
 | WorkBuddy | ✅ Projects JSONL 会话 | — | `workbuddy` |
 
-## 核心概念
 
-- **Memory 服务** — 运行 MemOS 引擎的 Docker 容器。SQLite 支撑的结构化记忆，配合 ONNX embedding、摘要和进化模型。所有 Agent 通过其 HTTP API（`:18960`）读写。
-- **项目上下文（Project Context）** — 按项目钉住的权威上下文包。通过给每个 Agent 提供相同的基线理解，防止 Agent 漂移。
-- **命名空间（Namespace）** — tenant + project 作用域。不同工作区隔离，同一项目内的 Agent 共享上下文。
-- **来源追踪（Provenance）** — 每次记忆写入携带其来源：源 Agent、适配器、工作区、Git 状态。你可以追溯任何记忆的来源。
-- **Supersession** — 记忆版本之间的稳定关系。记忆更新时，旧版本被 supersede 而非删除——完整审计轨迹。
-- **Agent 源（Agent Source）** — 从外部 Agent 的会话存储读取历史上下文的适配器，并可选安装实时 skill 以持续访问记忆。
-- **上下文包（Context Pack）** — 可导出、导入和版本化的项目级知识结构化包。
-
-## LAN / 远程访问
-
-默认绑定 `127.0.0.1:18960`。LAN 或远程访问时，在前面放一个反向代理：
-
-```
-Caddyfile 示例：
-
-memory.example.com {
-    reverse_proxy 127.0.0.1:18960
-    tls internal
-}
-```
-
-切勿将 18960 端口直接暴露到网络——API 通过 bearer token 认证，但没有传输加密。
-
-## 从源码构建
-
-### 环境要求
-
-- Node.js `>=22`
-- npm
-- Docker（用于 Memory 服务容器）
-
-### 开发
+#### 4. 源码启动
 
 ```bash
+git clone https://github.com/MemTensor/memmy-agent.git
+cd memmy-agent
+cp .env.example .env
 npm install
-
-# Memory 服务开发模式（热重载）
-npm run memory:serve:dev -- \
-  --host 127.0.0.1 --port 18960 \
-  --db ~/.memmy/memory-service/memory.sqlite \
-  --config ~/.memmy/config.yaml
-
-# 全栈（Memory + Agent API + Gateway + 前端）
+npm run build
 bash scripts/dev-start.sh
-
-# 测试
-npm run test
-
-# 类型检查
-npm run typecheck
 ```
 
-### 仅 Docker 镜像
+脚本会安装依赖、构建服务并启动开发环境。需要 Node.js `>=22` 和 npm；Windows 请使用 Git Bash。
 
-```bash
-docker compose build    # 重新构建 Memory 镜像
-docker compose up -d    # 用新镜像重启
-```
 
+
+
+<a id="architecture"></a>
+
+## Memmy 如何实现的？
+
+架构、记忆服务和接入方式的详细说明见 [Memmy 文档](https://memmy.bot/docs/)。
+
+<p align="center">
+  <img src="docs/assets/memmy-architecture-zh.png" alt="Memmy 系统架构：多个 Agent 和入口共享本地 Memory 与 Agent Runtime">
+</p>
+<br>
+
+## 路线图
+
+Memmy 做的是**个人记忆基础设施**，边界不止于 Coding Agent：
+
+- **更多记忆来源**——从 AI 对话扩展到浏览器行为、本地文档，乃至更多终端与硬件设备。
+- **团队协作**——规划中的 Agent 间协作能力，让团队成员的 AI 助手在隐私保护下共享知识。
+<br>
 ## 致谢
 
 本 Fork 基于 [MemTensor/memmy-agent](https://github.com/MemTensor/memmy-agent)，而上游站在一群优秀的开源项目肩上：

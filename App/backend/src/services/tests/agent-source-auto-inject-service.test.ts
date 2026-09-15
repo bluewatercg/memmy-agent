@@ -40,6 +40,7 @@ describe("agent source auto inject service", () => {
       ok: true,
       skipped: false,
       installed: ["cursor", "omp", "opencode", "openclaw", "workbuddy", "freebuff"],
+      installed: ["cursor", "opencode", "openclaw", "deepseek_harness", "workbuddy", "pi", "qwenwork"],
       failed: []
     });
     expect(calls).toEqual([
@@ -47,8 +48,11 @@ describe("agent source auto inject service", () => {
       "plugin:omp:auto_inject",
       "plugin:opencode:auto_inject",
       "plugin:openclaw:auto_inject",
+      "plugin:deepseek_harness:auto_inject",
       "skill:workbuddy",
       "skill:freebuff",
+      "skill:pi",
+      "skill:qwenwork",
     ]);
   });
 
@@ -118,8 +122,11 @@ function createAgentSources(calls: string[]) {
         source("omp", "not_connected", true),
         source("opencode", "not_connected", true),
         source("openclaw", "not_connected", true),
+        source("deepseek_harness", "not_connected", true),
         source("workbuddy", "not_connected", true),
         source("freebuff", "not_connected", true),
+        source("pi", "not_connected", true),
+        source("qwenwork", "not_connected", true),
         source("custom", "not_connected", false)
       ];
     },

@@ -18,6 +18,7 @@ import type {
   MemoryProcessingStatusOutput,
   MemoryReloadConfigInput,
   MemoryReloadConfigOutput,
+  RecallEvidenceOutput,
   PanelAnalysisOutput,
   PanelItemsInput,
   PanelItemsOutput,
@@ -59,22 +60,28 @@ import type {
 } from "@memmy/local-api-contracts";
 
 /** Contract for memory client. */
+export interface MemoryRequestContext {
+  timeZone?: string;
+  userId?: string;
+}
+
 export interface MemoryClient {
   health(): Promise<MemoryHealthSnapshot>;
   reloadConfig(input?: MemoryReloadConfigInput): Promise<MemoryReloadConfigOutput>;
+  exportBundle?(): Promise<Record<string, unknown>>;
+  clearAllData?(): Promise<{ ok: true; clearedAt: string; cleared: Record<string, number> }>;
 
-  openSession(input: OpenSessionInput): Promise<OpenSessionOutput>;
-  closeSession(input: CloseSessionInput & { sessionId: string }): Promise<CloseSessionOutput>;
+  openSession(input: OpenSessionInput, context?: MemoryRequestContext): Promise<OpenSessionOutput>;
+  closeSession(input: CloseSessionInput & { sessionId: string }, context?: MemoryRequestContext): Promise<CloseSessionOutput>;
 
-  startTurn(input: StartTurnInput): Promise<StartTurnOutput>;
-  completeTurn(input: CompleteTurnInput & { turnId: string }): Promise<CompleteTurnOutput>;
+  startTurn(input: StartTurnInput, context?: MemoryRequestContext): Promise<StartTurnOutput>;
+  completeTurn(input: CompleteTurnInput & { turnId: string }, context?: MemoryRequestContext): Promise<CompleteTurnOutput>;
 
-  search(input: SearchInput): Promise<SearchOutput>;
-  addMemory(input: AddMemoryInput): Promise<AddMemoryOutput>;
-  getMemory(input: { memoryId: string }): Promise<GetMemoryOutput>;
-  memoryHistory(memoryId: string): Promise<MemoryHistoryOutput>;
-  restoreMemory(input: RestoreMemoryInput & { memoryId: string; targetVersion: number }): Promise<RestoreMemoryOutput>;
-  deleteMemory(input: DeleteMemoryInput & { memoryId: string }): Promise<DeleteMemoryOutput>;
+  search(input: SearchInput, context?: MemoryRequestContext): Promise<SearchOutput>;
+  addMemory(input: AddMemoryInput, context?: MemoryRequestContext): Promise<AddMemoryOutput>;
+  getMemory(input: { memoryId: string }, context?: MemoryRequestContext): Promise<GetMemoryOutput>;
+  deleteMemory(input: DeleteMemoryInput & { memoryId: string }, context?: MemoryRequestContext): Promise<DeleteMemoryOutput>;
+  recallEvidence(queryId: string, context?: MemoryRequestContext): Promise<RecallEvidenceOutput>;
 
   enqueueImportSummaries(memoryIds?: string[]): Promise<EnqueueImportSummariesOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
@@ -82,28 +89,15 @@ export interface MemoryClient {
   runWorker(input: {
     limit: number;
     targetMemoryIds?: string[];
+    priorityCohortOnly?: boolean;
     signal?: AbortSignal;
     timeoutMs?: number;
   }): Promise<WorkerRunOutput>;
 
-  panelOverview(): Promise<PanelOverviewOutput>;
-  panelAnalysis(): Promise<PanelAnalysisOutput>;
-  projectContextPack(projectId: string): Promise<ProjectContextPackOutput>;
-  projectContextState(namespace: RuntimeNamespace): Promise<ProjectContextReadState>;
-  proposeProjectGoal(input: ProjectContextProposeGoalInput): Promise<ProjectGoalRecord>;
-  approveProjectGoal(goalId: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
-  rejectProjectGoal(goalId: string, input: ProjectContextGoalDecisionInput): Promise<ProjectGoalRecord>;
-  createProjectWorkItem(input: ProjectContextWorkItemCreateInput): Promise<ProjectWorkItemRecord>;
-  updateProjectWorkItem(workItemId: string, input: ProjectContextWorkItemUpdateInput): Promise<ProjectWorkItemRecord>;
-  setProjectFocus(input: ProjectContextFocusInput): Promise<ProjectWorkItemRecord | null>;
-  listTopicInbox(input: TopicInboxListInput): Promise<TopicInboxListOutput>;
-  refreshTopicInbox(input: TopicInboxRefreshInput): Promise<TopicInboxRefreshOutput>;
-  decideTopicCandidate(candidateId: string, input: TopicCandidateDecisionInput): Promise<TopicCandidateDecisionOutput>;
-  mergeTopics(topicId: string, input: TopicInboxMergeInput): Promise<TopicInboxMergeOutput>;
-  splitTopic(topicId: string, input: TopicInboxSplitInput): Promise<TopicInboxSplitOutput>;
-  topicEvidence(topicId: string, input: TopicInboxEvidenceInput): Promise<TopicInboxEvidenceOutput>;
-  panelItems(input: PanelItemsInput): Promise<PanelItemsOutput>;
-  panelTasks(input: PanelTasksInput): Promise<PanelTasksOutput>;
-  deletePanelTask(taskId: string): Promise<DeletePanelTaskOutput>;
-  memoryApiLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
+  panelOverview(context?: MemoryRequestContext): Promise<PanelOverviewOutput>;
+  panelAnalysis(context?: MemoryRequestContext): Promise<PanelAnalysisOutput>;
+  panelItems(input: PanelItemsInput, context?: MemoryRequestContext): Promise<PanelItemsOutput>;
+  panelTasks(input: PanelTasksInput, context?: MemoryRequestContext): Promise<PanelTasksOutput>;
+  deletePanelTask(taskId: string, context?: MemoryRequestContext): Promise<DeletePanelTaskOutput>;
+  memoryApiLogs(input: MemoryApiLogsInput, context?: MemoryRequestContext): Promise<MemoryApiLogsOutput>;
 }

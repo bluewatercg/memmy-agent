@@ -1588,11 +1588,7 @@ export function memoryPanelHtml(): string {
     function renderTopicCard(topic) {
       const candidates = (topic.candidates || []).filter((candidate) => candidate.status === "pending" || candidate.status === "deferred");
       const evidence = state.topicEvidence[topic.id];
-<<<<<<< Updated upstream
       const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map((candidate) => '<article class="candidate-card"><div class="review-card-head"><strong>' + esc(candidate.title) + '</strong><div class="tag-list"><span class="pill layer-' + esc(candidate.proposedLayer) + '">' + esc(candidate.proposedLayer) + '</span><span class="pill">' + esc(candidate.status) + '</span></div></div><p>' + esc(candidate.conclusion) + '</p><div class="candidate-actions"><button data-topic-action="approve" data-candidate-id="' + esc(candidate.id) + '">批准</button><button data-topic-action="edit" data-candidate-id="' + esc(candidate.id) + '">修改后批准</button><button data-topic-action="defer" data-candidate-id="' + esc(candidate.id) + '" class="ghost">延后</button><button data-topic-action="reject" data-candidate-id="' + esc(candidate.id) + '" class="ghost">拒绝</button></div></article>').join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
-=======
-      const candidateHtml = candidates.length ? '<div class="candidate-list">' + candidates.map(renderTopicCandidate).join("") + '</div>' : '<div class="empty">暂无待审核候选</div>';
->>>>>>> Stashed changes
       const evidenceHtml = evidence ? '<div class="topic-evidence">' + (evidence.items || []).map((item) => '<article class="evidence-item"><div class="tag-list"><span class="pill mono">' + esc(item.memoryId) + '</span><span class="pill">' + esc(item.role) + '</span></div><p>' + esc(item.summary || item.rawText || "") + '</p></article>').join("") + '</div>' : '';
       return '<article class="topic-card" data-topic-id="' + esc(topic.id) + '"><div class="topic-card-head"><div><h3>' + esc(topic.title) + '</h3><p>' + esc(topic.summary || "暂无摘要") + '</p><div class="topic-meta"><span class="pill">' + esc(topic.status) + '</span><span class="pill">' + esc(formatNumber(topic.evidenceCount)) + ' 条证据</span><span class="pill">v' + esc(topic.version) + '</span></div></div><div class="topic-actions"><button data-topic-action="decision" data-topic-id="' + esc(topic.id) + '" class="primary">' + topicDecisionActionLabel(topic.id) + '</button><button data-topic-action="evidence" data-topic-id="' + esc(topic.id) + '" class="ghost">' + (evidence ? '收起证据' : '查看证据') + '</button><button data-topic-action="merge" data-topic-id="' + esc(topic.id) + '" class="ghost">合并</button><button data-topic-action="split" data-topic-id="' + esc(topic.id) + '" class="ghost">拆分</button></div></div>' + candidateHtml + evidenceHtml + '</article>';
     }
@@ -1651,11 +1647,7 @@ export function memoryPanelHtml(): string {
       await topicActionRequest("/api/v1/topic-inbox/topics/" + encodeURIComponent(topicId) + "/split", { ...topicMutation(selectedTopicNamespace()), expectedVersion: topic.version, title, summary, evidenceMemoryIds: evidenceIds.split(",").map((id) => id.trim()).filter(Boolean) }, "主题已拆分");
     }
     async function topicActionRequest(path, input, success) { try { await api(path, { method: "POST", body: JSON.stringify(input) }); showToast(success); state.topicEvidence = {}; await loadTopicInbox(); } catch (error) { if (error.status === 409) await loadTopicInbox(); throw error; } }
-<<<<<<< Updated upstream
     function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "decision" ? openTopicDecision(button.dataset.topicId || "", button) : action === "evidence" ? toggleTopicEvidence(button.dataset.topicId || "") : action === "merge" ? mergeTopic(button.dataset.topicId || "") : action === "split" ? splitTopic(button.dataset.topicId || "") : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId || ""); Promise.resolve(task).catch(showError); }; }
-=======
-    function bindTopicInboxActions() { for (const button of $("topicInboxList").querySelectorAll("button[data-topic-action]")) button.onclick = () => { const action = button.dataset.topicAction; const task = action === "evidence" ? toggleTopicEvidence(button.dataset.topicId) : action === "merge" ? mergeTopic(button.dataset.topicId) : action === "split" ? splitTopic(button.dataset.topicId) : action === "ai-review" ? reviewTopicCandidate(button.dataset.candidateId, button.textContent === "重新评审") : action === "apply-ai-review" ? applyTopicReview(button.dataset.candidateId) : decideTopicCandidate(action === "edit" ? "edit_and_approve" : action, button.dataset.candidateId); Promise.resolve(task).catch(showError); }; }
->>>>>>> Stashed changes
 
     function row(label, value, valueClass = "") { return '<div class="system-row"><span>' + esc(label) + '</span><strong class="' + esc(valueClass) + '">' + esc(value) + '</strong></div>'; }
     function renderConnectionStatus(status) {
@@ -1736,4 +1728,3 @@ export function memoryPanelHtml(): string {
   </script>
 </body>
 </html>`;
-}

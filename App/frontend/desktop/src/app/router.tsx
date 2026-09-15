@@ -12,46 +12,74 @@ import {
   type MainWindowActionResolution,
   type PetGuideChoice
 } from "./pet-guide.js";
-import { productTourTabRoute, type ProductTourTab } from "./product-tour.js";
+import {
+  ProductTourGuide,
+  productTourIncludesLogs,
+  productTourMemorySubPage,
+  productTourTabRoute,
+  type ProductTourDismissResult,
+  type ProductTourStepInfo,
+  type ProductTourTab
+} from "./product-tour.js";
 import { GlobalUpdateDialog } from "./update-coordinator.js";
-import { readCurrentRoute, readLaunchModeOverride, readTokenExhaustedDismissed, shouldShowTokenExhaustedModal, writeCurrentRoute, writeTokenExhaustedDismissed, type AppRoutePath } from "./routes.js";
-import { emitTokenExhaustedApplyMoreRequest, writeTokenExhaustedApplyMoreRequest } from "./token-exhausted-apply-more.js";
+import {
+  clearDeferredGuidanceStep,
+  clearProductTourStep,
+  readCurrentRoute,
+  readDeferredGuidanceStep,
+  readLaunchModeOverride,
+  writeCurrentRoute,
+  writeDeferredGuidanceStep,
+  writeGuidanceCompleted,
+  type AppRoutePath,
+  type DeferredGuidanceStep
+} from "./routes.js";
+import { persistNickname } from "./nickname.js";
+import { useOptionalApiClients } from "./providers.js";
 import { useAppState } from "../state/app-state.js";
 import { useAnalytics } from "../analytics/use-analytics.js";
+import {
+  buildOnboardingCompletedEvent,
+  buildOnboardingStepCompletedEvent,
+  buildProductTourStepEvent
+} from "../analytics/onboarding-analytics.js";
 import { buildRoutePageViewEvent, shouldDeferRoutePageView } from "../analytics/page-view.js";
 import { appActions } from "../state/app-actions.js";
+import { NicknameModal } from "../components/nickname-modal.js";
+import { randomNickname } from "../lib/nickname.js";
+import { useTranslation } from "../i18n/use-translation.js";
 import { ApiKeyPage } from "../pages/api-key-page.js";
 import { ApiKeyOptionalPage } from "../pages/api-key-optional-page.js";
 import { ModelPage } from "../pages/model-page.js";
 import { HomePage } from "../pages/home-page.js";
 import { LoginPage } from "../pages/login-page.js";
-import { MemoryPage } from "../pages/memory-page.js";
+import { MemoryPage, writeMemorySubPage } from "../pages/memory-page.js";
 import { OnboardingPage } from "../pages/onboarding-page.js";
 import { PetPage } from "../pages/pet-page.js";
 import { SettingsPage } from "../pages/settings-page.js";
 import { StartupScreen } from "../pages/startup-screen.js";
 import { TokenDetailPage } from "../pages/token-detail-page.js";
-import { TokenExhaustedModal } from "../pages/token-exhausted-modal.js";
 import { ToolsPage } from "../pages/tools-page.js";
 import { WelcomePage } from "../pages/welcome-page.js";
+
+function readWorkspaceGuidanceOverlay(storage: Storage | undefined): Extract<DeferredGuidanceStep, "product_tour" | "nickname"> | null {
+  const step = readDeferredGuidanceStep(storage);
+  return step === "product_tour" || step === "nickname" ? step : null;
+}
+
 /** Handles app router. */
 export function AppRouter(props: { onRetry: () => void }) {
   const { state, dispatch } = useAppState();
+  const { clients } = useOptionalApiClients();
   const { track, ready: analyticsReady } = useAnalytics();
+  const { language } = useTranslation();
   const prevPathRef = useRef<AppRoutePath | null>(null);
-  const [hasDismissedTokenExhaustedModal, setHasDismissedTokenExhaustedModal] = useState(() =>
-    readTokenExhaustedDismissed(typeof window === "undefined" ? undefined : window.sessionStorage)
+  const [workspaceGuidanceStep, setWorkspaceGuidanceStep] = useState(() =>
+    readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage)
   );
-  const dismissTokenExhaustedModal = useCallback(() => {
-    writeTokenExhaustedDismissed(typeof window === "undefined" ? undefined : window.sessionStorage);
-    setHasDismissedTokenExhaustedModal(true);
-  }, []);
+  const [deferredNickname, setDeferredNickname] = useState("");
   const [petGuideRequest, setPetGuideRequest] = useState<MainWindowActionRequest | null>(null);
   const isPetWindowContext = isPetWindow(state.navigation.currentPath);
-  const shouldShowTokenModal =
-    shouldShowTokenExhaustedModal(state.bootstrap) && !isPetWindowContext;
-  const tokenModalOpen = shouldShowTokenModal && !hasDismissedTokenExhaustedModal;
-  const showApplyMoreInTokenModal = state.bootstrap?.promotions?.applyMore ?? true;
   const windowDragRegion = !isPetWindowContext ? <WindowDragRegion /> : null;
 
   const completeMainWindowAction = useCallback(
@@ -117,6 +145,15 @@ export function AppRouter(props: { onRetry: () => void }) {
 
   const currentPath = state.navigation.currentPath;
   useEffect(() => {
+    // Memory/Tools pages are not always wrapped by AppFrame; keep the product tour mounted at router level.
+    const step = readWorkspaceGuidanceOverlay(typeof window === "undefined" ? undefined : window.sessionStorage);
+    setWorkspaceGuidanceStep(step);
+    if (step === "nickname") {
+      setDeferredNickname((current) => current || randomNickname(language));
+    }
+  }, [currentPath, language, state.startup.status]);
+
+  useEffect(() => {
     if (!analyticsReady) return;
     if (currentPath === prevPathRef.current) return;
     const referrer = prevPathRef.current;
@@ -127,6 +164,51 @@ export function AppRouter(props: { onRetry: () => void }) {
 
     track(buildRoutePageViewEvent(currentPath, referrer));
   }, [currentPath, track, analyticsReady]);
+
+  function dismissProductTour(result: ProductTourDismissResult, info: ProductTourStepInfo) {
+    const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
+    const scanPermission = state.bootstrap?.onboarding.scanPermission;
+    // Intermediate steps only emit viewed. Skip adds one skipped on the current step;
+    // finishing the last CTA does not emit completed (nickname / onboarding_completed mark done).
+    if (result === "skipped") {
+      const tourEvent = buildProductTourStepEvent({
+        tab: info.tourTab,
+        choice: "skipped",
+        scanPermission
+      });
+      if (tourEvent) {
+        track(tourEvent);
+      }
+    }
+    clearProductTourStep(storage);
+    // Persist nickname step before navigating so the path-change effect does not
+    // re-read stale `product_tour` and remount the tour on /tools.
+    writeDeferredGuidanceStep(storage, "nickname");
+    setDeferredNickname(randomNickname(language));
+    setWorkspaceGuidanceStep("nickname");
+    dispatch(appActions.navigate("/main"));
+  }
+
+  function submitDeferredNickname() {
+    void persistNickname({
+      rawNickname: deferredNickname,
+      language,
+      isByok: state.bootstrap?.app.userMode === "byok",
+      storage: typeof window === "undefined" ? undefined : window.localStorage,
+      current: state.account,
+      updateProfile: (nickname) => clients?.account.updateProfile({ nickname }) ?? Promise.resolve(null)
+    }).then((update) => dispatch(appActions.accountUpdated(update)));
+    const scanPermission = state.bootstrap?.onboarding.scanPermission;
+    track(buildOnboardingStepCompletedEvent({
+      step: "nickname",
+      scanPermission
+    }));
+    // Full product guidance finished (permission → report? → tour → nickname).
+    track(buildOnboardingCompletedEvent(scanPermission));
+    writeGuidanceCompleted(typeof window === "undefined" ? undefined : window.localStorage);
+    clearDeferredGuidanceStep(typeof window === "undefined" ? undefined : window.sessionStorage);
+    setWorkspaceGuidanceStep(null);
+  }
 
   if (state.startup.status === "loading" || state.startup.status === "idle") {
     return (
@@ -150,32 +232,46 @@ export function AppRouter(props: { onRetry: () => void }) {
     <>
       {renderRoute(state.navigation.currentPath)}
       {windowDragRegion}
-      {petGuideRequest && <PetGuideModal onChoice={handlePetGuideChoice} />}
-      {tokenModalOpen && (
-        <TokenExhaustedModal
-          showApplyMore={showApplyMoreInTokenModal}
-          onApplyMore={() => {
-            const storage = typeof window === "undefined" ? undefined : window.sessionStorage;
-            writeTokenExhaustedApplyMoreRequest(storage);
-            dismissTokenExhaustedModal();
-            dispatch(appActions.navigate("/settings"));
-            emitTokenExhaustedApplyMoreRequest(typeof window === "undefined" ? undefined : window);
-            setTimeout(() => {
-              document.getElementById("token-usage")?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 120);
+      {workspaceGuidanceStep === "product_tour" && (
+        <ProductTourGuide
+          includeLogs={productTourIncludesLogs(state.bootstrap?.onboarding.scanPermission)}
+          onDismiss={dismissProductTour}
+          onStepViewed={(info) => {
+            const tourEvent = buildProductTourStepEvent({
+              tab: info.tourTab,
+              choice: "viewed",
+              scanPermission: state.bootstrap?.onboarding.scanPermission
+            });
+            if (tourEvent) {
+              track(tourEvent);
+            }
           }}
-          onLater={dismissTokenExhaustedModal}
-          onGoHandle={() => {
-            dismissTokenExhaustedModal();
-            dispatch(appActions.navigate("/settings"));
-            setTimeout(() => {
-              document.getElementById("model-config")?.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 120);
+          onTabChange={(tab: ProductTourTab) => {
+            const memorySubPage = productTourMemorySubPage(tab);
+            if (memorySubPage) {
+              writeMemorySubPage(typeof window === "undefined" ? undefined : window.sessionStorage, memorySubPage);
+            }
+            dispatch(appActions.navigate(productTourTabRoute(tab)));
           }}
         />
       )}
+      {workspaceGuidanceStep === "nickname" && (
+        <NicknameModal
+          open
+          nickname={deferredNickname}
+          onNicknameChange={setDeferredNickname}
+          onShuffle={() => setDeferredNickname(randomNickname(language))}
+          onSubmit={submitDeferredNickname}
+        />
+      )}
+      {petGuideRequest && <PetGuideModal onChoice={handlePetGuideChoice} />}
       <GlobalUpdateDialog
-        suspended={isPetWindowContext || Boolean(petGuideRequest) || tokenModalOpen}
+        suspended={
+          isPetWindowContext
+          || Boolean(petGuideRequest)
+          || workspaceGuidanceStep === "product_tour"
+          || workspaceGuidanceStep === "nickname"
+        }
       />
     </>
   );

@@ -1,10 +1,13 @@
 import { Command } from "commander";
-import { runMigrations } from "@memmy/migrations";
+import { mutateRuntimeConfig, mutateRuntimeConfigSync } from "@memmy/migrations";
 import fs from "node:fs";
 import http from "node:http";
 import { AsyncLocalStorage } from "node:async_hooks";
+import crypto from "node:crypto";
+import { homedir } from "node:os";
 import { Readable } from "node:stream";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
 import { MessageBus } from "../../core/runtime-messages/queue.js";
 import { InboundMessage, OutboundMessage } from "../../core/runtime-messages/events.js";
@@ -13,7 +16,16 @@ import { CronTool } from "../../core/agent-runtime/tools/cron.js";
 import { MessageTool } from "../../core/agent-runtime/tools/message.js";
 import { prepareManagedChromium } from "../../core/agent-runtime/tools/browser-setup.js";
 import { WebuiTitleService } from "../../core/session/webui-title.js";
-import { readWebuiSessionBinding } from "../../core/session/manager.js";
+import {
+  readWebuiSessionBinding,
+  Session,
+  SessionManager,
+  type WebuiSessionBinding,
+} from "../../core/session/manager.js";
+import {
+  publicGoalState,
+  type AgentGoalState,
+} from "../../core/session/goal-state.js";
 import { WEBUI_LANGUAGE_METADATA_KEY } from "../../core/session/webui-turns.js";
 import {
   API_MAX_BODY_BYTES,
@@ -23,10 +35,7 @@ import {
 } from "../openai-like-api/server.js";
 import { ChannelManager } from "../../integrations/channels/manager.js";
 import { discoverAll, discoverChannelNames } from "../../integrations/channels/registry.js";
-import {
-  WebSocketChannel,
-  publishRuntimeModelUpdate,
-} from "../../integrations/channels/websocket.js";
+import { WebSocketChannel } from "../../integrations/channels/websocket.js";
 import { createByokTokenUsageRecorder } from "../../integrations/byok-token-usage/index.js";
 import {
   loadConfig,
@@ -45,6 +54,7 @@ import {
   loginOpenAICodexInteractive,
 } from "../../providers/openai-codex-oauth.js";
 import { PROVIDERS } from "../../providers/registry.js";
+import { ModelCatalogWatcher } from "../../providers/model-catalog-watcher.js";
 import { evaluateResponse } from "../../utils/evaluator.js";
 import { installConsoleLevelGate } from "../../runtime-log-level.js";
 import { syncWorkspaceTemplates } from "../../utils/helpers.js";
@@ -57,10 +67,33 @@ import {
 } from "../../utils/restart.js";
 import { createChannelAdmin } from "../frontend-bridge/channels-api.js";
 import { ProjectStore } from "../frontend-bridge/projects.js";
-import { getQuestionary, runOnboard } from "./onboard.js";
+import {
+  GatewayTranscriptMonitor,
+  GuiTranscriptMirror,
+} from "../frontend-bridge/gui-transcript-sync.js";
+import {
+  getQuestionary,
+  runOnboard,
+  validateModelCatalogForSave,
+} from "./onboard.js";
 import { StreamRenderer, ThinkingSpinner } from "./stream.js";
+import { prepareStartupMigrations } from "./startup-migrations.js";
+import { parseRootTerminalOptions } from "./root-terminal-options.js";
+import { runLinuxRootTerminal } from "./linux-systemd-gateway.js";
 
-export const app = new Command("memmy");
+const CLI_TEMPLATES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../templates");
+
+export const app = new Command("memmy")
+  .option("-s, --session <sessionId>", "Resume an existing cli:* terminal session")
+  .option("--standalone", "Create a new standalone terminal session")
+  .option("--project <path>", "Create a terminal session bound to a project path");
+
+export function resolveCliActionOptions<T extends Record<string, any>>(
+  localOptions: T,
+  command: Pick<Command, "optsWithGlobals">,
+): T {
+  return { ...localOptions, ...command.optsWithGlobals() };
+}
 
 export type GatewayRuntime = {
   bus: MessageBus;
@@ -71,6 +104,37 @@ export type GatewayRuntime = {
   healthServer: http.Server;
   stop: () => Promise<void>;
 };
+
+type GatewayLifecycleProcess = Pick<NodeJS.Process, "on" | "off" | "exit">;
+
+export function installGatewaySignalLifecycle(
+  runtime: GatewayRuntime,
+  lifecycle: GatewayLifecycleProcess = process,
+): void {
+  let stopping = false;
+  const signals: NodeJS.Signals[] = ["SIGHUP", "SIGINT", "SIGTERM"];
+  const remove = () => {
+    for (const signal of signals) lifecycle.off(signal, shutdown);
+  };
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    remove();
+    const forceExit = setTimeout(() => lifecycle.exit(1), 10_000);
+    forceExit.unref?.();
+    void runtime.stop().then(
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(0);
+      },
+      () => {
+        clearTimeout(forceExit);
+        lifecycle.exit(1);
+      },
+    );
+  };
+  for (const signal of signals) lifecycle.on(signal, shutdown);
+}
 
 let cliRuntimeLogs = false;
 
@@ -155,6 +219,7 @@ export function loadRuntimeConfig(config?: string | null, workspace?: string | n
   if (workspace) loaded.agents.defaults.workspace = workspace;
   return loaded;
 }
+
 export function mergeMissingDefaults(existing: any, defaults: any): any {
   if (!existing || typeof existing !== "object" || Array.isArray(existing)) return existing;
   if (!defaults || typeof defaults !== "object" || Array.isArray(defaults)) return existing;
@@ -165,34 +230,49 @@ export function mergeMissingDefaults(existing: any, defaults: any): any {
   return merged;
 }
 
-export function onboardPlugins(configPath: string): void {
+export async function onboardPlugins(configPath: string): Promise<void> {
   if (!fs.existsSync(configPath)) return;
-  const raw = fs.readFileSync(configPath, "utf8");
-  let data: any = {};
-  try {
-    data = YAML.parse(raw || "{}");
-  } catch {
-    data = {};
-  }
-  const channels = (data.channels ??= {});
-  for (const [name, cls] of Object.entries(discoverAll())) {
-    const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
-    channels[name] = name in channels ? mergeMissingDefaults(channels[name], defaults) : defaults;
-  }
-  fs.mkdirSync(path.dirname(configPath), { recursive: true });
-  fs.writeFileSync(configPath, YAML.stringify(data), "utf8");
+  await mutateRuntimeConfig(configPath, (data) => {
+    const channels = (data.channels ??= {});
+    if (!channels || typeof channels !== "object" || Array.isArray(channels)) {
+      throw new Error("channels must be an object");
+    }
+    for (const [name, cls] of Object.entries(discoverAll())) {
+      const defaults = (cls as any).defaultConfig?.() ?? { enabled: false };
+      (channels as Record<string, unknown>)[name] = name in channels
+        ? mergeMissingDefaults((channels as Record<string, unknown>)[name], defaults)
+        : defaults;
+    }
+  });
 }
 
 export function modelDisplay(config: Config): [string, string] {
-  const resolved = config.resolvePreset();
-  const name = config.agents.defaults.modelPreset;
-  return [resolved.model, name ? ` (preset: ${name})` : ""];
+  const accountMode = config.app.userMode === "account";
+  const assignment = accountMode ? config.modelAssignments.account : config.modelAssignments.byok;
+  const name = assignment.agent.default;
+  const preset = name ? config.modelPresets[name] : null;
+  const activeOwner = typeof config.app.userId === "string" ? config.app.userId.trim() : "";
+  const available = Boolean(
+    preset
+    && preset.capabilities.includes("agent")
+    && (accountMode
+      ? preset.source === "byok" || (
+          preset.source === "account"
+          && Boolean(activeOwner)
+          && preset.ownerAccountId === activeOwner
+          && assignment.ownerAccountId === activeOwner
+        )
+      : preset.source === "byok" && !preset.ownerAccountId),
+  );
+  return available && preset
+    ? [preset.source === "account" ? "General text" : preset.model, ` (preset: ${name})`]
+    : ["(none configured)", ""];
 }
 
 export function syncRuntimeWorkspaceTemplates(config: Config): string {
   const workspacePath = getWorkspacePath(config.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath, undefined, {
+  syncWorkspaceTemplates(workspacePath, CLI_TEMPLATES_DIR, {
     fileMemoryEnabled: config.fileMemory.enabled,
   });
   return workspacePath;
@@ -209,19 +289,231 @@ export function isRootInteractiveRequest(argv: string[] = process.argv): boolean
 
 type RootInteractiveRunner = () => Promise<unknown>;
 
+export type TerminalTarget = {
+  sessionId: string;
+  target: "standalone" | "project";
+  projectId: string | null;
+  projectName: string | null;
+  cwd: string;
+};
+
+export type TerminalTargetDependencies = {
+  sessions: SessionManager;
+  projectStore: ProjectStore;
+  workspace: string;
+  hasUsableDefaultModel: () => boolean;
+};
+
 let rootInteractiveRunnerForTest: RootInteractiveRunner | null = null;
 
 export function setRootInteractiveRunnerForTest(runner: RootInteractiveRunner | null): void {
   rootInteractiveRunnerForTest = runner;
 }
 
-export async function runRootInteractiveAgent(): Promise<unknown> {
-  if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
+function terminalTargetDependenciesForLoop(loop: AgentLoop): TerminalTargetDependencies {
+  const projectStore = loop.projectStore ?? new ProjectStore();
+  loop.projectStore = projectStore;
+  return {
+    sessions: loop.sessions,
+    projectStore,
+    workspace: loop.workspace,
+    hasUsableDefaultModel: () => loop.resolveTurnModelSelection({}) !== null,
+  };
+}
+
+export function resolveTerminalTarget(
+  dependencies: TerminalTargetDependencies,
+  {
+    sessionId = null,
+    standalone = false,
+    project = null,
+    fresh = false,
+    invocationCwd = process.cwd(),
+  }: {
+    sessionId?: string | null;
+    standalone?: boolean;
+    project?: string | null;
+    fresh?: boolean;
+    invocationCwd?: string;
+  } = {},
+): TerminalTarget {
+  const selected = Number(Boolean(sessionId)) + Number(standalone) + Number(Boolean(project));
+  if (selected > 1) throw new Error("--session, --standalone, and --project are mutually exclusive");
+  const { sessions, projectStore, workspace } = dependencies;
+  if (
+    typeof sessions?.get !== "function"
+    || typeof sessions?.save !== "function"
+  ) {
+    const fallbackId = sessionId
+      ?? (standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct");
+    return {
+      sessionId: fallbackId,
+      target: project ? "project" : "standalone",
+      projectId: null,
+      projectName: project ? path.basename(project) : null,
+      cwd: path.resolve(workspace || invocationCwd),
+    };
+  }
+  const reload = (key: string): Session | null => {
+    const runtimeSessions = sessions as SessionManager & {
+      invalidate?: (sessionKey: string) => void;
+      reload?: (sessionKey: string) => Session | null;
+    };
+    if (typeof runtimeSessions.reload === "function") {
+      return runtimeSessions.reload(key);
+    }
+    runtimeSessions.invalidate?.(key);
+    return sessions.get(key);
+  };
+
+  let key = sessionId;
+  let binding: WebuiSessionBinding;
+  let projectName: string | null = null;
+  let sessionSaved = false;
+  if (key) {
+    if (!key.startsWith("cli:")) throw new Error("--session only accepts an existing cli:* session");
+    const session = reload(key);
+    if (!session) throw new Error(`Session not found: ${key}`);
+    binding = readWebuiSessionBinding(session);
+    if (binding.projectId !== null) {
+      const registered = projectStore.getActive(binding.projectId);
+      if (!registered || registered.rootPath !== binding.cwd) {
+        throw new Error("Session project is no longer active");
+      }
+      projectName = registered.name;
+    }
+  } else {
+    key = standalone || project || fresh ? `cli:${crypto.randomUUID()}` : "cli:direct";
+    const existing = reload(key);
+    if (!existing && !dependencies.hasUsableDefaultModel()) {
+      throw new Error("No usable default model is configured. Run `memmy onboard` first.");
+    }
+    if (existing) {
+      binding = readWebuiSessionBinding(existing);
+    } else if (project) {
+      const rawPath = expandHomePath(project);
+      const absolute = path.resolve(invocationCwd, rawPath);
+      const registered = projectStore.resolveOrRegisterExisting(absolute, (resolvedProject) => {
+        const resolvedBinding = {
+          projectId: resolvedProject.id,
+          cwd: resolvedProject.rootPath,
+        };
+        const session = new Session({ key: key! });
+        session.metadata.webui = true;
+        session.metadata.webuiProjectId = resolvedBinding.projectId;
+        session.metadata.webuiWorkspaceCwd = resolvedBinding.cwd;
+        sessions.save(session, { fsync: true });
+        sessionSaved = true;
+        return resolvedProject;
+      });
+      binding = { projectId: registered.id, cwd: registered.rootPath };
+      projectName = registered.name;
+    } else {
+      binding = { projectId: null, cwd: fs.realpathSync(workspace) };
+    }
+    if (!existing && !sessionSaved) {
+      const session = new Session({ key });
+      session.metadata.webui = true;
+      session.metadata.webuiProjectId = binding.projectId;
+      session.metadata.webuiWorkspaceCwd = binding.cwd;
+      sessions.save(session, { fsync: true });
+    }
+  }
+  if (binding.projectId !== null && !projectName) {
+    const registered = projectStore.getActive(binding.projectId);
+    if (!registered || registered.rootPath !== binding.cwd) {
+      throw new Error("Session project is no longer active");
+    }
+    projectName = registered.name;
+  }
+  return {
+    sessionId: key,
+    target: binding.projectId === null ? "standalone" : "project",
+    projectId: binding.projectId,
+    projectName,
+    cwd: binding.cwd,
+  };
+}
+
+function expandHomePath(value: string, env: NodeJS.ProcessEnv = process.env): string {
+  if (value !== "~" && !value.startsWith("~/") && !value.startsWith("~\\")) return value;
+  const home = env.HOME ?? env.USERPROFILE ?? homedir();
+  return value === "~" ? home : path.join(home, value.slice(2));
+}
+
+export function listTerminalSessions(): Array<{
+  sessionId: string;
+  target: "standalone" | "project";
+  projectId: string | null;
+  projectName: string | null;
+  cwd: string;
+  updatedAt: string;
+}> {
   const loaded = loadRuntimeConfig(null, null);
-  syncRuntimeWorkspaceTemplates(loaded);
-  printCliRestartNoticeIfNeeded("cli:direct", true);
+  const loop = AgentLoop.fromConfig(loaded);
+  const projects = new ProjectStore();
+  return loop.sessions.listWebuiSessionRecords()
+    .flatMap((session) => {
+      if (!session.key.startsWith("cli:")) return [];
+      try {
+        const binding = readWebuiSessionBinding(session);
+        const project = binding.projectId === null
+          ? null
+          : projects.getActive(binding.projectId);
+        if (
+          binding.projectId !== null
+          && (!project || project.rootPath !== binding.cwd)
+        ) {
+          return [];
+        }
+        return [{
+          sessionId: session.key,
+          target: binding.projectId === null ? "standalone" as const : "project" as const,
+          projectId: binding.projectId,
+          projectName: project?.name ?? null,
+          cwd: binding.cwd,
+          updatedAt: session.updatedAt,
+        }];
+      } catch {
+        return [];
+      }
+    })
+    .sort((left, right) => (
+      right.updatedAt.localeCompare(left.updatedAt)
+      || left.sessionId.localeCompare(right.sessionId)
+    ));
+}
+
+export async function runRootInteractiveAgent({
+  sessionId = null,
+  standalone = false,
+  project = null,
+}: {
+  sessionId?: string | null;
+  standalone?: boolean;
+  project?: string | null;
+} = {}, runtimeConfig?: Config): Promise<unknown> {
+  if (rootInteractiveRunnerForTest) return rootInteractiveRunnerForTest();
+  const loaded = runtimeConfig ?? loadRuntimeConfig(null, null);
+  const workspace = syncRuntimeWorkspaceTemplates(loaded);
+  const target = resolveTerminalTarget({
+    sessions: new SessionManager(path.join(workspace, "sessions"), {
+      legacyWebuiWorkspaceCwd: workspace,
+    }),
+    projectStore: new ProjectStore(),
+    workspace,
+    hasUsableDefaultModel: () => {
+      try {
+        const preset = loaded.resolvePreset();
+        return Boolean(preset.model.trim() && loaded.getProviderName(preset.model, { preset }));
+      } catch {
+        return false;
+      }
+    },
+  }, { sessionId, standalone, project, fresh: true });
+  printCliRestartNoticeIfNeeded(target.sessionId, true);
   const { runInkInteractiveAgent } = await import("./tui.js");
-  return runInkInteractiveAgent(loaded, "cli:direct");
+  return runInkInteractiveAgent(loaded, target.sessionId, target);
 }
 
 export async function runInternalCommand(argv: string[]): Promise<boolean> {
@@ -253,17 +545,49 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     versionCallback(true);
     return;
   }
-  if (isRootInteractiveRequest(argv)) {
-    await runRootInteractiveAgent();
+  const rootTarget = parseRootTerminalOptions(argv);
+  if (rootTarget) {
+    await prepareStartupMigrations();
+    if (rootInteractiveRunnerForTest) {
+      await runRootInteractiveAgent(rootTarget);
+      return;
+    }
+    await runLinuxRootTerminal({
+      loadConfig: () => loadRuntimeConfig(null, null),
+      onboardWizard: () => onboard(),
+      runInteractive: (config) => runRootInteractiveAgent(rootTarget, config),
+    });
     return;
   }
+
+  app.hook("preAction", async (_command, actionCommand) => {
+    const opts = actionCommand.optsWithGlobals() as {
+      config?: string;
+      workspace?: string;
+      appDatabase?: string;
+    };
+    await prepareStartupMigrations(
+      { config: opts.config, workspace: opts.workspace, appDatabase: opts.appDatabase },
+      process.env,
+      { force: actionCommand.name() === "migrate" },
+    );
+  });
+
+  app
+    .command("migrate", { hidden: true })
+    .option("-w, --workspace <dir>", "Workspace directory")
+    .option("-c, --config <path>", "Path to config file")
+    .option("--app-database <path>", "Desktop app database path")
+    .action(() => {
+      console.log("Migrations ready.");
+    });
 
   app
     .command("onboard")
     .description("Initialize memmy configuration and workspace.")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
-    .option("--wizard", "Use interactive wizard", false)
+    .option("--defaults", "Use default configuration", false)
     .action(async (opts) => {
       await onboard(opts);
     });
@@ -290,22 +614,70 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     .option("-c, --config <path>", "Path to config file")
     .option("-v, --verbose", "Enable verbose runtime logs", false)
     .action(async (opts) => {
-      await gateway(opts);
+      const runtime = await gateway(opts);
+      installGatewaySignalLifecycle(runtime);
     });
 
   app
     .command("agent")
     .description("Run a direct CLI chat turn.")
     .option("-m, --message <message>", "Message to send")
-    .option("-s, --session <sessionId>", "Session ID", "cli:direct")
+    .option("-s, --session <sessionId>", "Existing cli:* session ID")
+    .option("--standalone", "Create a new standalone terminal session")
+    .option("--project <path>", "Create a terminal session bound to a project path")
     .option("-w, --workspace <dir>", "Workspace directory")
     .option("-c, --config <path>", "Path to config file")
     .option("--markdown", "Render final responses as markdown", true)
     .option("--no-markdown", "Render final responses as plain text")
     .option("--logs", "Enable runtime logs", false)
     .option("--no-logs", "Disable runtime logs")
-    .action(async (opts) => {
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
       await agent({ ...opts, sessionId: opts.session });
+    });
+
+  app
+    .command("goal")
+    .description("Run a persistent Goal to a terminal state.")
+    .option("-m, --message <message>", "Goal objective")
+    .option("--message-file <path>", "Read the Goal objective from a UTF-8 file")
+    .option("-s, --session <sessionId>", "Existing cli:* session ID")
+    .option("--standalone", "Create a new standalone terminal session")
+    .option("--project <path>", "Create a terminal session bound to a project path")
+    .option("--token-budget <tokens>", "Cumulative Goal token budget")
+    .option("-t, --timeout <seconds>", "Maximum wall-clock runtime", "14400")
+    .option("-o, --output <path>", "Write the structured result as JSON")
+    .option("-w, --workspace <dir>", "Workspace directory")
+    .option("-c, --config <path>", "Path to config file")
+    .option("--logs", "Enable runtime logs", false)
+    .option("--no-logs", "Disable runtime logs")
+    .action(async (localOpts, actionCommand) => {
+      const opts = resolveCliActionOptions(localOpts, actionCommand);
+      const result = await goal({ ...opts, sessionId: opts.session });
+      if (result.status !== "success") {
+        throw new Error(`Goal stopped with ${result.goal.status}: ${result.summary}`);
+      }
+    });
+
+  const sessionsCommand = app.command("sessions").description("Manage terminal sessions.");
+  sessionsCommand
+    .command("list")
+    .option("--json", "Print JSON")
+    .action((opts) => {
+      const rows = listTerminalSessions();
+      if (opts.json) console.log(JSON.stringify(rows, null, 2));
+      else {
+        console.log("SESSION ID\tTARGET\tPROJECT\tCWD\tUPDATED");
+        for (const row of rows) {
+          console.log([
+            row.sessionId,
+            row.target,
+            row.projectName ?? "-",
+            row.cwd,
+            row.updatedAt,
+          ].join("\t"));
+        }
+      }
     });
 
   app
@@ -378,15 +750,15 @@ export async function main(argv: string[] = process.argv): Promise<void> {
 export async function onboard({
   workspace = null,
   config = null,
-  wizard = false,
-}: { workspace?: string | null; config?: string | null; wizard?: boolean } = {}): Promise<Config> {
+  defaults = false,
+}: { workspace?: string | null; config?: string | null; defaults?: boolean } = {}): Promise<Config> {
   const configPath = config
     ? path.resolve(config.replace(/^~(?=$|\/)/, process.env.HOME ?? "~"))
     : getConfigPath();
   if (config) setConfigPath(configPath);
   let loaded: Config;
   if (fs.existsSync(configPath)) {
-    if (wizard) {
+    if (!defaults) {
       loaded = loadConfig(configPath);
     } else if (
       process.stdin.isTTY &&
@@ -398,7 +770,7 @@ export async function onboard({
     ) {
       loaded = new Config();
       if (workspace) loaded.agents.defaults.workspace = workspace;
-      saveConfig(loaded, configPath);
+      replaceRuntimeConfig(configPath, loaded);
       console.log(`Config reset to defaults at ${configPath}`);
     } else {
       loaded = loadConfig(configPath);
@@ -409,28 +781,29 @@ export async function onboard({
   } else {
     loaded = new Config();
     if (workspace) loaded.agents.defaults.workspace = workspace;
-    if (!wizard) {
+    if (defaults) {
       saveConfig(loaded, configPath);
       console.log(`Created config at ${configPath}`);
     }
   }
   if (workspace) loaded.agents.defaults.workspace = workspace;
-  if (wizard) {
+  if (!defaults) {
     const result = await runOnboard(loaded);
     loaded = result.config;
     if (!result.shouldSave) {
       console.log("Configuration discarded. No changes were saved.");
       return loaded;
     }
+    validateModelCatalogForSave(loaded);
     saveConfig(loaded, configPath);
     console.log(`Config saved at ${configPath}`);
   } else if (!fs.existsSync(configPath)) {
     saveConfig(loaded, configPath);
   }
-  onboardPlugins(configPath);
+  await onboardPlugins(configPath);
   const workspacePath = getWorkspacePath(loaded.agents.defaults.workspace);
   fs.mkdirSync(workspacePath, { recursive: true });
-  syncWorkspaceTemplates(workspacePath, undefined, {
+  syncWorkspaceTemplates(workspacePath, CLI_TEMPLATES_DIR, {
     fileMemoryEnabled: loaded.fileMemory.enabled,
   });
   console.log(`memmy is ready`);
@@ -455,12 +828,35 @@ export function setConfigValue(
       if (!next) throw new Error("app.userId must be a non-empty string");
       loaded.app.userId = next;
       loaded.memmyMemory.userId = next;
-      saveConfig(loaded, configPath);
+      mutateRuntimeConfigSync(configPath, (raw) => {
+        const app = mutableConfigRecord(raw.app, "app");
+        const memmyMemory = mutableConfigRecord(raw.memmyMemory, "memmyMemory");
+        app.userId = next;
+        memmyMemory.userId = next;
+        raw.app = app;
+        raw.memmyMemory = memmyMemory;
+      });
       return { config: loaded, configPath, key: "app.userId", value: next };
     }
     default:
       throw new Error(`unsupported config key: ${key}`);
   }
+}
+
+function replaceRuntimeConfig(configPath: string, config: Config): void {
+  const replacement = config.toObject();
+  mutateRuntimeConfigSync(configPath, (raw) => {
+    for (const key of Object.keys(raw)) delete raw[key];
+    Object.assign(raw, replacement);
+  });
+}
+
+function mutableConfigRecord(value: unknown, pathName: string): Record<string, unknown> {
+  if (value === undefined || value === null) return {};
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return { ...(value as Record<string, unknown>) };
+  }
+  throw new Error(`${pathName} must be an object`);
 }
 
 async function requestFromIncoming(
@@ -653,8 +1049,8 @@ const WEBUI_CRON_TRANSIENT_METADATA_KEYS = [
   "toolEvents",
   "fileEditEvents",
   "retryWait",
-  "goalStatus",
-  "goalStatusEvent",
+  "runStatus",
+  "runStatusEvent",
   "goalState",
   "goalStateSync",
 ] as const;
@@ -737,37 +1133,79 @@ export async function gateway({
   // Gateway daemon mode: filter console output by the MEMMY_LOG_LEVEL injected by the desktop app.
   installConsoleLevelGate();
   const canonicalWorkspace = fs.realpathSync(workspacePath);
-  await runMigrations({
-    targets: { agentWorkspace: canonicalWorkspace },
-    logger: {
-      info: (event, fields) => console.info(`[migration] ${event}`, fields ?? {}),
-      warn: (event, fields) => console.warn(`[migration] ${event}`, fields ?? {}),
-      error: (event, fields) => console.error(`[migration] ${event}`, fields ?? {}),
-    },
-  });
   const bus = new MessageBus();
   const cron = new CronService(path.join(workspacePath, "cron", "jobs.json"));
   const projectStore = new ProjectStore();
   const loop = AgentLoop.fromConfig(loaded, bus, {
     cronService: cron,
     projectStore,
-    runtimeModelPublisher: (model, preset) => {
-      if (model) publishRuntimeModelUpdate(bus, model, preset);
-    },
   });
+  if (loop.sessions instanceof SessionManager) {
+    loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, canonicalWorkspace);
+  }
   await initializeLoopRuntimeTools(loop);
+  const cancelSessionTasks = async (sessionKey: string): Promise<number> => {
+    const stopped = await loop.cancelActiveTasks(sessionKey);
+    const terminalOwner = sessionKey.startsWith("cli:")
+      ? await loop.terminalRunControl.requestCancel(sessionKey)
+      : false;
+    if (terminalOwner) {
+      const deadline = Date.now() + 120_000;
+      while (loop.terminalRunControl.read(sessionKey) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    return stopped + Number(terminalOwner);
+  };
   const manager = new ChannelManager(loaded, bus, {
     sessionManager: loop.sessions,
     workspacePath,
     webuiRuntimeModelName: () => {
-      loop.refreshProviderSnapshot();
-      return loop.model ?? null;
+      try {
+        return loop.llmRuntime().model;
+      } catch {
+        return null;
+      }
     },
-    cancelActiveTasks: (sessionKey) => loop.cancelActiveTasks(sessionKey),
+    webuiRuntimeToolNames: () => loop.toolNames,
+    webuiModelSelectionResolver: (input) => loop.resolveTurnModelSelection(input),
+    cancelActiveTasks: cancelSessionTasks,
     closeBrowserChat: (channel, chatId) => loop.closeBrowserChat(channel, chatId),
+    goalControlHandler: (request) => loop.goalRuntime.control(request),
+    getWebuiQueueSnapshot: (sessionKey) => loop.getWebuiQueueSnapshot(sessionKey),
+    removeQueuedWebuiMessage: (sessionKey, clientRequestId) => (
+      loop.removeQueuedWebuiMessage(sessionKey, clientRequestId)
+    ),
+    steerQueuedWebuiMessage: (sessionKey, clientRequestId, expectedTurnId) => (
+      loop.steerQueuedWebuiMessage(sessionKey, clientRequestId, expectedTurnId)
+    ),
+    stopExpectedTurn: (sessionKey, expectedTurnId) => (
+      loop.stopExpectedTurn(sessionKey, expectedTurnId, "tui")
+    ),
+    activeGoalStopHandler: async (sessionKey) => {
+      const goal = loop.goalRuntime.get(sessionKey);
+      if (goal?.status !== "active") return false;
+      await loop.goalRuntime.pauseAndCancel(sessionKey, goal.goalId);
+      await loop.goalRuntime.flushEffects(sessionKey);
+      return true;
+    },
   });
+  loop.setChannelCapabilitiesResolver?.((channel) => manager.channelCapabilities(channel));
   const webuiChannel = manager.getChannel("websocket");
+  let transcriptMonitor: GatewayTranscriptMonitor | null = null;
   if (webuiChannel instanceof WebSocketChannel) {
+    webuiChannel.setSessionTurnBarrier(
+      (sessionKey, operation) => loop.withSessionTurnBarrier(sessionKey, operation),
+    );
+    webuiChannel.setSessionDeletionBarrier(
+      (sessionKey, cancelRunning, operation) => loop.withSessionDeletionBarrier(
+        sessionKey,
+        async () => {
+          if (cancelRunning) await cancelSessionTasks(sessionKey);
+        },
+        operation,
+      ),
+    );
     webuiChannel.setProjectStore(projectStore);
     webuiChannel.setSessionDeletionServices({
       cronService: cron,
@@ -778,11 +1216,25 @@ export async function gateway({
       new WebuiTitleService({
         bus,
         sessions: loop.sessions,
-        llmRuntime: () => loop.llmRuntime(),
+        llmRuntime: (preset) => loop.llmRuntime(preset),
         scheduleBackground: (promise) => loop.scheduleBackground(promise),
         tokenUsageRecorder: createByokTokenUsageRecorder(loaded),
       }),
     );
+    if (webuiChannel.guiSessionProjection && loop.sessions instanceof SessionManager) {
+      transcriptMonitor = new GatewayTranscriptMonitor({
+        projection: webuiChannel.guiSessionProjection,
+        onRecord: (record, canonicalSessionKey) => (
+          webuiChannel.consumeTranscriptRecord(record, canonicalSessionKey)
+        ),
+        onRefresh: (chatId) => webuiChannel.consumeTranscriptRecord({
+          event: "session_updated",
+          chat_id: chatId,
+          scope: "thread",
+        }),
+      });
+      webuiChannel.setTranscriptMonitor(transcriptMonitor);
+    }
   }
   const bindHost = host ?? loaded.gateway.host;
   const bindPort = port == null ? loaded.gateway.port : Number(port);
@@ -1044,12 +1496,26 @@ export async function gateway({
 
   await cron.start();
   void manager.startAll();
+  transcriptMonitor?.start();
   await heartbeat.start();
   const inboundTask = loop.run();
   console.log(
     `memmy gateway started (${manager.enabledChannels.join(", ") || "no channels enabled"})`,
   );
   console.log(`Health endpoint: http://${bindHost}:${bindPort}/health`);
+  const modelCatalogWatcher = new ModelCatalogWatcher(getConfigPath(), (status, fingerprint) => {
+    bus.outbound.put(new OutboundMessage({
+      channel: "websocket",
+      chatId: "*",
+      content: "",
+      metadata: {
+        modelCatalogUpdated: true,
+        modelCatalogStatus: status,
+        fingerprint,
+      },
+    }));
+  });
+  modelCatalogWatcher.start();
   return {
     bus,
     loop,
@@ -1058,42 +1524,320 @@ export async function gateway({
     cron,
     healthServer,
     stop: async () => {
+      modelCatalogWatcher.close();
       heartbeat.stop();
       cron.stop();
       loop.stop();
+      transcriptMonitor?.stop();
+      const sessionStore = loop.sessions as SessionManager & {
+        flush?: () => unknown;
+      };
       await Promise.allSettled([
         inboundTask,
         manager.stopAll(),
         closeLoopRuntimeTools(loop),
-        (loop.sessions as any)?.flush?.(),
+        Promise.resolve(
+          typeof sessionStore.flushAll === "function"
+            ? sessionStore.flushAll({
+                exclude: (session: Session) => session.key.startsWith("cli:"),
+              })
+            : sessionStore.flush?.(),
+        ),
         closeServer(healthServer),
       ]);
     },
   };
 }
 
+export type HeadlessGoalResult = {
+  status: "success" | "warning" | "error";
+  summary: string;
+  next_actions: string[];
+  artifacts: {
+    workspace: string;
+    project: string | null;
+    session_file: string | null;
+    result_file: string | null;
+  };
+  goal: AgentGoalState;
+  session_id: string | null;
+  timed_out: boolean;
+  last_message: string | null;
+  metrics: {
+    tokens_used: number;
+    time_used_seconds: number;
+  };
+};
+
+function positiveIntegerOption(value: string | number | null | undefined, name: string): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function headlessGoalObjective(
+  message: string | null | undefined,
+  messageFile: string | null | undefined,
+): string {
+  if (message && messageFile) throw new Error("--message and --message-file are mutually exclusive");
+  const value = messageFile
+    ? fs.readFileSync(path.resolve(messageFile), "utf8")
+    : message ?? (process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8"));
+  const objective = value.trim();
+  if (!objective) throw new Error("A non-empty Goal objective is required");
+  return objective;
+}
+
+function writeHeadlessGoalResult(result: HeadlessGoalResult, output: string | null | undefined): void {
+  const rendered = `${JSON.stringify(result, null, 2)}\n`;
+  if (!output) {
+    process.stdout.write(rendered);
+    return;
+  }
+  const outputPath = path.resolve(output);
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.writeFileSync(outputPath, rendered, "utf8");
+  console.log(`Goal result: ${outputPath}`);
+}
+
+function drainGoalOutput(bus: MessageBus, messages: string[]): void {
+  while (true) {
+    const outbound = bus.outbound.getNowait();
+    if (!outbound) return;
+    const content = String(outbound.content ?? "").trim();
+    if (content) messages.push(content);
+  }
+}
+
+function headlessGoalOutcome(
+  goalState: AgentGoalState,
+  timedOut: boolean,
+  lastMessage: string | null,
+): Pick<HeadlessGoalResult, "status" | "summary" | "next_actions"> {
+  if (timedOut) {
+    return {
+      status: "warning",
+      summary: `Goal paused after reaching the headless timeout (${goalState.status ?? "unknown"}).`,
+      next_actions: ["Inspect the session artifact and increase --timeout before retrying."],
+    };
+  }
+  if (goalState.status === "completed") {
+    return {
+      status: "success",
+      summary: lastMessage ?? "Goal completed.",
+      next_actions: [],
+    };
+  }
+  const status = goalState.status ?? "unknown";
+  return {
+    status: "warning",
+    summary: lastMessage ?? `Goal stopped with status ${status}.`,
+    next_actions: [`Inspect the session artifact before resuming the ${status} Goal.`],
+  };
+}
+
+export async function goal({
+  message = null,
+  messageFile = null,
+  sessionId = null,
+  standalone = false,
+  project = null,
+  tokenBudget = null,
+  timeout = 14_400,
+  output = null,
+  workspace = null,
+  config = null,
+  logs = false,
+}: {
+  message?: string | null;
+  messageFile?: string | null;
+  sessionId?: string | null;
+  standalone?: boolean;
+  project?: string | null;
+  tokenBudget?: string | number | null;
+  timeout?: string | number | null;
+  output?: string | null;
+  workspace?: string | null;
+  config?: string | null;
+  logs?: boolean;
+} = {}): Promise<HeadlessGoalResult> {
+  const objective = headlessGoalObjective(message, messageFile);
+  const budget = positiveIntegerOption(tokenBudget, "--token-budget");
+  const timeoutSeconds = positiveIntegerOption(timeout, "--timeout") ?? 14_400;
+  const invocationCwd = process.cwd();
+  const loaded = loadRuntimeConfig(config, workspace);
+  const workspacePath = syncRuntimeWorkspaceTemplates(loaded);
+  setCliRuntimeLogs(Boolean(logs));
+  const bus = new MessageBus();
+  const loop = AgentLoop.fromConfig(loaded, bus);
+  let target: TerminalTarget | null = null;
+  let runTask: Promise<void> | null = null;
+  let runError: unknown = null;
+  let runFinished = false;
+  let timedOut = false;
+  const messages: string[] = [];
+
+  try {
+    target = resolveTerminalTarget(terminalTargetDependenciesForLoop(loop), {
+      sessionId,
+      standalone,
+      project,
+      invocationCwd,
+    });
+    if (project) {
+      const requestedProject = fs.realpathSync(path.resolve(invocationCwd, expandHomePath(project)));
+      const actualProject = fs.realpathSync(target.cwd);
+      if (target.target !== "project" || actualProject !== requestedProject) {
+        throw new Error(
+          `Goal project binding mismatch: requested ${requestedProject}, resolved ${actualProject}`,
+        );
+      }
+    }
+    if (loop.sessions instanceof SessionManager) {
+      loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
+      loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
+    }
+
+    const createResponse = await loop.processDirect(`/goal create ${objective}`, {
+      sessionKey: target.sessionId,
+      channel: "cli",
+      chatId: target.sessionId.slice("cli:".length) || "goal",
+    });
+    const created = loop.goalRuntime.get(target.sessionId);
+    if (!created) {
+      throw new Error(createResponse?.content?.trim() || "Goal creation failed");
+    }
+    if (budget !== null) {
+      await loop.goalRuntime.setBudget(target.sessionId, created.goalId, budget);
+      await loop.goalRuntime.flushEffects(target.sessionId);
+    }
+
+    runTask = loop.run()
+      .then(() => {
+        runFinished = true;
+      })
+      .catch((error) => {
+        runError = error;
+      });
+    const deadline = Date.now() + timeoutSeconds * 1_000;
+    while (true) {
+      drainGoalOutput(bus, messages);
+      if (runError) throw runError;
+      const current = loop.goalRuntime.get(target.sessionId);
+      const activeTurns = loop.activeTasks.get(target.sessionId)?.length ?? 0;
+      if (current && current.status !== "active" && activeTurns === 0) break;
+      if (runFinished) throw new Error("Goal runtime stopped before reaching a terminal state");
+      if (Date.now() >= deadline) {
+        timedOut = true;
+        if (current?.status === "active") {
+          await loop.goalRuntime.pauseAndCancel(target.sessionId, current.goalId);
+          await loop.goalRuntime.flushEffects(target.sessionId);
+        }
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  } catch (error) {
+    const current = target ? publicGoalState(loop.goalRuntime.get(target.sessionId)) : publicGoalState(null);
+    const result: HeadlessGoalResult = {
+      status: "error",
+      summary: error instanceof Error ? error.message : String(error),
+      next_actions: ["Inspect the runtime log and configuration before retrying."],
+      artifacts: {
+        workspace: workspacePath,
+        project: target?.cwd ?? (project ? path.resolve(invocationCwd, project) : null),
+        session_file: target && typeof loop.sessions.pathFor === "function"
+          ? loop.sessions.pathFor(target.sessionId)
+          : null,
+        result_file: output ? path.resolve(output) : null,
+      },
+      goal: current,
+      session_id: target?.sessionId ?? null,
+      timed_out: timedOut,
+      last_message: messages.at(-1)?.slice(-8_000) ?? null,
+      metrics: {
+        tokens_used: current.tokens_used,
+        time_used_seconds: current.time_used_seconds,
+      },
+    };
+    writeHeadlessGoalResult(result, output);
+    return result;
+  } finally {
+    loop.stop();
+    await Promise.allSettled([
+      runTask ?? Promise.resolve(),
+      closeLoopRuntimeTools(loop),
+      Promise.resolve(loop.sessions.flushAll()),
+    ]);
+    drainGoalOutput(bus, messages);
+  }
+
+  const current = publicGoalState(target ? loop.goalRuntime.get(target.sessionId) : null);
+  const lastMessage = messages.at(-1)?.slice(-8_000) ?? null;
+  const outcome = headlessGoalOutcome(current, timedOut, lastMessage);
+  const result: HeadlessGoalResult = {
+    ...outcome,
+    artifacts: {
+      workspace: workspacePath,
+      project: target?.cwd ?? null,
+      session_file: target && typeof loop.sessions.pathFor === "function"
+        ? loop.sessions.pathFor(target.sessionId)
+        : null,
+      result_file: output ? path.resolve(output) : null,
+    },
+    goal: current,
+    session_id: target?.sessionId ?? null,
+    timed_out: timedOut,
+    last_message: lastMessage,
+    metrics: {
+      tokens_used: current.tokens_used,
+      time_used_seconds: current.time_used_seconds,
+    },
+  };
+  writeHeadlessGoalResult(result, output);
+  return result;
+}
+
 export async function agent({
   message = null,
-  sessionId = "cli:direct",
+  sessionId = null,
+  standalone = false,
+  project = null,
   workspace = null,
   config = null,
   markdown = true,
   logs = false,
 }: {
   message?: string | null;
-  sessionId?: string;
+  sessionId?: string | null;
+  standalone?: boolean;
+  project?: string | null;
   workspace?: string | null;
   config?: string | null;
   markdown?: boolean;
   logs?: boolean;
 } = {}): Promise<string | null> {
+  const invocationCwd = process.cwd();
   const loaded = loadRuntimeConfig(config, workspace);
   syncRuntimeWorkspaceTemplates(loaded);
   setCliRuntimeLogs(Boolean(logs));
+  const loop = AgentLoop.fromConfig(loaded);
+  const target = resolveTerminalTarget(terminalTargetDependenciesForLoop(loop), {
+    sessionId,
+    standalone,
+    project,
+    invocationCwd,
+  });
+  if (loop.sessions instanceof SessionManager) {
+    loop.guiTranscriptMirror = new GuiTranscriptMirror(loop.sessions, target.cwd);
+    loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
+  }
   const input = message ?? (process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8").trim());
   if (input) {
-    const loop = AgentLoop.fromConfig(loaded);
-    printCliRestartNoticeIfNeeded(sessionId, markdown);
+    printCliRestartNoticeIfNeeded(target.sessionId, markdown);
     const renderer = new StreamRenderer({
       showSpinner: Boolean(process.stdout.isTTY),
       botName: loaded.agents.defaults.botName,
@@ -1104,7 +1848,7 @@ export async function agent({
     let rendererClosed = false;
     try {
       const response = await loop.processDirect(input, {
-        sessionKey: sessionId,
+        sessionKey: target.sessionId,
         onProgress: withProgressCapabilities(
           async (content: string, opts: Record<string, any> = {}) => {
             await maybePrintInteractiveProgress(
@@ -1139,14 +1883,19 @@ export async function agent({
         loop.stop();
         await Promise.allSettled([
           closeLoopRuntimeTools(loop),
-          Promise.resolve(loop.sessions.flushAll()),
+          Promise.resolve(loop.sessions.flushAll({
+            exclude: (session) => session.key.startsWith("cli:"),
+          })),
         ]);
       }
     }
   }
   if (!process.stdin.isTTY) return null;
-  printCliRestartNoticeIfNeeded(sessionId, markdown);
-  return runInteractiveAgent(loaded, sessionId, { renderMarkdown: markdown });
+  printCliRestartNoticeIfNeeded(target.sessionId, markdown);
+  return runInteractiveAgent(loaded, target.sessionId, {
+    renderMarkdown: markdown,
+    target,
+  });
 }
 
 export function printCliRestartNoticeIfNeeded(sessionId: string, renderMarkdown = true): boolean {
@@ -1174,12 +1923,34 @@ async function waitForOutbound(
 export async function runInteractiveAgent(
   config: Config,
   sessionId = "cli:direct",
-  { renderMarkdown = true }: { renderMarkdown?: boolean } = {},
+  {
+    renderMarkdown = true,
+    target = null,
+  }: {
+    renderMarkdown?: boolean;
+    target?: TerminalTarget | null;
+  } = {},
 ): Promise<null> {
   const bus = new MessageBus();
   const loop = AgentLoop.fromConfig(config, bus);
+  if (loop.sessions instanceof SessionManager) {
+    loop.guiTranscriptMirror = new GuiTranscriptMirror(
+      loop.sessions,
+      target?.cwd ?? loop.workspace,
+    );
+    if (target) loop.guiTranscriptMirror.sessionUpdated(target.sessionId);
+  }
   if (!promptSession) initPromptSession();
-  const [model, presetTag] = modelDisplay(config);
+  const existing = loop.sessions.get(sessionId);
+  const selection = loop.resolveTurnModelSelection({
+    sessionPreset: typeof existing?.metadata?.modelPreset === "string"
+      ? existing.metadata.modelPreset
+      : null,
+  });
+  const model = selection
+    ? `${selection.provider} / ${selection.model}`
+    : "(none configured)";
+  const presetTag = selection ? ` (preset: ${selection.preset})` : "";
   console.log(`memmy Interactive mode (${model})${presetTag} - type exit or Ctrl+C to quit\n`);
 
   const [cliChannel, cliChatId] = sessionId.includes(":")

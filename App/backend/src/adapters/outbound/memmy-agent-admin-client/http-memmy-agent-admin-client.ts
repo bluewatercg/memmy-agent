@@ -24,6 +24,18 @@ const WeixinLoginResponseSchema = z.object({
   pollToken: z.string().min(1).optional()
 });
 
+const FeishuLoginResponseSchema = WeixinLoginResponseSchema.extend({
+  appId: z.string().min(1).optional(),
+  appSecret: z.string().min(1).optional(),
+  domain: z.enum(["feishu", "lark"]).optional()
+});
+
+const McpReloadResponseSchema = z.object({
+  ok: z.boolean(),
+  message: z.string(),
+  requires_restart: z.boolean()
+});
+
 export interface CreateHttpMemmyAgentAdminClientOptions {
   /** Memmy-agent WebUI HTTP base URL. */
   baseUrl?: string;
@@ -75,8 +87,23 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
     return this.request(`/api/channels/weixin/login/${encodeURIComponent(pollToken)}`, WeixinLoginResponseSchema);
   }
 
+  async startFeishuLogin() {
+    return this.request("/api/channels/feishu/login/start", FeishuLoginResponseSchema, { method: "POST" });
+  }
+
+  async pollFeishuLogin(pollToken: string) {
+    return this.request(`/api/channels/feishu/login/${encodeURIComponent(pollToken)}`, FeishuLoginResponseSchema);
+  }
+
+  async reloadMcpConfig() {
+    return this.request("/api/settings/mcp-presets/reload", McpReloadResponseSchema, {
+      method: "POST",
+      signal: AbortSignal.timeout(10_000)
+    });
+  }
+
   private async request<T>(path: string, schema: { parse(value: unknown): T }, init: RequestInit = {}, retried = false): Promise<T> {
-    const token = await this.bootstrapToken();
+    const token = await this.bootstrapToken(init.signal);
     const response = await this.fetchFn(new URL(path, this.baseUrl), {
       ...init,
       method: init.method ?? "GET",
@@ -97,11 +124,12 @@ class HttpMemmyAgentAdminClient implements MemmyAgentAdminClient {
     return schema.parse(await response.json());
   }
 
-  private async bootstrapToken(): Promise<string> {
+  private async bootstrapToken(signal?: AbortSignal | null): Promise<string> {
     if (this.token) return this.token;
 
     const response = await this.fetchFn(new URL("/webui/bootstrap", this.baseUrl), {
-      headers: this.bootstrapSecret ? { "x-memmy-agent-auth": this.bootstrapSecret } : undefined
+      headers: this.bootstrapSecret ? { "x-memmy-agent-auth": this.bootstrapSecret } : undefined,
+      signal
     });
     if (!response.ok) {
       throw new Error(`memmy-agent bootstrap failed with HTTP ${response.status}`);

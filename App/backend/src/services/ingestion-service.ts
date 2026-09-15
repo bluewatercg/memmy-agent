@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { ConversationMessage } from "../adapters/outbound/agent-source/types.js";
 import type { MemoryClient } from "../adapters/outbound/memory-client/index.js";
+import type {
+  MemoryDesktopAddAnalytics,
+  MemoryDesktopAddScanMode
+} from "../analytics/memory-add-analytics.js";
 import type { AgentSourceRepository } from "../infrastructure/agent-source-store/index.js";
 
 const INGESTION_TURN_YIELD_INTERVAL = 50;
@@ -29,6 +33,8 @@ export interface IngestionContext {
   signal?: AbortSignal;
   deferProcessing?: boolean;
   totalMessages?: number;
+  scanMode?: MemoryDesktopAddScanMode;
+  replaySeenConversationIds?: ReadonlySet<string>;
   onProgress?: (progress: IngestionProgress) => void;
 }
 
@@ -60,6 +66,10 @@ export interface IngestionStats {
 export interface CreateIngestionServiceOptions {
   memoryClient: Pick<MemoryClient, "addMemory">;
   agentSourceRepository: Pick<AgentSourceRepository, "hasSeen" | "markSeen">;
+  memoryAddAnalytics?: Pick<
+    MemoryDesktopAddAnalytics,
+    "trackAddStarted" | "trackAddSucceeded" | "trackAddFailed"
+  >;
   warn?: (warning: IngestionWarning) => void;
 }
 
@@ -206,17 +216,37 @@ async function processConversation(
 
     const dedupKeys = turn.messages.map((message) => createDedupKey(ctx.sourceId, message.messageId));
     const allSeen = dedupKeys.every((dedupKey) => options.agentSourceRepository.hasSeen(dedupKey));
+    if (allSeen && !ctx.replaySeenConversationIds?.has(turn.conversationId)) {
+      stats.deduped += turn.messages.length;
+      stats.dedupedMemories += 1;
+      emitIngestionProgress(ctx, stats);
+      continue;
+    }
+
+    const addAnalyticsBase = {
+      adapterId: request.adapterId,
+      conversationId: turn.conversationId,
+      turnId: request.turnId,
+      ...(ctx.scanMode ? { scanMode: ctx.scanMode } : {})
+    };
+    options.memoryAddAnalytics?.trackAddStarted(addAnalyticsBase);
+    const addStartedAt = Date.now();
 
     try {
       const added = await options.memoryClient.addMemory(request);
-      if (allSeen) {
+      if (added.duplicate) {
         stats.deduped += turn.messages.length;
         stats.dedupedMemories += 1;
       } else {
         stats.written += turn.messages.length;
         stats.writtenMemories += 1;
+        stats.memoryIds.push(added.id);
       }
-      stats.memoryIds.push(added.id);
+      options.memoryAddAnalytics?.trackAddSucceeded({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        storedCount: added.duplicate ? 0 : 1
+      });
 
       for (const dedupKey of dedupKeys) {
         options.agentSourceRepository.markSeen(dedupKey, ctx.sourceId);
@@ -242,6 +272,11 @@ async function processConversation(
       stats.errors.push({
         conversationId: turn.conversationId,
         reason: error instanceof Error ? error.message : "ingestion failed"
+      });
+      options.memoryAddAnalytics?.trackAddFailed({
+        ...addAnalyticsBase,
+        durationMs: Date.now() - addStartedAt,
+        error
       });
       emitIngestionProgress(ctx, stats);
     }

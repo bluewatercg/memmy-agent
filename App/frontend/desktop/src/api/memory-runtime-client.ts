@@ -16,6 +16,7 @@ import {
   MemoryProcessingStatusOutputSchema,
   MemoryReloadConfigInputSchema,
   MemoryReloadConfigOutputSchema,
+  RecallEvidenceOutputSchema,
   OpenSessionInputSchema,
   OpenSessionOutputSchema,
   PanelAnalysisOutputSchema,
@@ -69,6 +70,7 @@ import {
   type MemoryProcessingStatusOutput,
   type MemoryReloadConfigInput,
   type MemoryReloadConfigOutput,
+  type RecallEvidenceOutput,
   type OpenSessionInput,
   type OpenSessionOutput,
   type PanelAnalysisOutput,
@@ -125,6 +127,7 @@ export const MEMORY_RUNTIME_ENDPOINTS = [
   "GET /api/v1/memory/:id/history",
   "POST /api/v1/memory/:id/history/:version/restore",
   "DELETE /api/v1/memory/:id",
+  "GET /api/v1/memory/recalls/:queryId",
   "GET /api/v1/memory/logs",
   "GET /api/v1/panel/overview",
   "GET /api/v1/panel/analysis",
@@ -160,6 +163,7 @@ export interface MemoryRuntimeClient {
   getMemoryHistory(id: string, options?: { signal?: AbortSignal }): Promise<MemoryHistoryOutput>;
   restoreMemory(id: string, targetVersion: number, input: RestoreMemoryInput): Promise<RestoreMemoryOutput>;
   deleteMemory(id: string): Promise<DeleteMemoryOutput>;
+  recallEvidence(queryId: string): Promise<RecallEvidenceOutput>;
   getMemoryProcessingStatus(memoryIds: string[]): Promise<MemoryProcessingStatusOutput>;
   retryMemoryProcessing(id: string): Promise<RetryMemoryProcessingOutput>;
   listMemoryLogs(input: MemoryApiLogsInput): Promise<MemoryApiLogsOutput>;
@@ -274,6 +278,14 @@ export function createHttpMemoryRuntimeClient(inputConfig: RuntimeConfig): Memor
         path: `/api/v1/memory/${encodeURIComponent(id)}`,
         schema: DeleteMemoryOutputSchema,
         init: { method: "DELETE" }
+      });
+    },
+
+    async recallEvidence(queryId) {
+      return requestJson({
+        config,
+        path: `/api/v1/memory/recalls/${encodeURIComponent(queryId)}`,
+        schema: RecallEvidenceOutputSchema
       });
     },
 
@@ -412,11 +424,10 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
           memoryLayers: ["L1", "L2", "L3", "Skill"],
           supportsCli: false
         },
-        activeProfile: "byok",
         models: {
-          summary: { provider: "", configured: false, remote: false },
-          evolution: { provider: "", configured: false, remote: false },
-          embedding: { provider: "local", configured: true, remote: false }
+          summary: { provider: "", configured: false, remote: false, routing: null },
+          evolution: { provider: "", configured: false, remote: false, routing: null },
+          embedding: { provider: "local", configured: true, remote: false, mode: null }
         },
         serverTime: new Date().toISOString()
       };
@@ -452,6 +463,9 @@ export function createUnavailableMemoryRuntimeClient(): MemoryRuntimeClient {
       throw unavailable();
     },
     async deleteMemory() {
+      throw unavailable();
+    },
+    async recallEvidence() {
       throw unavailable();
     },
     async getMemoryProcessingStatus() {

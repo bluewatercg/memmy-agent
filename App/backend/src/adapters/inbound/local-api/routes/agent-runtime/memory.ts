@@ -9,7 +9,7 @@ import {
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { withErrorEnvelope } from "../../../../../services/error-envelope.js";
-import type { RuntimeContext } from "../../../../../services/runtime-context.js";
+import { runtimeContextFromRequest } from "../../../../../services/runtime-context.js";
 import type { AgentRuntimeRouteDeps } from "./index.js";
 
 const MemoryParamsSchema = z.object({
@@ -18,15 +18,29 @@ const MemoryParamsSchema = z.object({
 
 const MemoryVersionParamsSchema = MemoryParamsSchema.extend({
   version: z.coerce.number().int().positive()
+const RecallParamsSchema = z.object({
+  queryId: z.string().min(1)
 });
 
 export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRouteDeps): void {
+  app.get(
+    "/api/v1/memory/recalls/:queryId",
+    { preHandler: deps.authenticateRuntimeToken },
+    withErrorEnvelope(async (request, reply) => {
+      const params = RecallParamsSchema.parse(request.params);
+      return reply.send(await deps.services.memoryDetail.recallEvidence(
+        params.queryId,
+        runtimeContextFromRequest(request, deps.timeZone)
+      ));
+    })
+  );
+
   app.post(
     "/api/v1/memory/add",
     { preHandler: deps.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const input = AddMemoryInputSchema.parse(request.body);
-      return reply.send(await deps.services.memoryDetail.add(input, runtimeContext()));
+      return reply.send(await deps.services.memoryDetail.add(input, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -44,7 +58,7 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
         tools,
         excludedSourceAgents
       });
-      return reply.send(await deps.services.panel.memoryApiLogs(input, runtimeContext()));
+      return reply.send(await deps.services.panel.memoryApiLogs(input, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -75,7 +89,7 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
     { preHandler: deps.authenticateRuntimeToken },
     withErrorEnvelope(async (request, reply) => {
       const params = MemoryParamsSchema.parse(request.params);
-      return reply.send(await deps.services.memoryDetail.getById(params.id, runtimeContext()));
+      return reply.send(await deps.services.memoryDetail.getById(params.id, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
 
@@ -104,13 +118,9 @@ export function registerMemoryRoutes(app: FastifyInstance, deps: AgentRuntimeRou
     withErrorEnvelope(async (request, reply) => {
       const params = MemoryParamsSchema.parse(request.params);
       const input = DeleteMemoryInputSchema.parse(request.body ?? {});
-      return reply.send(await deps.services.memoryDetail.delete(params.id, input, runtimeContext()));
+      return reply.send(await deps.services.memoryDetail.delete(params.id, input, runtimeContextFromRequest(request, deps.timeZone)));
     })
   );
-}
-
-function runtimeContext(): RuntimeContext {
-  return { adapterId: "runtime" };
 }
 
 function queryValues(rawUrl: string | undefined, name: string): string[] | undefined {

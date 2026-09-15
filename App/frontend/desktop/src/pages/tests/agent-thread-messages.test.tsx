@@ -12,6 +12,38 @@ const stylesSourceUrl = new URL("../../styles.css", import.meta.url);
 const WINDOWS_COMMAND_ERROR = "'node' 不是内部或外部命令，也不是可运行的程序\r\n或批处理文件。";
 
 describe("AgentThreadMessages", () => {
+  it("shows a per-answer control for inspecting injected memories", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-memory-evidence"
+          memoryRuntimeClient={{
+            recallEvidence: vi.fn(),
+            deleteMemory: vi.fn()
+          }}
+          messages={[
+            {
+              id: "query-memory-evidence",
+              role: "user",
+              content: "检查记忆"
+            },
+            {
+              id: "answer-memory-evidence",
+              role: "assistant",
+              turnId: "turn-memory-evidence",
+              content: "已完成。"
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("查看本轮记忆依据");
+    expect(html).toContain('aria-expanded="false"');
+    expect(html).toContain("agent-memory-evidence-toggle");
+    expect(html.indexOf("查看本轮记忆依据")).toBeLessThan(html.indexOf("已完成。"));
+  });
+
   it("keeps memo boundaries around chat history rendering", () => {
     const threadSource = readFileSync(agentThreadMessagesSourceUrl, "utf8");
     const contentSource = readFileSync(agentMessageContentSourceUrl, "utf8");
@@ -147,23 +179,124 @@ describe("AgentThreadMessages", () => {
     expect(byokHtml).toContain("Error: API returned empty choices.");
   });
 
-  it("shows login-expired copy for auth errors in account mode and keeps API-key copy for BYOK", () => {
-    const message = { id: "error", role: "assistant" as const, content: "Error calling LLM: 401 Unauthorized" };
+  it("uses the actual model source for auth copy instead of the global app mode", () => {
+    const accountMessage = {
+      id: "account-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "account" as const }
+    };
+    const byokMessage = {
+      id: "byok-error",
+      role: "assistant" as const,
+      content: "Error calling LLM: 401 Unauthorized",
+      modelError: { category: "model_failed" as const, source: "byok" as const }
+    };
 
     const accountHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[message]} accountMode />
+        <AgentThreadMessages chatScopeKey="chat-account-auth-error" messages={[accountMessage]} />
       </I18nProvider>
     );
     const byokHtml = renderToString(
       <I18nProvider language="zh-CN">
-        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[message]} />
+        <AgentThreadMessages chatScopeKey="chat-byok-auth-error" messages={[byokMessage]} />
       </I18nProvider>
     );
 
     expect(accountHtml).toContain("登录已过期，请重新登录");
     expect(accountHtml).not.toContain("API 密钥无效或已过期");
     expect(byokHtml).toContain("API 密钥无效或已过期，请检查后重试");
+  });
+
+  it("renders the localized quota title with its raw detail expanded by default", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-quota-error"
+          messages={[
+            {
+              id: "quota-error",
+              role: "assistant",
+              content: "Error calling LLM: raw provider code 40309",
+              modelError: { category: "quota_exhausted", detail: "Error calling LLM: raw provider code 40309" }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("当前模型 Token 余额不足，请更换模型后重试");
+    expect(html).toContain("Error calling LLM: raw provider code 40309");
+    expect(html).toContain("收起详情");
+    expect(html).toContain('aria-expanded="true"');
+    expect(html.indexOf("raw provider code")).toBeLessThan(html.indexOf("收起详情"));
+    expect(html).not.toContain("充值");
+  });
+
+  it("renders a structured generic model failure instead of the localized fallback bubble", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-model-failed"
+          messages={[{
+            id: "model-failed",
+            role: "assistant",
+            content: "平台服务响应异常，请稍后重试。",
+            modelError: { category: "model_failed", detail: "Error: raw provider failure" }
+          }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("模型请求失败，请稍后重试");
+    expect(html).toContain("Error: raw provider failure");
+    expect(html).toContain("收起详情");
+    expect(html).not.toContain("agent-chat-bubble--assistant");
+  });
+
+  it("renders a partial answer followed by an image capability error card", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-image-partial"
+          messages={[
+            { id: "partial", role: "assistant", content: "模型已经输出的部分内容" },
+            {
+              id: "image-error",
+              role: "assistant",
+              content: "当前模型不支持图片输入，请切换到支持多模态能力的模型后重试",
+              modelError: {
+                category: "image_input_unsupported",
+                source: "byok",
+                detail: "Error: image_url is not supported"
+              }
+            }
+          ]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("模型已经输出的部分内容");
+    expect(html).toContain("当前模型不支持图片输入，请切换到支持多模态能力的模型后重试");
+    expect(html).toContain("Error: image_url is not supported");
+    expect(html).toContain("agent-model-error-notice");
+  });
+
+  it("renders quota-like normal answers as ordinary assistant content", () => {
+    const content = "The quota, balance, credit and 额度 values are all healthy.";
+    const html = renderToString(
+      <I18nProvider language="en-US">
+        <AgentThreadMessages
+          chatScopeKey="chat-normal-quota-text"
+          messages={[{ id: "normal", role: "assistant", content }]}
+        />
+      </I18nProvider>
+    );
+
+    expect(html).toContain("The quota, balance, credit and 额度 values are all healthy.");
+    expect(html).not.toContain("The current model has insufficient tokens.");
+    expect(html).not.toContain("agent-model-error-notice");
   });
 
   it("renders context compaction messages as standalone dividers outside activity clusters", () => {
@@ -862,7 +995,8 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('role="alert"');
     expect(html).not.toContain("agent-chat-bubble--assistant");
     expect(html).not.toContain("agent-retry-wait-line");
-    expect(html).not.toContain("upstream connect error");
+    expect(html).toContain("upstream connect error");
+    expect(html).toContain("收起详情");
   });
 
   it("renders activity reasoning and plain content as context rather than steps", () => {
@@ -1016,6 +1150,81 @@ describe("AgentThreadMessages", () => {
     expect(html).not.toContain("Completed read_file");
   });
 
+  it("keeps apply_patch content out of summaries and truncates it only in expanded details", () => {
+    const longBody = "private-patch-content-".repeat(260);
+    const patchInput = [
+      "*** Begin Patch",
+      "*** Update File: src/app.ts",
+      "@@",
+      "-old",
+      `+${longBody}`,
+      "*** End Patch",
+    ].join("\n");
+    const render = (stoppedByUser: boolean) => renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey={`chat-apply-patch-${stoppedByUser}`}
+          messages={[{
+            id: "patch-tool",
+            role: "tool",
+            kind: "trace",
+            content: "",
+            traces: [],
+            toolEvents: [{
+              phase: "end",
+              call_id: "call-patch",
+              name: "apply_patch",
+              arguments: { input: patchInput },
+            }],
+            activitySegmentId: "activity-patch",
+            isStreaming: stoppedByUser,
+            stoppedByUser,
+          }]}
+        />
+      </I18nProvider>,
+    );
+
+    const collapsed = render(false);
+    expect(collapsed).toContain("工作了一会儿");
+    expect(collapsed).not.toContain("private-patch-content");
+    expect(collapsed).not.toContain("*** Begin Patch");
+
+    const expanded = render(true);
+    expect(expanded).toContain("Patched");
+    expect(expanded).toContain("app.ts");
+    expect(expanded).toContain('data-detail="arguments"');
+    expect(expanded).toContain("*** Begin Patch");
+    expect(expanded).toContain("private-patch-content");
+    expect(expanded).toContain("…");
+    expect(expanded).not.toContain(longBody);
+  });
+
+  it("uses the same apply_patch summary for a legacy persisted trace", () => {
+    const patchInput = "*** Begin Patch\n*** Add File: src/legacy.ts\n+new\n*** End Patch";
+    const trace = `apply_patch(${JSON.stringify({ input: patchInput })})`;
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-legacy-apply-patch"
+          messages={[{
+            id: "legacy-patch",
+            role: "tool",
+            kind: "trace",
+            content: trace,
+            traces: [trace],
+            activitySegmentId: "activity-legacy-patch",
+            isStreaming: true,
+            stoppedByUser: true,
+          }]}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("Patched");
+    expect(html).toContain("legacy.ts");
+    expect(html).toContain('data-detail="trace"');
+  });
+
   it("renders same-call file edit and tool trace in one activity cluster without duplicate summary", () => {
     const html = renderToString(
       <I18nProvider language="zh-CN">
@@ -1134,6 +1343,59 @@ describe("AgentThreadMessages", () => {
     expect(html).toContain('data-icon="chevron-right"');
     expect(html).not.toContain("Completed write_file");
     expect(html).not.toContain("Edited /tmp/a.txt");
+  });
+
+  it("renders confirmed no-op files as unchanged without a diff or edited summary", () => {
+    const html = renderToString(
+      <I18nProvider language="zh-CN">
+        <AgentThreadMessages
+          chatScopeKey="chat-file-noop"
+          messages={[
+            {
+              id: "file-noop",
+              role: "tool",
+              kind: "trace",
+              content: "",
+              traces: [],
+              fileEdits: [
+                {
+                  call_id: "call-noop",
+                  ui_tool_call_id: "ui-noop",
+                  tool: "apply_patch",
+                  path: "src/a.ts",
+                  phase: "end",
+                  status: "done",
+                  added: 0,
+                  deleted: 0,
+                  unchanged: true,
+                },
+                {
+                  call_id: "call-noop",
+                  ui_tool_call_id: "ui-noop",
+                  tool: "apply_patch",
+                  path: "src/b.ts",
+                  phase: "end",
+                  status: "done",
+                  added: 0,
+                  deleted: 0,
+                  unchanged: true,
+                },
+              ],
+              activitySegmentId: "activity-file-noop",
+              isStreaming: true,
+              stoppedByUser: true,
+            },
+          ]}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("文件未修改");
+    expect(html).toContain("未修改 src/a.ts");
+    expect(html).toContain("未修改 src/b.ts");
+    expect(html).not.toContain("编辑了 2 个文件");
+    expect(html).not.toContain("+0");
+    expect(html).not.toContain("Edited src/a.ts");
   });
 
   it.each(["write_file", "edit_file", "apply_patch"] as const)("does not render %s file edit content fallback", (toolName) => {

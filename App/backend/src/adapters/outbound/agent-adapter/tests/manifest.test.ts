@@ -69,6 +69,9 @@ describe("agent adapter plugin manifest", () => {
     expect(isBuiltinAgentKind("workbuddy")).toBe(true);
     expect(isBuiltinAgentKind("omp")).toBe(true);
     expect(isBuiltinAgentKind("freebuff")).toBe(true);
+    expect(isBuiltinAgentKind("pi")).toBe(true);
+    expect(isBuiltinAgentKind("qwenwork")).toBe(true);
+    expect(isBuiltinAgentKind("deepseek_harness")).toBe(true);
     expect(isBuiltinAgentKind("third_party_agent")).toBe(false);
     expect(isBuiltinAgentKind(1)).toBe(false);
     expect(parseAgentAdapterPluginManifest({ ...createManifest(), kind: "third_party_agent" }).kind).toBe(

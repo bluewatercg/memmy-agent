@@ -61,14 +61,15 @@ export interface PanelService {
 }
 
 /** Creates create panel service. */
-export function createPanelService(deps: { memoryClient: MemoryClient }): PanelService {
+export function createPanelService(deps: { memoryClient: MemoryClient; getUserId: () => string }): PanelService {
+  const context = (ctx: RuntimeContext): RuntimeContext => ({ ...ctx, userId: deps.getUserId() });
   return {
-    async overview(_ctx) {
-      return deps.memoryClient.panelOverview();
+    async overview(ctx) {
+      return deps.memoryClient.panelOverview(context(ctx));
     },
 
-    async analysis(_ctx) {
-      return deps.memoryClient.panelAnalysis();
+    async analysis(ctx) {
+      return deps.memoryClient.panelAnalysis(context(ctx));
     },
 
     async contextPack(projectId, _ctx) {
@@ -110,21 +111,21 @@ export function createPanelService(deps: { memoryClient: MemoryClient }): PanelS
     async splitTopic(id, input, ctx) { return deps.memoryClient.splitTopic(id, withTopicRuntime(input, ctx)); },
     async topicEvidence(id, input, _ctx) { return deps.memoryClient.topicEvidence(id, input); },
 
-    async items(input, _ctx) {
-      return deps.memoryClient.panelItems(input);
+    async items(input, ctx) {
+      return deps.memoryClient.panelItems(input, context(ctx));
     },
 
-    async tasks(input, _ctx) {
-      return deps.memoryClient.panelTasks(input);
+    async tasks(input, ctx) {
+      return deps.memoryClient.panelTasks(input, context(ctx));
     },
 
-    async deleteTask(id, _ctx) {
-      return deps.memoryClient.deletePanelTask(id);
+    async deleteTask(id, ctx) {
+      return deps.memoryClient.deletePanelTask(id, context(ctx));
     },
 
-    async memoryApiLogs(input, _ctx) {
+    async memoryApiLogs(input, ctx) {
       try {
-        return await deps.memoryClient.memoryApiLogs(input);
+        return await deps.memoryClient.memoryApiLogs(input, context(ctx));
       } catch (error) {
         if (isMissingMemoryLogsRoute(error)) {
           return {

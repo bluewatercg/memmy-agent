@@ -241,7 +241,7 @@ describe("prototype style alignment", () => {
     expect(conversationTitleRule).toContain("user-select: none;");
     expect(conversationTitleRule).toContain("white-space: nowrap;");
     expect(conversationScrollRule).toContain("padding-top: 12px;");
-    expect(conversationScrollRule).toContain("padding-bottom: 120px;");
+    expect(conversationScrollRule).toContain("padding-bottom: calc(var(--agent-composer-overlay-height, 120px) + 8px);");
     expect(conversationScrollRule).not.toContain("var(--color-action-sky)");
     expect(globalCss).not.toContain(".agent-conversation-scroll::-webkit-scrollbar");
   });
@@ -274,6 +274,22 @@ describe("prototype style alignment", () => {
 
     expect(memorySummaryRule).toContain("overflow: hidden;");
     expect(memorySummaryRule).toContain("-webkit-line-clamp: 2;");
+  });
+
+  it("keeps the Windows memory refresh action below the native title-bar overlay", () => {
+    const windowsMemoryHeaderRule = globalCss.match(
+      /body\.memmy-platform-windows \.memory-panel__header\s*\{[^}]*\}/
+    )?.[0] ?? "";
+
+    expect(windowsMemoryHeaderRule).toContain("padding-top: var(--codex-toolbar-height);");
+  });
+
+  it("keeps the Windows memory drawer close action below the native title-bar overlay", () => {
+    const windowsMemoryDrawerRule = globalCss.match(
+      /body\.memmy-platform-windows \.memory-drawer\s*\{[^}]*\}/
+    )?.[0] ?? "";
+
+    expect(windowsMemoryDrawerRule).toContain("padding-top: var(--codex-toolbar-height);");
   });
 
   it("keeps memory drawer IDs selectable inside the window drag area", () => {

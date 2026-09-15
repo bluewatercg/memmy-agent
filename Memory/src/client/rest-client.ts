@@ -8,6 +8,18 @@ import type {
   TopicInboxListInput, TopicInboxListOutput, TopicInboxMergeInput, TopicInboxMergeOutput, TopicInboxRefreshInput,
   TopicInboxRefreshOutput, TopicInboxSplitInput, TopicInboxSplitOutput
 } from "@memmy/local-api-contracts";
+import {
+  L3WorldModelBoundaryResponseSchema,
+  L3WorldModelTraceHeadResponseSchema,
+  SessionL3WorldModelContextResponseSchema,
+  l3WorldModelGetTransport,
+  type L3WorldModelBoundaryRequest,
+  type L3WorldModelBoundaryResponse,
+  type L3WorldModelRequestEnvelope,
+  type L3WorldModelTraceHeadResponse,
+  type SessionL3WorldModelContextResponse
+} from "../contracts/index.js";
+import { resolveTimeZone } from "../utils/time.js";
 
 export type MemoryRestQueryValue =
   | string
@@ -22,6 +34,7 @@ export interface MemoryRestClientOptions {
   endpoint: string;
   token?: string;
   headers?: Record<string, string>;
+  timeZone?: string;
 }
 export interface AssetRecallRequestBody {
   mode: "bootstrap" | "recall" | "tool";
@@ -94,11 +107,13 @@ export class MemoryRestClient {
   private readonly endpoint: string;
   private readonly token?: string;
   private readonly headers: Record<string, string>;
+  private readonly timeZone: string;
 
   constructor(options: MemoryRestClientOptions) {
     this.endpoint = options.endpoint.replace(/\/+$/, "");
     this.token = options.token;
     this.headers = options.headers ?? {};
+    this.timeZone = resolveTimeZone(options.timeZone);
   }
 
   health(): Promise<HealthResponse> {
@@ -119,6 +134,46 @@ export class MemoryRestClient {
 
   checkpointSession(sessionId: string, request: SessionCheckpointRequest): Promise<unknown> {
     return this.request("POST", `/api/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint`, request);
+  }
+
+  async l3WorldModelTraceHead(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<L3WorldModelTraceHeadResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const payload = await this.request(
+      "GET",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-trace-head${queryString(transport.query)}`,
+      undefined,
+      transport.headers
+    );
+    return L3WorldModelTraceHeadResponseSchema.parse(payload);
+  }
+
+  async l3WorldModelBoundary(
+    sessionId: string,
+    request: L3WorldModelBoundaryRequest
+  ): Promise<L3WorldModelBoundaryResponse> {
+    const payload = await this.request(
+      "POST",
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/l3-world-model-boundary`,
+      request
+    );
+    return L3WorldModelBoundaryResponseSchema.parse(payload);
+  }
+
+  async l3WorldModelContext(
+    sessionId: string,
+    envelope: L3WorldModelRequestEnvelope
+  ): Promise<SessionL3WorldModelContextResponse> {
+    const transport = l3WorldModelGetTransport(envelope);
+    const payload = await this.request(
+      "GET",
+      `/api/v1/l3-world-model/sessions/${encodeURIComponent(sessionId)}/context${queryString(transport.query)}`,
+      undefined,
+      transport.headers
+    );
+    return SessionL3WorldModelContextResponseSchema.parse(payload);
   }
 
   startTurn(request: TurnStartRequest): Promise<unknown> {
@@ -253,11 +308,13 @@ export class MemoryRestClient {
   }
 
 
-  private async request(method: "GET" | "POST" | "DELETE" | "PATCH", path: string, body?: unknown): Promise<unknown> {
+  private async request(method: "GET" | "POST" | "DELETE" | "PATCH", path: string, body?: unknown, requestHeaders: Record<string, string> = {}): Promise<unknown> {
     const response = await fetch(`${this.endpoint}${path}`, {
       method,
       headers: {
         ...this.headers,
+        ...requestHeaders,
+        "x-memmy-time-zone": this.timeZone,
         ...(body === undefined ? {} : { "content-type": "application/json" }),
         ...(this.token ? { authorization: `Bearer ${this.token}` } : {})
       },

@@ -6,10 +6,26 @@ import {
   type LlmClient,
   type LlmCompletionOptions,
   type LlmMessage,
-  type MemoryRow
+  type MemoryRow,
+  type RecallHit
 } from "../../../src/index.js";
 import { Repositories } from "../../../src/storage/repositories.js";
-import { makeTraceEligibleForL2 } from "../../fixtures/evolution-fixture.js";
+import {
+  policyIsEligibleForDownstream,
+  policyMetaFromMemory
+} from "../../../src/algorithm/plugin-algorithms.js";
+import {
+  mergeSameTurnRecallHits,
+  mmrRecallHits,
+  parallelMemoryLaneLimit
+} from "../../../src/service/retrieval/retrieval-service.js";
+import {
+  insertActivePolicyMemory,
+  insertActiveSkillMemoryForTest,
+  insertWorldModelMemoryForTest,
+  makeTraceEligibleForL2,
+  setPolicyLifecycleStatusForTest
+} from "../../fixtures/evolution-fixture.js";
 import {
   configWithMemoryGates,
   countRows,
@@ -28,6 +44,233 @@ const {
 afterEach(cleanup);
 
 describe("MemoryService / retrieval / query and filtering", () => {
+  it("[BC-29] over-recalls the Agent lane, keeps User Memory at TopK, then truncates once", () => {
+    const finalLimit = 10;
+    const agentLaneLimit = parallelMemoryLaneLimit(finalLimit);
+    const userMemoryTopK = finalLimit;
+    expect(agentLaneLimit).toBe(15);
+    expect(userMemoryTopK).toBe(10);
+
+    const agentHits = Array.from({ length: agentLaneLimit }, (_, index): RecallHit => ({
+      id: `l1-${index}`,
+      kind: "trace",
+      memoryLayer: "L1",
+      status: "activated",
+      snippet: `agent evidence ${index}`,
+      score: 0.8 - index * 0.01,
+      tags: [],
+      source: "search"
+    }));
+    const agentMemories = agentHits.map((hit, index): MemoryRow => ({
+      id: hit.id,
+      timeline: `2026-08-18T00:00:${String(index).padStart(2, "0")}.000Z`,
+      userId: "bc-29-user",
+      memoryType: "LongTermMemory",
+      memoryLayer: "L1",
+      status: "activated",
+      visibility: "private",
+      memoryValue: hit.snippet,
+      tags: [],
+      info: {},
+      version: 1,
+      createdAt: `2026-08-18T00:00:${String(index).padStart(2, "0")}.000Z`,
+      updatedAt: `2026-08-18T00:00:${String(index).padStart(2, "0")}.000Z`,
+      properties: {
+        internal_info: {
+          memory_layer: "L1",
+          source_raw_turn_id: index < 5 ? `shared-turn-${index}` : `l1-turn-${index}`
+        }
+      }
+    }));
+    const userHits = Array.from({ length: userMemoryTopK }, (_, index): RecallHit => ({
+      id: `user-${index}`,
+      kind: "user_memory",
+      memoryLayer: "UserMemory",
+      status: "activated",
+      snippet: `user evidence ${index}`,
+      score: 0.9 - index * 0.01,
+      tags: [],
+      source: "search",
+      sourceTurnId: index < 5 ? `shared-turn-${index}` : `user-turn-${index}`,
+      memberMemoryIds: [`user-${index}`],
+      retrievalRoutes: ["user_memory"]
+    }));
+
+    const merged = mergeSameTurnRecallHits(agentHits, agentMemories, userHits);
+    expect(merged.hits).toHaveLength(20);
+    expect(merged.mergedSourceTurnIds.sort()).toEqual([
+      "shared-turn-0",
+      "shared-turn-1",
+      "shared-turn-2",
+      "shared-turn-3",
+      "shared-turn-4"
+    ]);
+    expect(merged.hits.find((hit) => hit.sourceTurnId === "shared-turn-0")).toMatchObject({
+      score: 0.9,
+      memberMemoryIds: ["l1-0", "user-0"],
+      retrievalRoutes: ["user_memory", "l1"]
+    });
+    expect(merged.hits.map((hit) => hit.id)).toContain("l1-14");
+    expect(merged.hits.map((hit) => hit.id)).toContain("user-9");
+    expect(merged.hits.map((hit) => hit.id)).not.toContain("user-10");
+
+    const selected = mmrRecallHits(merged.hits, finalLimit, 1);
+    expect(selected).toHaveLength(finalLimit);
+    expect(new Set(selected.map((hit) => hit.sourceTurnId ?? hit.id)).size).toBe(finalLimit);
+    expect(mmrRecallHits(merged.hits.slice(0, 7), finalLimit, 1)).toHaveLength(7);
+  });
+
+  it("[BC-10] applies the complete Policy lifecycle matrix to recall, labeling, and downstream eligibility", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "bc-10-user" };
+    const session = service.openSession({ namespace });
+    const statuses = [
+      "candidate",
+      "active",
+      "verification_required",
+      "quarantined",
+      "superseded",
+      "archived"
+    ] as const;
+    for (const status of statuses) {
+      const id = `policy_bc10_${status}`;
+      insertActivePolicyMemory(db, {
+        id,
+        userId: namespace.userId,
+        sessionId: session.sessionId,
+        agentId: namespace.source,
+        appId: "bc-10-workspace",
+        profileId: namespace.profileId,
+        sourceTraceId: `trace_${status}`,
+        sourceEpisodeId: `episode_${status}`
+      });
+      setPolicyLifecycleStatusForTest(db, id, status);
+    }
+
+    const memories = new Repositories(db.db).memories.getMany(statuses.map((status) => `policy_bc10_${status}`));
+    expect(Object.fromEntries(memories.map((memory) => {
+      const policy = policyMetaFromMemory(memory)!;
+      return [policy.status, policyIsEligibleForDownstream(policy)];
+    }))).toEqual({
+      candidate: false,
+      active: true,
+      verification_required: false,
+      quarantined: false,
+      superseded: false,
+      archived: false
+    });
+
+    const recall = await service.search({
+      sessionId: session.sessionId,
+      query: "python pytest failure inspection retry",
+      layers: ["L2"],
+      limit: 10,
+      includeInjectedContext: true
+    });
+    expect(recall.hits.map((hit) => hit.id).sort()).toEqual([
+      "policy_bc10_active",
+      "policy_bc10_candidate"
+    ]);
+    expect(recall.injectedContext.markdown).toContain("Candidate Experience (unverified)");
+    expect(recall.injectedContext.markdown).toContain(
+      "Candidate, unverified guidance. Treat it as a hypothesis and verify it in the current task before use."
+    );
+    db.close();
+  });
+
+  it("[BC-07] keeps expired dynamic policies out of ordinary recall until revalidated", async () => {
+    const { db, service } = createTestService();
+    const namespace = { source: "codex", profileId: "default", userId: "dynamic-policy-user" };
+    const session = service.openSession({ namespace });
+    insertActivePolicyMemory(db, {
+      id: "policy_dynamic_stale",
+      userId: namespace.userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      appId: "dynamic-policy-app",
+      profileId: namespace.profileId,
+      sourceTraceId: "trace_dynamic_policy",
+      sourceEpisodeId: "episode_dynamic_policy",
+      freshnessClass: "dynamic",
+      lastVerifiedAt: "2026-06-01T00:00:00.000Z",
+      revalidateAfter: "2026-07-01T00:00:00.000Z"
+    });
+    insertActivePolicyMemory(db, {
+      id: "policy_dynamic_without_deadline",
+      userId: namespace.userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      appId: "dynamic-policy-app",
+      profileId: namespace.profileId,
+      sourceTraceId: "trace_dynamic_policy_without_deadline",
+      sourceEpisodeId: "episode_dynamic_policy_without_deadline",
+      freshnessClass: "dynamic",
+      lastVerifiedAt: "2026-08-18T00:00:00.000Z"
+    });
+    insertActiveSkillMemoryForTest(db, {
+      id: "skill_from_stale_policy",
+      userId: namespace.userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      appId: "dynamic-policy-app",
+      profileId: namespace.profileId,
+      sourcePolicyIds: ["policy_dynamic_stale"],
+      tags: ["skill", "python", "pytest"],
+      name: "stale_pytest_workflow",
+      invocationGuide: "Use the old python pytest failure inspection and retry strategy."
+    });
+    insertWorldModelMemoryForTest(db, {
+      id: "world_from_stale_policy",
+      userId: namespace.userId,
+      sessionId: session.sessionId,
+      agentId: namespace.source,
+      appId: "dynamic-policy-app",
+      profileId: namespace.profileId,
+      memoryKey: "world:dynamic-policy-stale",
+      domainKey: "python|pytest",
+      domainTags: ["python", "pytest"],
+      policyIds: ["policy_dynamic_stale"]
+    });
+
+    const stale = await service.search({
+      sessionId: session.sessionId,
+      query: "python pytest failure inspection retry",
+      layers: ["L2", "L3", "Skill"],
+      limit: 5
+    });
+
+    expect(stale.hits.map((hit) => hit.id)).not.toContain("policy_dynamic_stale");
+    expect(stale.hits.map((hit) => hit.id)).not.toContain("policy_dynamic_without_deadline");
+    expect(stale.hits.map((hit) => hit.id)).not.toContain("skill_from_stale_policy");
+    expect(stale.hits.map((hit) => hit.id)).not.toContain("world_from_stale_policy");
+    expect(stale.status).toContain("policy:revalidation_required");
+
+    const row = db.db.prepare(`SELECT properties_json FROM memories WHERE id = ?`).get("policy_dynamic_stale") as {
+      properties_json: string;
+    };
+    const properties = JSON.parse(row.properties_json) as {
+      internal_info: {
+        policy: {
+          last_verified_at?: string;
+          revalidate_after?: string;
+        };
+      };
+    };
+    properties.internal_info.policy.last_verified_at = "2026-08-18T00:00:00.000Z";
+    properties.internal_info.policy.revalidate_after = "2026-09-18T00:00:00.000Z";
+    db.db.prepare(`UPDATE memories SET properties_json = ? WHERE id = ?`)
+      .run(JSON.stringify(properties), "policy_dynamic_stale");
+
+    const fresh = await service.search({
+      sessionId: session.sessionId,
+      query: "python pytest failure inspection retry",
+      layers: ["L2", "L3", "Skill"],
+      limit: 5
+    });
+    expect(fresh.hits.map((hit) => hit.id)).toContain("policy_dynamic_stale");
+    db.close();
+  });
+
   it("disables memory retrieval while still allowing turn capture", async () => {
     const { db } = createTestService();
     const service = createTestMemoryService({
@@ -87,6 +330,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           tier2TopK: 2,
           tier3TopK: 4,
           relativeThresholdFloor: 0,
+          minRecallScore: 0,
           smartSeed: false,
           llmFilterEnabled: false,
           llmFilterFallbackMaxKeep: 20
@@ -171,6 +415,89 @@ describe("MemoryService / retrieval / query and filtering", () => {
     ]);
     expect(summaryCalls[0]?.options.timeoutMs).toBe(20_000);
     expect(evolutionCalls).toEqual([]);
+    db.close();
+  });
+
+  it("uses an extracted time range to inject at most 20 recent L1 summaries", async () => {
+    const calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }> = [];
+    const seenEmbeddings: string[] = [];
+    const { db, service } = createTestService({
+      llm: createTimeFilterLlm(calls, {
+        startAt: "2026-08-04T00:00:00.000Z",
+        endAt: "2026-08-05T00:00:00.000Z"
+      }),
+      embedder: createCapturingEmbedder(seenEmbeddings)
+    });
+    const repos = new Repositories(db.db);
+    for (let index = 0; index < 25; index += 1) {
+      repos.memories.insert(timeFilteredTraceMemory({
+        id: `trace-time-filter-${index}`,
+        at: new Date(Date.UTC(2026, 7, 4, 0, index)).toISOString(),
+        value: 25 - index,
+        agentId: index % 2 === 0 ? "codex" : "cursor",
+        summary: `time-filtered activity ${index}`
+      }));
+    }
+    repos.memories.insert(timeFilteredTraceMemory({
+      id: "trace-time-filter-outside",
+      at: "2026-08-03T23:59:59.000Z",
+      value: 100,
+      agentId: "cursor",
+      summary: "outside the requested range"
+    }));
+
+    const recall = await service.search({
+      namespace: {
+        source: "codex",
+        profileId: "jiang",
+        userId: "user-time-filter"
+      },
+      timeZone: "Asia/Shanghai",
+      query: "我今天做了什么，总结一下",
+      limit: 100
+    });
+
+    expect(calls.map((call) => call.options.operation)).toEqual([
+      "retrieval.retrieval.query.extract.v2"
+    ]);
+    expect(calls[0]?.messages[0]?.content).toContain("CURRENT_TIME:");
+    expect(calls[0]?.messages[0]?.content).toContain("TIME_ZONE:");
+    expect(seenEmbeddings).toEqual([]);
+    expect(recall.status).toContain("time_filter:l1");
+    expect(recall.hits).toHaveLength(20);
+    expect(recall.hits.map((hit) => hit.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `trace-time-filter-${index + 5}`)
+    );
+    expect(recall.hits.every((hit) => hit.score === 0)).toBe(true);
+    expect(recall.hits.map((hit) => hit.id)).not.toContain("trace-time-filter-outside");
+    expect(recall.sourceMemoryIds).toEqual(recall.hits.map((hit) => hit.id));
+    const lines = recall.injectedContext.markdown.split("\n");
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toMatch(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] \[Cursor\] time-filtered activity 5$/);
+    expect(recall.injectedContext.markdown).not.toContain("Time-filtered L1 traces");
+    expect(recall.injectedContext.markdown).not.toContain("Range:");
+    expect(recall.injectedContext.markdown).not.toContain("value=");
+    expect(recall.injectedContext.markdown).not.toContain("Historical user statement");
+    const latestSearchLog = service.apiLogs({ tools: ["memory_search"], limit: 1 }).logs[0];
+    const logOutput = JSON.parse(latestSearchLog!.outputJson) as {
+      candidates: Array<{ score?: number; content?: string; summary?: string }>;
+    };
+    expect(logOutput.candidates).toHaveLength(20);
+    expect(logOutput.candidates.every((candidate) => candidate.score === 0)).toBe(true);
+    expect(logOutput.candidates.map((candidate, index) => candidate.content)).toEqual(
+      Array.from({ length: 20 }, (_, index) => {
+        const activityIndex = index + 5;
+        return [
+          `id: trace-time-filter-${activityIndex}`,
+          `timestamp: 2026-08-04 08:${String(activityIndex).padStart(2, "0")}:00 UTC+08:00`,
+          "",
+          "Summary:",
+          `time-filtered activity ${activityIndex}`
+        ].join("\n");
+      })
+    );
+    expect(logOutput.candidates.every((candidate) => candidate.content?.endsWith(`Summary:\n${candidate.summary}`))).toBe(true);
+    expect(logOutput.candidates.some((candidate) => candidate.content?.includes("Historical user statement"))).toBe(false);
     db.close();
   });
 
@@ -315,10 +642,22 @@ describe("MemoryService / retrieval / query and filtering", () => {
       path: join(root, "memory.sqlite")
     });
     const config = DEFAULT_MEMMY_CONFIG;
+    const failingFilterLlm = createFailingLlm();
     const service = createTestMemoryService({
       db,
       mode: "dev",
-      llm: createFailingLlm(),
+      llm: {
+        ...failingFilterLlm,
+        async completeJson<T extends Record<string, unknown>>(
+          messages: LlmMessage[],
+          options: LlmCompletionOptions
+        ): Promise<T> {
+          if (options.operation === "capture.summarize") {
+            return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
+          }
+          return failingFilterLlm.completeJson<T>(messages, options);
+        }
+      },
       embedder: createCapturingEmbedder([]),
       config: {
         ...config,
@@ -355,6 +694,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -386,6 +726,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
           retrieval: {
             ...config.algorithm.retrieval,
             relativeThresholdFloor: 0,
+            minRecallScore: 0,
             smartSeed: false,
             llmFilterEnabled: false,
             llmFilterMinCandidates: 1,
@@ -475,6 +816,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -518,6 +860,9 @@ describe("MemoryService / retrieval / query and filtering", () => {
         options: { operation: string; maxTokens?: number }
       ): Promise<T> {
         calls.push({ messages, options });
+        if (options.operation === "capture.summarize") {
+          return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
+        }
         return {
           ranked: [1],
           sufficient: false
@@ -576,6 +921,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -602,7 +948,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     db.close();
   });
 
-  it("uses the summary LLM for retrieval filtering and falls back to evolution when unavailable", async () => {
+  it("uses the summary LLM for query extraction and retrieval filtering, with evolution as the filter fallback", async () => {
     const root = createTestRoot("mindock-memory-llm-filter-summary-");
     const db = new MemoryDb({
       path: join(root, "memory.sqlite")
@@ -628,11 +974,14 @@ describe("MemoryService / retrieval / query and filtering", () => {
         messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
         options: { operation: string }
       ): Promise<T> {
+        if (options.operation === "capture.summarize") {
+          return acceptedCaptureDecision("Python pytest failure was inspected.", messages) as unknown as T;
+        }
         summaryCalls.push({ operation: options.operation });
         if (summaryFails && options.operation === "retrieval.retrieval.filter.v5") {
           throw new Error("summary filter unavailable");
         }
-        if (options.operation === "retrieval.retrieval.query.extract.v1") {
+        if (options.operation === "retrieval.retrieval.query.extract.v2") {
           return {
             queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
             keywords: []
@@ -725,6 +1074,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
     makeTraceEligibleForL2(db, first.l1MemoryId);
     makeTraceEligibleForL2(db, second.l1MemoryId);
+    await service.runWorkerOnce(20, { priorityCohortOnly: true });
 
     const recall = await service.search({
       namespace: {
@@ -735,9 +1085,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
       query: "python pytest failure"
     });
 
-    expect(summaryCalls.map((call) => call.operation)).toContain("retrieval.retrieval.filter.v5");
-    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.query.extract.v1"]);
-    expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
+    expect(summaryCalls.map((call) => call.operation)).toEqual([
+      "retrieval.retrieval.query.extract.v2",
+      "retrieval.retrieval.filter.v5"
+    ]);
+    expect(evolutionCalls).toEqual([]);
     expect(recall.hits).toHaveLength(1);
 
     summaryConfigured = false;
@@ -753,10 +1105,7 @@ describe("MemoryService / retrieval / query and filtering", () => {
     });
 
     expect(summaryCalls).toHaveLength(0);
-    expect(evolutionCalls.map((call) => call.operation)).toEqual([
-      "retrieval.retrieval.query.extract.v1",
-      "retrieval.retrieval.filter.v5"
-    ]);
+    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.filter.v5"]);
     expect(evolutionCalls.every((call) => call.thinkingMode === "disabled")).toBe(true);
     expect(fallbackRecall.hits).toHaveLength(1);
 
@@ -773,11 +1122,11 @@ describe("MemoryService / retrieval / query and filtering", () => {
       query: "python pytest failure"
     });
 
-    expect(summaryCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.filter.v5"]);
-    expect(evolutionCalls.map((call) => call.operation)).toEqual([
-      "retrieval.retrieval.query.extract.v1",
+    expect(summaryCalls.map((call) => call.operation)).toEqual([
+      "retrieval.retrieval.query.extract.v2",
       "retrieval.retrieval.filter.v5"
     ]);
+    expect(evolutionCalls.map((call) => call.operation)).toEqual(["retrieval.retrieval.filter.v5"]);
     expect(failedSummaryRecall.hits).toHaveLength(1);
     db.close();
   });
@@ -1045,6 +1394,84 @@ function seededScoreTraceMemory(): MemoryRow {
   };
 }
 
+function timeFilteredTraceMemory(input: {
+  id: string;
+  at: string;
+  value: number;
+  agentId: string;
+  summary: string;
+}): MemoryRow {
+  const base = seededScoreTraceMemory();
+  const trace = base.properties.internal_info.trace as Record<string, unknown>;
+  return {
+    ...base,
+    id: input.id,
+    timeline: input.at,
+    userId: "user-time-filter",
+    sessionId: `session-${input.agentId}`,
+    agentId: input.agentId,
+    memoryKey: `trace:${input.id}`,
+    memoryValue: `Summary: ${input.summary}`,
+    info: { summary: input.summary },
+    properties: {
+      ...base.properties,
+      internal_info: {
+        ...base.properties.internal_info,
+        trace: {
+          ...trace,
+          key: `trace:${input.id}`,
+          ts: Date.parse(input.at),
+          summary: input.summary,
+          value: input.value,
+          priority: input.value
+        }
+      }
+    },
+    contentHash: `${input.id}-hash`,
+    createdAt: input.at,
+    updatedAt: input.at
+  };
+}
+
+function createTimeFilterLlm(
+  calls: Array<{ messages: LlmMessage[]; options: LlmCompletionOptions }>,
+  timeFilter: { startAt: string; endAt: string }
+): LlmClient {
+  return {
+    config: {
+      ...DEFAULT_MEMMY_CONFIG.evolution,
+      provider: "host",
+      endpoint: "http://127.0.0.1/time-filter",
+      model: "time-filter"
+    },
+    isConfigured() {
+      return true;
+    },
+    async complete() {
+      return "{}";
+    },
+    async completeJson<T extends Record<string, unknown>>(
+      messages: LlmMessage[],
+      options: LlmCompletionOptions
+    ): Promise<T> {
+      calls.push({ messages, options });
+      return {
+        queryVecText: "",
+        keywords: [],
+        timeFilter
+      } as unknown as T;
+    },
+    status() {
+      return {
+        provider: "host",
+        model: "time-filter",
+        configured: true,
+        remote: true
+      };
+    }
+  };
+}
+
 function createRankedRetrievalFilterLlm(
   calls: Array<{
     messages: Array<{ role: string; content: string }>;
@@ -1069,7 +1496,10 @@ function createRankedRetrievalFilterLlm(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options: { operation: string }
     ): Promise<T> {
-      if (options.operation === "retrieval.retrieval.query.extract.v1") {
+      if (options.operation === "capture.summarize") {
+        return acceptedCaptureDecision("durable retrieval test trace", messages) as unknown as T;
+      }
+      if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
           queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
           keywords: []
@@ -1089,6 +1519,18 @@ function createRankedRetrievalFilterLlm(
         remote: true
       };
     }
+  };
+}
+
+function acceptedCaptureDecision(summary: string, messages: Array<{ role: string; content: string }>) {
+  const payload = messages.find((message) => message.role === "user")?.content ?? "";
+  const userQuote = payload.match(/\bUSER:\s*(.*?)\s+ASSISTANT:/)?.[1]?.trim() ?? "";
+  return {
+    l1: {
+      summary,
+      evidence: [{ quote: userQuote, role: "user", kind: "task_outcome" }]
+    },
+    user: null
   };
 }
 
@@ -1117,7 +1559,7 @@ function createQueryRewriteLlm(
       options: { operation: string; timeoutMs?: number; maxRetries?: number }
     ): Promise<T> {
       calls.push({ messages, options });
-      if (options.operation === "retrieval.retrieval.query.extract.v1") {
+      if (options.operation === "retrieval.retrieval.query.extract.v2") {
         return {
           queryVecText: messages.find((message) => message.role === "user")?.content.replace(/^COMPLETE USER INPUT:\n/, "") ?? "",
           keywords: []

@@ -102,6 +102,111 @@ describe("memory retrieval indexes", () => {
     }
   });
 
+  it("keeps short ascii pattern terms out of raw JSON metadata columns", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-pattern-json-noise-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.memories.insert({
+        ...traceMemory("trace-birthday-party"),
+        memoryValue: [
+          "Summary: planned a birthday party",
+          "User:",
+          "help me plan a birthday party",
+          "Agent:",
+          "balloons and cake are ready."
+        ].join("\n")
+      });
+      repos.memories.insert({
+        ...traceMemory("trace-build-error"),
+        memoryValue: [
+          "Summary: ts build error in web",
+          "User:",
+          "fix my ts build",
+          "Agent:",
+          "done, the build is green."
+        ].join("\n")
+      });
+
+      // Every trace row carries the JSON key "ts" inside properties_json, so a
+      // two-character query token must only match real content columns.
+      const hits = repos.memories.searchPatternIds(["ts"], { memoryLayer: "L1" }, 5)
+        .map((hit) => hit.id);
+      expect(hits).toContain("trace-build-error");
+      expect(hits).not.toContain("trace-birthday-party");
+
+      // CJK bigrams cannot collide with ASCII JSON keys and keep their reach
+      // into metadata values.
+      repos.memories.insert({
+        ...traceMemory("trace-cjk-metadata-only"),
+        memoryValue: "Summary: metadata-only cjk row"
+      });
+      expect(repos.memories.searchPatternIds(["科幻"], { memoryLayer: "L1" }, 5)
+        .map((hit) => hit.id)).toContain("trace-cjk-metadata-only");
+
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("filters memories by an inclusive start and exclusive end creation time", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-memory-time-filter-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      repos.memories.insert(traceMemory("trace-before", "2026-08-03T23:59:59.000Z"));
+      repos.memories.insert(traceMemory("trace-start", "2026-08-04T00:00:00.000Z"));
+      repos.memories.insert(traceMemory("trace-inside", "2026-08-04T12:00:00.000Z"));
+      repos.memories.insert(traceMemory("trace-end", "2026-08-05T00:00:00.000Z"));
+
+      const filter = {
+        memoryLayer: "L1" as const,
+        createdAtGte: "2026-08-04T00:00:00.000Z",
+        createdAtLt: "2026-08-05T00:00:00.000Z"
+      };
+      expect(repos.memories.list(filter, 10).map((memory) => memory.id)).toEqual([
+        "trace-inside",
+        "trace-start"
+      ]);
+      expect(repos.memories.count(filter)).toBe(2);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("indexes Skill retrieval metadata and can refresh a legacy FTS row in place", () => {
+    const root = mkdtempSync(join(tmpdir(), "mindock-skill-retrieval-index-"));
+    try {
+      const db = new MemoryDb({ path: join(root, "memory.sqlite") });
+      const repos = new Repositories(db.db);
+      const memory = retrievalSkillMemory();
+      repos.memories.insert(memory);
+
+      expect(repos.memories.searchFtsIds("\"retrievalneedle\"", { memoryLayer: "Skill" }, 5)
+        .map((hit) => hit.id)).toContain(memory.id);
+      expect(repos.memories.searchFtsIds("\"procedureonlyneedle\"", { memoryLayer: "Skill" }, 5)
+        .map((hit) => hit.id)).not.toContain(memory.id);
+
+      db.db.prepare(`DELETE FROM memories_fts WHERE id = ?`).run(memory.id);
+      db.db.prepare(
+        `INSERT INTO memories_fts (id, identifier, memory_value, tags) VALUES (?, ?, ?, ?)`
+      ).run(memory.id, memory.id, memory.memoryValue, memory.tags.join(" "));
+      expect(repos.memories.searchFtsIds("\"procedureonlyneedle\"", { memoryLayer: "Skill" }, 5)
+        .map((hit) => hit.id)).toContain(memory.id);
+
+      repos.memories.reindexFts(repos.memories.get(memory.id)!);
+      expect(repos.memories.searchFtsIds("\"retrievalneedle\"", { memoryLayer: "Skill" }, 5)
+        .map((hit) => hit.id)).toContain(memory.id);
+      expect(repos.memories.searchFtsIds("\"procedureonlyneedle\"", { memoryLayer: "Skill" }, 5)
+        .map((hit) => hit.id)).not.toContain(memory.id);
+      db.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     { layer: "L1", owner: "trace", fields: ["vec_summary", "vec_action"] },
     { layer: "L2", owner: "policy", fields: ["vec"] },
@@ -264,7 +369,7 @@ describe("memory retrieval indexes", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 });
 
 function traceMemory(
@@ -377,6 +482,43 @@ function authorityMemory(id: string, layer: MemoryLayer): MemoryRow {
     },
     memoryLayer: layer,
     contentHash: `${id}-hash`,
+    version: 1,
+    createdAt: at,
+    updatedAt: at,
+    deletedAt: null
+  };
+}
+
+function retrievalSkillMemory(): MemoryRow {
+  const at = "2026-06-18T00:00:00.000Z";
+  return {
+    id: "skill_retrieval_indexed",
+    timeline: at,
+    userId: "skill-index-user",
+    memoryType: "SkillMemory",
+    status: "activated",
+    visibility: "private",
+    memoryKey: "skill:retrieval-indexed",
+    memoryValue: "# Skill retrieval\n\nprocedureonlyneedle",
+    tags: ["skill", "retrieval"],
+    info: {},
+    properties: {
+      internal_info: {
+        memory_layer: "Skill",
+        memory_kind: "skill",
+        skill: {
+          name: "Skill retrieval",
+          status: "active",
+          invocation_guide: "# Skill retrieval\n\nprocedureonlyneedle",
+          procedure_json: {
+            retrievalBlurb: "retrievalneedle",
+            triggerContext: "Use when retrieval metadata matches."
+          }
+        }
+      }
+    },
+    memoryLayer: "Skill",
+    contentHash: "skill-retrieval-indexed-hash",
     version: 1,
     createdAt: at,
     updatedAt: at,

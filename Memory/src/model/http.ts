@@ -1,6 +1,22 @@
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
+import type { ActualModelContext } from "../contracts/index.js";
 
 const logger = createMemoryLogger("model-http");
+
+export class ModelHttpError extends Error {
+  override readonly name = "ModelHttpError";
+
+  constructor(
+    message: string,
+    readonly provider: string,
+    readonly httpStatus: number,
+    readonly errorCode: string | undefined,
+    readonly detail: string,
+    readonly actualModelContext?: Readonly<ActualModelContext>
+  ) {
+    super(message);
+  }
+}
 
 export async function postJsonWithRetry<T>(
   input: {
@@ -12,6 +28,7 @@ export async function postJsonWithRetry<T>(
     body: unknown;
     timeoutMs: number;
     maxRetries: number;
+    actualModelContext?: Readonly<ActualModelContext>;
   }
 ): Promise<T> {
   let lastError: unknown;
@@ -30,8 +47,16 @@ export async function postJsonWithRetry<T>(
           signal: controller.signal
         });
         const text = await response.text();
-        if (!response.ok) {
-          throw new Error(formatHttpFailure(input.provider, response, text));
+        const failure = parseProviderFailure(text);
+        if (!response.ok || failure.isBusinessError) {
+          throw new ModelHttpError(
+            formatHttpFailure(input.provider, response, text),
+            input.provider,
+            response.status,
+            failure.errorCode,
+            failure.detail,
+            input.actualModelContext
+          );
         }
         return parseJsonResponse<T>(input.provider, response, text);
       } finally {
@@ -39,7 +64,7 @@ export async function postJsonWithRetry<T>(
       }
     } catch (error) {
       lastError = error;
-      if (attempt < input.maxRetries) {
+      if (attempt < input.maxRetries && isRetryableModelRequestError(error)) {
         const delayMs = Math.min(1_000 * Math.pow(2, attempt), 8_000);
         logger.warn("request.retry_scheduled", {
           provider: input.provider,
@@ -52,20 +77,25 @@ export async function postJsonWithRetry<T>(
           ...memoryErrorFields(error)
         });
         await sleep(delayMs);
-      } else {
-        logger.error("request.failed", {
-          provider: input.provider,
-          operation: input.operation,
-          model: input.model,
-          endpoint: safeEndpoint(input.url),
-          attempt: attempt + 1,
-          maxAttempts: input.maxRetries + 1,
-          ...memoryErrorFields(error)
-        });
+        continue;
       }
+      logger.error("request.failed", {
+        provider: input.provider,
+        operation: input.operation,
+        model: input.model,
+        endpoint: safeEndpoint(input.url),
+        attempt: attempt + 1,
+        maxAttempts: input.maxRetries + 1,
+        ...memoryErrorFields(error)
+      });
+      break;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  const normalized = lastError instanceof Error ? lastError : new Error(String(lastError));
+  if (input.actualModelContext && !("actualModelContext" in normalized)) {
+    Object.assign(normalized, { actualModelContext: input.actualModelContext });
+  }
+  throw normalized;
 }
 
 export function trimTrailingSlash(value: string): string {
@@ -78,6 +108,13 @@ export function bearer(apiKey?: string): Record<string, string> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableModelRequestError(error: unknown): boolean {
+  if (error instanceof ModelHttpError) {
+    return error.httpStatus === 408 || error.httpStatus === 429 || error.httpStatus >= 500;
+  }
+  return error instanceof TypeError || (error instanceof Error && error.name === "AbortError");
 }
 
 function clip(value: string, max: number): string {
@@ -113,18 +150,51 @@ function formatHttpFailure(provider: string, response: Response, text: string): 
 }
 
 function extractProviderErrorMessage(text: string): string | undefined {
+  return parseProviderFailure(text).message;
+}
+
+function parseProviderFailure(text: string): {
+  detail: string;
+  errorCode?: string;
+  isBusinessError: boolean;
+  message?: string;
+} {
   try {
     const parsed = JSON.parse(text) as {
-      error?: string | { message?: unknown };
+      code?: unknown;
+      error?: string | { code?: unknown; message?: unknown };
       message?: unknown;
     };
-    if (typeof parsed.error === "string" && parsed.error.trim()) return parsed.error.trim();
-    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string") {
-      return parsed.error.message.trim() || undefined;
+    const rawCode = parsed.error && typeof parsed.error === "object"
+      ? parsed.error.code ?? parsed.code
+      : parsed.code;
+    const errorCode = typeof rawCode === "string" || typeof rawCode === "number"
+      ? String(rawCode)
+      : undefined;
+    const normalizedCode = errorCode?.trim().toLowerCase();
+    const isQuotaCode = normalizedCode === "40309";
+    if (typeof parsed.error === "string" && parsed.error.trim()) {
+      return { detail: parsed.error, errorCode, isBusinessError: true, message: parsed.error.trim() };
     }
-    return typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : undefined;
+    if (parsed.error && typeof parsed.error === "object" && typeof parsed.error.message === "string") {
+      return {
+        detail: parsed.error.message,
+        errorCode,
+        isBusinessError: true,
+        message: parsed.error.message.trim() || undefined
+      };
+    }
+    if (typeof parsed.message === "string" && parsed.message.trim()) {
+      return {
+        detail: parsed.message,
+        errorCode,
+        isBusinessError: isQuotaCode,
+        message: parsed.message.trim()
+      };
+    }
+    return { detail: text, errorCode, isBusinessError: isQuotaCode };
   } catch {
-    return undefined;
+    return { detail: text, isBusinessError: false };
   }
 }
 

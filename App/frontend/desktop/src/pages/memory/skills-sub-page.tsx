@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { GetMemoryOutput, MemoryApiLog, MemoryApiLogToolName, PanelItemsOutput } from "@memmy/local-api-contracts";
 import type { MemoryRuntimeClient } from "../../api/memory-runtime-client.js";
+import { formatUserDateTime } from "../../lib/user-time-zone.js";
 import {
   buildMemoryUiDeletedEvent,
   buildMemoryUiDetailOpenedEvent,
@@ -15,6 +16,12 @@ import { MemoryDrawerDeleteAction } from "./memory-delete-action.js";
 import { toMemoryDetailErrorMessage } from "./memory-detail-error.js";
 import { cleanMemoryBody, cleanMemoryText, drawerEyebrow } from "./memory-display.js";
 import { displayMemoryId } from "./memory-id.js";
+import {
+  MemoryReferenceTags,
+  type MemoryReferenceOpenRequest,
+  type MemoryReferencePage,
+  type OpenMemoryReference
+} from "./memory-reference-tags.js";
 import {
   clearMemoryPanelCache,
   memoryPanelCacheKey,
@@ -60,12 +67,10 @@ interface SkillView {
   createdAt: string;
   updatedAt: string;
   body: string;
-  summary: string;
-  invocationGuide: string;
+  usageGuide: string;
   decisionGuidance: SkillDecisionGuidance;
   evidenceAnchors: string[];
   sourcePolicyIds: string[];
-  sourceWorldModelIds: string[];
   eta?: number;
   support?: number;
   gain?: number;
@@ -77,6 +82,8 @@ interface SkillView {
 
 export interface SkillsSubPageProps {
   client: MemoryRuntimeClient | null;
+  openRequest?: MemoryReferenceOpenRequest;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 export function loadSkillsData(client: MemoryRuntimeClient, query = ""): Promise<PanelItemsOutput> {
@@ -260,9 +267,17 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.client, t, demoEnabled]);
 
+  useEffect(() => {
+    if (props.openRequest) {
+      openSkill(props.openRequest.id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.openRequest?.requestId]);
+
   return (
     <SkillsSubPageView
       state={state.status === "ready" ? { ...state, detail } : state}
+      detail={detail}
       selectedSkillId={selectedSkillId}
       query={query}
       onQueryChange={changeQuery}
@@ -281,12 +296,14 @@ export function SkillsSubPage(props: SkillsSubPageProps) {
       onOpenSkill={openSkill}
       onDeleteSkill={deleteSkill}
       onCloseSkill={closeSkill}
+      onOpenMemoryReference={props.onOpenMemoryReference}
     />
   );
 }
 
 export interface SkillsSubPageViewProps {
   state: RemoteData<PanelItemsOutput> | ({ status: "ready"; data: PanelItemsOutput; detail: SkillDetailState });
+  detail?: SkillDetailState;
   selectedSkillId?: string | null;
   query: string;
   onQueryChange: (value: string) => void;
@@ -296,6 +313,7 @@ export interface SkillsSubPageViewProps {
   onOpenSkill: (skillId: string) => void;
   onDeleteSkill: (id: string) => Promise<void>;
   onCloseSkill: () => void;
+  onOpenMemoryReference: OpenMemoryReference;
 }
 
 export function SkillsSubPageView(props: SkillsSubPageViewProps) {
@@ -360,9 +378,14 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
             ))}
           </div>
           <MemoryPagination data={props.state.data} onPageChange={props.onPageChange} />
-          <SkillDrawer detail={"detail" in props.state ? props.state.detail : null} onClose={props.onCloseSkill} onDelete={props.onDeleteSkill} />
         </>
       )}
+      <SkillDrawer
+        detail={props.detail ?? ("detail" in props.state ? props.state.detail : null)}
+        onClose={props.onCloseSkill}
+        onDelete={props.onDeleteSkill}
+        onOpenMemoryReference={props.onOpenMemoryReference}
+      />
     </section>
   );
 }
@@ -374,7 +397,12 @@ export function SkillsSubPageView(props: SkillsSubPageViewProps) {
  * @param props.onClose The close callback.
  * @returns The skill detail node.
  */
-function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onDelete: (id: string) => Promise<void> }) {
+function SkillDrawer(props: {
+  detail: SkillDetailState;
+  onClose: () => void;
+  onDelete: (id: string) => Promise<void>;
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
 
   if (!props.detail) {
@@ -406,7 +434,13 @@ function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onD
         <div className="memory-drawer__body">
           {props.detail.status === "loading" && <MemoryStateBox message={t("memory.skills.detailLoading")} />}
           {props.detail.status === "error" && <MemoryStateBox message={props.detail.message} tone="error" />}
-          {props.detail.status === "ready" && <SkillDetail detail={props.detail.data.detail} timeline={props.detail.data.timeline} />}
+          {props.detail.status === "ready" && (
+            <SkillDetail
+              detail={props.detail.data.detail}
+              timeline={props.detail.data.timeline}
+              onOpenMemoryReference={props.onOpenMemoryReference}
+            />
+          )}
         </div>
         {readyDetail && <MemoryDrawerDeleteAction onDelete={() => props.onDelete(readyDetail.detail.item.id)} />}
       </aside>
@@ -414,7 +448,11 @@ function SkillDrawer(props: { detail: SkillDetailState; onClose: () => void; onD
   );
 }
 
-function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEntry[] }) {
+function SkillDetail(props: {
+  detail: GetMemoryOutput;
+  timeline: SkillTimelineEntry[];
+  onOpenMemoryReference: OpenMemoryReference;
+}) {
   const { t } = useTranslation();
   const skill = skillFromDetail(props.detail);
   const hasDecisionGuidance = skill.decisionGuidance.preference.length > 0 || skill.decisionGuidance.antiPattern.length > 0;
@@ -443,7 +481,7 @@ function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEn
       </section>
 
       <SkillTimelineSection entries={props.timeline} />
-      <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.invocationGuide || skill.summary} />
+      {skill.usageGuide && <DetailTextSection title={t("memory.skills.invocationGuide")} body={skill.usageGuide} />}
       <DetailTextSection title={t("memory.skills.body")} body={skill.body} />
 
       {hasDecisionGuidance && (
@@ -462,9 +500,16 @@ function SkillDetail(props: { detail: GetMemoryOutput; timeline: SkillTimelineEn
         title={t("memory.skills.sourceExperience")}
         ids={skill.sourcePolicyIds.length > 0 ? skill.sourcePolicyIds : props.detail.item.sourceMemoryIds}
         empty={t("memory.skills.noSourceExperience")}
+        fallbackPage="policies"
+        onOpen={props.onOpenMemoryReference}
       />
-      <LinkedIdsSection title={t("memory.skills.sourceWorldModels")} ids={skill.sourceWorldModelIds} empty={t("memory.skills.noSourceWorldModels")} />
-      <LinkedIdsSection title={t("memory.skills.evidenceAnchors")} ids={skill.evidenceAnchors} empty={t("memory.skills.noEvidenceAnchors")} />
+      <LinkedIdsSection
+        title={t("memory.skills.evidenceAnchors")}
+        ids={skill.evidenceAnchors}
+        empty={t("memory.skills.noEvidenceAnchors")}
+        fallbackPage="memories"
+        onOpen={props.onOpenMemoryReference}
+      />
     </>
   );
 }
@@ -500,20 +545,22 @@ function GuidanceList(props: { title: string; entries: string[]; tone: "prefer" 
   );
 }
 
-function LinkedIdsSection(props: { title: string; ids: string[]; empty: string }) {
-  const ids = uniqueStrings(props.ids);
+function LinkedIdsSection(props: {
+  title: string;
+  ids: string[];
+  empty: string;
+  fallbackPage: MemoryReferencePage;
+  onOpen: OpenMemoryReference;
+}) {
+  const hasIds = props.ids.some(Boolean);
 
   return (
     <section className="memory-detail-card">
       <h5 className="memory-detail-card__label">{props.title}</h5>
-      {ids.length === 0 ? (
+      {!hasIds ? (
         <div className="memory-policy-empty">{props.empty}</div>
       ) : (
-        <div className="memory-policy-id-list">
-          {ids.map((id) => (
-            <span key={id} className="memory-policy-id">{compactId(id)}</span>
-          ))}
-        </div>
+        <MemoryReferenceTags ids={props.ids} fallbackPage={props.fallbackPage} onOpen={props.onOpen} />
       )}
     </section>
   );
@@ -542,7 +589,9 @@ function SkillTimelineSection(props: { entries: SkillTimelineEntry[] }) {
                   <span className="memory-skill-timeline__time">{formatDateTime(entry.ts)}</span>
                 </div>
                 {entry.summary && <div className="memory-skill-timeline__summary">{entry.summary}</div>}
-                <div className="memory-skill-timeline__meta">{t("memory.skills.timeline.duration", { duration: entry.durationMs })}</div>
+                {skillTimelineShowsDuration(entry) && (
+                  <div className="memory-skill-timeline__meta">{t("memory.skills.timeline.duration", { duration: entry.durationMs })}</div>
+                )}
               </div>
             </div>
           ))}
@@ -642,6 +691,10 @@ function skillTimelineTone(entry: SkillTimelineEntry): SkillTimelineTone {
   return "succeeded";
 }
 
+function skillTimelineShowsDuration(entry: SkillTimelineEntry): boolean {
+  return entry.kind === "skill.crystallized" || entry.kind === "skill.rebuilt" || entry.kind === "skill_generate";
+}
+
 function skillTimelineLabel(kind: string, phase: string | undefined, t: (key: MessageKey) => string): string {
   switch (kind) {
     case "skill.crystallized":
@@ -676,10 +729,28 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
   const properties = recordValue(metadata.properties);
   const info = recordValue(metadata.info);
   const internalInfo = recordValue(properties.internal_info);
+  const layerSkill = recordValue(detail.item.skill);
   const skill = recordValue(firstDefined(internalInfo.skill, metadata.skill, properties.skill));
+  const procedure = recordValue(firstDefined(skill.procedureJson, skill.procedure_json, internalInfo.procedureJson, internalInfo.procedure_json));
   const decisionGuidance = readDecisionGuidance(
     firstDefined(skill.decisionGuidance, skill.decision_guidance, internalInfo.decisionGuidance, internalInfo.decision_guidance)
   );
+  const body = cleanMemoryBody(detail.item.body);
+  const shortUsageGuide = uniqueStrings([
+    firstString(layerSkill.retrievalBlurb, layerSkill.retrieval_blurb, procedure.retrievalBlurb, procedure.retrieval_blurb) ?? "",
+    firstString(layerSkill.triggerContext, layerSkill.trigger_context, procedure.triggerContext, procedure.trigger_context) ?? ""
+  ]).join("\n\n");
+  const parsedUsageGuide = parseMarkdownSection(detail.item.body, ["When to use", "\u9002\u7528\u573a\u666f", "\u8c03\u7528\u65f6\u673a"]);
+  const legacyInvocationGuide = firstString(
+    layerSkill.invocationGuide,
+    skill.invocationGuide,
+    skill.invocation_guide,
+    internalInfo.invocationGuide,
+    internalInfo.invocation_guide
+  );
+  const distinctLegacyGuide = legacyInvocationGuide && cleanMemoryBody(legacyInvocationGuide) !== body
+    ? legacyInvocationGuide
+    : "";
 
   return {
     title: displaySkillTitle(detail.item, firstString(skill.title, internalInfo.title)),
@@ -687,19 +758,11 @@ function skillFromDetail(detail: GetMemoryOutput): SkillView {
     source: firstString(metadata.source, internalInfo.source),
     createdAt: detail.item.createdAt,
     updatedAt: detail.item.updatedAt,
-    body: cleanMemoryBody(detail.item.body),
-    summary: cleanMemoryText(detail.item.summary),
-    invocationGuide: firstString(
-      skill.invocationGuide,
-      skill.invocation_guide,
-      internalInfo.invocationGuide,
-      internalInfo.invocation_guide,
-      parseMarkdownSection(detail.item.body, ["Invocation", "\u8c03\u7528\u6307\u5357", "\u8c03\u7528"])
-    ) ?? "",
+    body,
+    usageGuide: shortUsageGuide || parsedUsageGuide || distinctLegacyGuide,
     decisionGuidance,
     evidenceAnchors: readEvidenceAnchors(firstDefined(skill.evidenceAnchors, skill.evidence_anchors, internalInfo.evidenceAnchors, internalInfo.evidence_anchors)),
     sourcePolicyIds: stringArray(firstDefined(skill.sourcePolicyIds, skill.source_policy_ids, internalInfo.sourcePolicyIds, internalInfo.source_policy_ids)),
-    sourceWorldModelIds: stringArray(firstDefined(skill.sourceWorldModelIds, skill.source_world_model_ids, internalInfo.sourceWorldModelIds, internalInfo.source_world_model_ids)),
     eta: numberValue(firstDefined(skill.eta, internalInfo.eta, info.eta)),
     support: numberValue(firstDefined(skill.support, internalInfo.support, info.support)),
     gain: numberValue(firstDefined(skill.gain, internalInfo.gain, info.gain)),
@@ -896,12 +959,5 @@ function formatDateTime(value: string | undefined): string {
     return "-";
   }
 
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
-}
-
-function compactId(id: string): string {
-  const parts = id.split("::");
-  const value = parts[parts.length - 1] ?? id;
-  return value.length > 22 ? `${value.slice(0, 18)}...` : value;
+  return formatUserDateTime(value);
 }

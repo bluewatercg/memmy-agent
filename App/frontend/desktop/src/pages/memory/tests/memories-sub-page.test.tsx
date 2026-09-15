@@ -71,9 +71,12 @@ describe("MemoriesSubPage", () => {
       "OpenCode",
       "OpenClaw",
       "Hermes",
+      "DeepSeek Harness",
       "WorkBuddy",
       "OMP",
-      "FreeBuff"
+      "FreeBuff",
+      "Pi",
+      "QwenWork"
     ]);
     expect(agentSourceDisplayName("MEMMY_AGENT")).toBe("Memmy");
     expect(agentSourceDisplayName("claude-code")).toBe("Claude Code");
@@ -205,8 +208,10 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("摘要");
     expect(html).toContain("阅读策略、指标和组合模型相关文件。");
     expect(html).toContain("相关步骤");
-    expect(html).toContain("工具调用 · rg");
-    expect(html).toContain("工具调用 · npm_test");
+    expect(html).not.toContain("工具调用 · rg");
+    expect(html).not.toContain("工具调用 · npm_test");
+    expect(html).toContain('memory-tool-card__name">rg');
+    expect(html).toContain('memory-tool-card__name">npm_test');
     expect(html).not.toContain("正文");
     expect(html).not.toContain("Goal:");
     expect(html).not.toContain("Summary:");
@@ -342,12 +347,82 @@ describe("MemoriesSubPage", () => {
     });
 
     expect(html).toContain("处理失败");
-    expect(html).toContain("摘要总结");
+    expect(html).toContain("这条记忆处理失败");
+    expect(html).not.toContain("当前模型 Token 余额不足");
     expect(html).toContain("摘要模型未配置");
+    expect(html).toContain("收起详情");
+    expect(html).toContain('aria-expanded="true"');
+    expect(html).not.toContain("失败原因");
+    expect(html).not.toContain("失败时间");
     expect(html).toContain("重试");
     expect(html).toContain("检查模型设置");
     expect(html).toContain("memory-pill--failed");
     expect(html).not.toContain("已尝试次数");
+  });
+
+  it("收到 40309 错误码时提示模型 Token 余额不足", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "failed" as const,
+      stage: "summary" as const,
+      activeJobId: null,
+      attemptCount: 3,
+      manualRetryCount: 0,
+      retryAction: "open_settings" as const,
+      errorCode: "40309",
+      errorMessage: "account quota exhausted",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    });
+
+    expect(html).toContain("当前模型 Token 余额不足，记忆处理失败，请更换模型后重试");
+    expect(html).toContain("account quota exhausted");
+    expect(html).toContain("收起详情");
+    expect(html).not.toContain("这条记忆处理失败");
+  });
+
+  it("确有后台重试任务时提示稍后自动重试", () => {
+    const processing = {
+      memoryId: memoryListItemFixture.id,
+      state: "summary_pending" as const,
+      stage: "summary" as const,
+      activeJobId: "summary-retry",
+      attemptCount: 1,
+      manualRetryCount: 0,
+      retryAction: "retry" as const,
+      errorCode: "transient_provider_error",
+      errorMessage: "temporary provider failure",
+      failedAt: "2026-06-03T09:30:00.000Z",
+      autoRetryScheduled: true,
+      updatedAt: "2026-06-03T09:30:00.000Z"
+    };
+    const html = renderMemories({
+      status: "ready",
+      data: panelItemsOutput([{ ...memoryListItemFixture, processing }]),
+      detail: {
+        status: "ready",
+        data: {
+          ...memoryDetailFixture,
+          item: { ...memoryDetailFixture.item, processing }
+        }
+      }
+    });
+
+    expect(html).toContain("记忆处理失败，稍后将自动重试");
+    expect(html).toContain("temporary provider failure");
+    expect(html).toContain("收起详情");
+    expect(html).not.toContain("正在重试");
   });
 
   it("重试处理中持续展示上次失败原因", () => {
@@ -380,9 +455,10 @@ describe("MemoriesSubPage", () => {
     });
 
     expect(html).toContain("正在重试");
-    expect(html).toContain("上次失败原因");
     expect(html).toContain("摘要模型未配置");
-    expect(html).toContain("上次失败时间");
+    expect(html).toContain("收起详情");
+    expect(html).not.toContain("上次失败原因");
+    expect(html).not.toContain("上次失败时间");
     expect(html).not.toContain("已尝试次数");
     expect(html).not.toContain("检查模型设置");
     expect(html).not.toContain("立即重试");
@@ -527,7 +603,7 @@ describe("MemoriesSubPage", () => {
     });
 
     const firstThinkingIndex = html.indexOf("先调用系统命令检查内存。");
-    const toolIndex = html.indexOf("工具调用 · exec");
+    const toolIndex = html.indexOf('memory-tool-card__name">exec');
     const secondThinkingIndex = html.indexOf("工具返回 16 GB 后确认答案。");
     const assistantIndex = html.indexOf("这台电脑的内存是 16 GB。");
     expect(firstThinkingIndex).toBeGreaterThan(-1);
@@ -635,8 +711,9 @@ describe("MemoriesSubPage", () => {
     expect(html).toContain("用户");
     expect(html).not.toContain("用户 Query");
     expect(html).toContain("<strong>记忆管理</strong>");
-    expect(html).toContain("工具调用 · read_file");
-    expect(html).toContain("read_file");
+    expect(html).not.toContain("工具调用 · read_file");
+    expect(html.match(/read_file/g)?.length).toBe(1);
+    expect(html).toContain('memory-tool-card__name">read_file');
     expect(html).toContain("输入");
     expect(html).toContain("输出");
     expect(html).toContain("读取 MemoryPage 页面结构。");

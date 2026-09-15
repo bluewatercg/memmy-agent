@@ -1,9 +1,14 @@
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { EmbeddingConfig } from "../config/index.js";
 import { createMemoryLogger, memoryErrorFields } from "../logging/logger.js";
 import { stableHash } from "../utils/id.js";
 import { bearer, postJsonWithRetry, trimTrailingSlash } from "./http.js";
+import {
+  aggregateOpenAiEmbeddingVectors,
+  planOpenAiEmbeddingInputs
+} from "./openai-embedding-inputs.js";
 import { HttpByokTokenUsageRecorder, extractModelTokenUsage } from "./token-usage.js";
 import type { Embedder, ModelStatus } from "./types.js";
 
@@ -33,10 +38,16 @@ type FeatureExtractor = (text: string, options?: Record<string, unknown>) => Pro
 type PipelineFn = (task: string, model: string, options?: Record<string, unknown>) => Promise<unknown>;
 interface TransformersModule {
   env: {
+    allowLocalModels?: boolean;
+    allowRemoteModels?: boolean;
     cacheDir: string | null;
+    localModelPath?: string;
   };
   pipeline: PipelineFn;
 }
+
+const DEFAULT_LOCAL_EMBEDDING_MODEL = "Xenova/all-MiniLM-L6-v2";
+const EMBEDDED_EMBEDDING_MODEL_ROOT = "embedding-models";
 
 let localExtractorPromise: Promise<FeatureExtractor> | null = null;
 let localExtractorModel: string | null = null;
@@ -66,6 +77,12 @@ class HttpEmbedder implements Embedder {
   }
 
   async embed(texts: string[], role: "query" | "document" = "document"): Promise<number[][]> {
+    if (this.config.selectionError) {
+      throw Object.assign(new Error("Assigned embedding model is unavailable"), {
+        code: this.config.selectionError,
+        actualModelContext: this.config.actualModelContext
+      });
+    }
     if (texts.length === 0) return [];
     const out = new Array<number[]>(texts.length);
     const missing: Array<{ text: string; index: number }> = [];
@@ -151,7 +168,7 @@ class HttpEmbedder implements Embedder {
     };
     logger.debug("request.started", fields);
     try {
-      const model = this.config.model || "Xenova/all-MiniLM-L6-v2";
+      const model = this.config.model || DEFAULT_LOCAL_EMBEDDING_MODEL;
       const extractor = await ensureLocalExtractor(model);
       const vectors: number[][] = [];
       for (const text of texts) {
@@ -203,20 +220,48 @@ class HttpEmbedder implements Embedder {
     if (!this.config.apiKey && !this.config.endpoint) {
       throw new Error(`${provider} embedding provider requires apiKey or endpoint`);
     }
+    const plan = provider === "openai_compatible"
+      ? planOpenAiEmbeddingInputs(texts, this.config.model, this.config.maxInputTokens)
+      : null;
+    if (!plan) return this.requestOpenAiShape(texts, provider, url, role);
+
+    const chunkVectors: number[][] = [];
+    for (const batch of plan.batches) {
+      chunkVectors.push(...await this.requestOpenAiShape(
+        batch.map((chunk) => chunk.input),
+        provider,
+        url,
+        role
+      ));
+    }
+    return aggregateOpenAiEmbeddingVectors(plan, chunkVectors);
+  }
+
+  private async requestOpenAiShape(
+    inputs: Array<string | number[]>,
+    provider: string,
+    url: string,
+    role: "query" | "document"
+  ): Promise<number[][]> {
     const response = await postJsonWithRetry<OpenAiEmbeddingResponse>({
-      provider,
+      actualModelContext: this.config.actualModelContext,
+      provider: this.config.sourceProvider ?? provider,
       operation: `embedding.${role}`,
       model: this.config.model,
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model,
-        input: texts
+        input: inputs,
+        ...(this.config.extraBody ?? {})
       }
     });
-    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), texts.length);
+    const vectors = validateVectors(provider, response.data?.map((row) => row.embedding), inputs.length);
     this.recordEmbeddingUsage(response, provider, role);
     return vectors;
   }
@@ -229,17 +274,20 @@ class HttpEmbedder implements Embedder {
     const model = this.config.model || "text-embedding-004";
     const url = `${base}/models/${encodeURIComponent(model)}:batchEmbedContents?key=${encodeURIComponent(this.config.apiKey)}`;
     const response = await postJsonWithRetry<GeminiEmbeddingResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "gemini",
       operation: `embedding.${role}`,
       model,
       url,
+      headers: this.config.extraHeaders,
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         requests: texts.map((text) => ({
           model: `models/${model}`,
           content: { parts: [{ text }] }
-        }))
+        })),
+        ...(this.config.extraBody ?? {})
       }
     });
     const vectors = validateVectors("gemini", response.embeddings?.map((row) => row.values), texts.length);
@@ -253,18 +301,23 @@ class HttpEmbedder implements Embedder {
     }
     const url = this.config.endpoint || "https://api.cohere.com/v2/embed";
     const response = await postJsonWithRetry<CohereEmbeddingResponse>({
+      actualModelContext: this.config.actualModelContext,
       provider: "cohere",
       operation: `embedding.${role}`,
       model: this.config.model || "embed-v4.0",
       url,
-      headers: bearer(this.config.apiKey),
+      headers: {
+        ...bearer(this.config.apiKey),
+        ...(this.config.extraHeaders ?? {})
+      },
       timeoutMs: this.config.timeoutMs,
       maxRetries: this.config.maxRetries,
       body: {
         model: this.config.model || "embed-v4.0",
         texts,
         input_type: role === "query" ? "search_query" : "search_document",
-        embedding_types: ["float"]
+        embedding_types: ["float"],
+        ...(this.config.extraBody ?? {})
       }
     });
     const vectors = Array.isArray(response.embeddings)
@@ -292,6 +345,7 @@ class HttpEmbedder implements Embedder {
       provider,
       model: this.config.model,
       endpoint: this.config.endpoint,
+      actualModelContext: this.config.actualModelContext,
       usage: extractModelTokenUsage(response),
       metadata: { role }
     });
@@ -307,16 +361,47 @@ async function ensureLocalExtractor(model: string): Promise<FeatureExtractor> {
     const mod = await import("@huggingface/transformers");
     const transformers = mod as unknown as TransformersModule;
     transformers.env.cacheDir = join(homedir(), ".memmy", "memory-service", "model-cache");
-    const pipeline = transformers.pipeline;
-    return await pipeline("feature-extraction", model, {
+    transformers.env.allowLocalModels = true;
+    transformers.env.allowRemoteModels = true;
+    const pipelineOptions: Record<string, unknown> = {
       dtype: "q8",
       device: "cpu"
-    }) as FeatureExtractor;
+    };
+    const embeddedModelRoot = resolveEmbeddedEmbeddingModelRoot(model);
+    if (embeddedModelRoot) {
+      transformers.env.localModelPath = embeddedModelRoot;
+      transformers.env.allowRemoteModels = false;
+      pipelineOptions.local_files_only = true;
+    }
+    const pipeline = transformers.pipeline;
+    return await pipeline("feature-extraction", model, pipelineOptions) as FeatureExtractor;
   })().catch((error) => {
     localExtractorPromise = null;
     throw error;
   });
   return localExtractorPromise;
+}
+
+function resolveEmbeddedEmbeddingModelRoot(model: string): string | null {
+  for (const root of candidateEmbeddedEmbeddingModelRoots()) {
+    if (existsSync(join(root, model))) {
+      return root;
+    }
+  }
+  return null;
+}
+
+function candidateEmbeddedEmbeddingModelRoots(): string[] {
+  const roots: string[] = [];
+  const explicitRoot = process.env.MEMMY_EMBEDDING_MODEL_ROOT?.trim();
+  if (explicitRoot) {
+    roots.push(explicitRoot);
+  }
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath;
+  if (resourcesPath) {
+    roots.push(join(resourcesPath, EMBEDDED_EMBEDDING_MODEL_ROOT));
+  }
+  return roots;
 }
 
 function cohereUsagePayload(response: CohereEmbeddingResponse): unknown {

@@ -1212,6 +1212,24 @@ describe("plugin algorithm parity helpers", () => {
     expect(draft.status).toBe("active");
   });
 
+  it("requires two successful episodes when the activation support threshold is three", () => {
+    const oneSuccess = [
+      trace("trace-success", "episode-success", 0.8, [1, 0]),
+      trace("trace-neutral-a", "episode-neutral-a", 0, [1, 0]),
+      trace("trace-neutral-b", "episode-neutral-b", 0, [1, 0])
+    ];
+    const draft = buildPolicyDraft({
+      signature: "python|pytest|_",
+      evidenceTraces: oneSuccess,
+      allTraces: oneSuccess,
+      minSupport: 3,
+      minGain: -1
+    });
+
+    expect(draft.support).toBe(3);
+    expect(draft.status).toBe("candidate");
+  });
+
   it("counts L2 support by distinct positive evidence episode", () => {
     const evidence = [
       trace("trace-one", "episode-shared", 0.8, [1, 0]),
@@ -1558,6 +1576,35 @@ describe("plugin algorithm parity helpers", () => {
     expect(withoutBypass.hits.map((hit) => hit.id)).not.toContain("trace-ranker-multi-channel");
   });
 
+  it("drops recall hits below the absolute final-score floor", () => {
+    const weak = traceMemory("trace-below-score-floor", "episode-below-score-floor", "generic assistant capability", 0, [0.1, 0.994987]);
+    const input = {
+      query: "build a thunder game",
+      queryVector: [1, 0],
+      memories: [weak],
+      layers: ["L1" as const],
+      limit: 5,
+      mode: "search" as const,
+      now: Date.parse("2026-05-29T00:00:00.000Z"),
+      config: {
+        minTraceSim: 0,
+        relativeThresholdFloor: 0,
+        smartSeed: false,
+        minRecallScore: 0
+      }
+    };
+    const withoutFloor = retrievePluginMemories(input);
+    const withFloor = retrievePluginMemories({
+      ...input,
+      config: { ...input.config, minRecallScore: 0.2 }
+    });
+
+    expect(withoutFloor.hits).toEqual([expect.objectContaining({ id: weak.id })]);
+    expect(withoutFloor.hits[0]!.score).toBeLessThan(0.2);
+    expect(withFloor.hits).toEqual([]);
+    expect(withFloor.debug.droppedByThreshold).toBeGreaterThan(0);
+  });
+
   it("uses plugin smart-seed MMR when choosing each tier seed", () => {
     const result = retrievePluginMemories({
       query: "specialterm",
@@ -1652,6 +1699,55 @@ describe("plugin algorithm parity helpers", () => {
     expect(result.hits.map((hit) => hit.id)).toEqual(["policy-active"]);
   });
 
+  it("filters malformed failure-avoidance policies whose preference repeats the anti-pattern", () => {
+    const malformed = policyMemory(
+      "policy_5608950f4a75b91d2db4",
+      "黄金与比特币分析纠错",
+      "active",
+      [1, 0]
+    );
+    const malformedPolicy = malformed.properties.internal_info.policy as Record<string, unknown>;
+    Object.assign(malformedPolicy, {
+      experience_type: "failure_avoidance",
+      evidence_polarity: "negative",
+      skill_eligible: false,
+      policy_confidence: 1,
+      decision_guidance: {
+        preference: ["我说的是黄金，不是比特币"],
+        anti_pattern: ["我说的是黄金，不是比特币"]
+      }
+    });
+    const actionable = policyMemory(
+      "policy-actionable-correction",
+      "TLS port correction",
+      "active",
+      [1, 0]
+    );
+    const actionablePolicy = actionable.properties.internal_info.policy as Record<string, unknown>;
+    Object.assign(actionablePolicy, {
+      experience_type: "failure_avoidance",
+      evidence_polarity: "negative",
+      skill_eligible: false,
+      policy_confidence: 0.75,
+      decision_guidance: {
+        preference: ["Use port 443 and verify TLS before reporting completion"],
+        anti_pattern: ["Configure port 80 and skip TLS verification"]
+      }
+    });
+
+    const result = retrievePluginMemories({
+      query: "TLS port correction 黄金 比特币",
+      queryVector: [1, 0],
+      memories: [malformed, actionable],
+      layers: ["L2"],
+      limit: 5,
+      mode: "search",
+      now: Date.parse("2026-05-29T00:00:00.000Z")
+    });
+
+    expect(result.hits.map((hit) => hit.id)).toEqual(["policy-actionable-correction"]);
+  });
+
   it("uses plugin Tier-2 experience salience for feedback-derived L2 policies", () => {
     const plainPolicy = policyMemory("policy-plain", "python pytest policy", "active", [1, 0]);
     const feedbackPolicy = policyMemory("policy-feedback", "python pytest policy", "active", [1, 0]);
@@ -1743,6 +1839,7 @@ function policy(id: string, title: string, vec: number[], gain: number): PolicyM
       preference: [],
       antiPattern: []
     },
+    freshnessClass: "stable",
     salience: gain,
     vec,
     updatedAtMs: 0
